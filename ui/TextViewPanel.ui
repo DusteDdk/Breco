@@ -1,0 +1,126 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>TextViewPanel</class>
+ <widget class="QWidget" name="TextViewPanel">
+  <layout class="QVBoxLayout" name="textViewPanelLayout">
+   <property name="leftMargin">
+    <number>0</number>
+   </property>
+   <property name="topMargin">
+    <number>0</number>
+   </property>
+   <property name="rightMargin">
+    <number>0</number>
+   </property>
+   <property name="bottomMargin">
+    <number>0</number>
+   </property>
+   <item>
+    <widget class="QWidget" name="textModeRowWidget" native="true">
+     <layout class="QHBoxLayout" name="textModeRowLayout">
+      <item>
+       <widget class="QComboBox" name="textModeCombo"/>
+      </item>
+      <item>
+       <widget class="QRadioButton" name="stringModeRadioButton">
+        <property name="text">
+         <string>StringMode</string>
+        </property>
+        <property name="checked">
+         <bool>true</bool>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <widget class="QRadioButton" name="byteModeRadioButton">
+        <property name="text">
+         <string>ByteMode</string>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <widget class="QCheckBox" name="wrapModeCheckBox">
+        <property name="text">
+         <string>Wrap</string>
+        </property>
+        <property name="checked">
+         <bool>true</bool>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <widget class="QComboBox" name="newlineModeComboBox">
+        <item>
+         <property name="text">
+          <string>Newline: None</string>
+         </property>
+        </item>
+        <item>
+         <property name="text">
+          <string>Newline: NL</string>
+         </property>
+        </item>
+        <item>
+         <property name="text">
+          <string>Newline: CRLF</string>
+         </property>
+        </item>
+        <item>
+         <property name="text">
+          <string>Newline: NULL</string>
+         </property>
+        </item>
+        <item>
+         <property name="text">
+          <string>Newline: NL | CR | NULL</string>
+         </property>
+        </item>
+       </widget>
+      </item>
+      <item>
+       <widget class="QCheckBox" name="monospaceCheckBox">
+        <property name="text">
+         <string>Monospace</string>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <widget class="QComboBox" name="bytesPerLineComboBox">
+        <item>
+         <property name="text">
+          <string>Bytes/Line: 8</string>
+         </property>
+        </item>
+        <item>
+         <property name="text">
+          <string>Bytes/Line: 16</string>
+         </property>
+        </item>
+        <item>
+         <property name="text">
+          <string>Bytes/Line: 32</string>
+         </property>
+        </item>
+        <item>
+         <property name="text">
+          <string>Bytes/Line: 64</string>
+         </property>
+        </item>
+        <item>
+         <property name="text">
+          <string>Bytes/Line: Auto</string>
+         </property>
+        </item>
+       </widget>
+      </item>
+     </layout>
+    </widget>
+   </item>
+   <item>
+    <widget class="QWidget" name="textViewContainer" native="true"/>
+   </item>
+  </layout>
+ </widget>
+ <resources/>
+ <connections/>
+</ui>

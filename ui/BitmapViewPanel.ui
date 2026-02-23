@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>BitmapViewPanel</class>
+ <widget class="QWidget" name="BitmapViewPanel">
+  <layout class="QVBoxLayout" name="bitmapViewPanelLayout">
+   <property name="leftMargin">
+    <number>0</number>
+   </property>
+   <property name="topMargin">
+    <number>0</number>
+   </property>
+   <property name="rightMargin">
+    <number>0</number>
+   </property>
+   <property name="bottomMargin">
+    <number>0</number>
+   </property>
+   <item>
+    <widget class="QWidget" name="bitmapModeRowWidget" native="true">
+     <layout class="QHBoxLayout" name="bitmapModeRowLayout">
+      <item>
+       <widget class="QComboBox" name="bitmapModeCombo"/>
+      </item>
+      <item>
+       <widget class="QCheckBox" name="resultOverlayCheckBox">
+        <property name="text">
+         <string>Result</string>
+        </property>
+        <property name="checked">
+         <bool>true</bool>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <widget class="QToolButton" name="bitmapZoomOutButton">
+        <property name="text">
+         <string>-</string>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <widget class="QLabel" name="bitmapZoomLabel">
+        <property name="text">
+         <string>1x</string>
+        </property>
+        <property name="alignment">
+         <set>Qt::AlignCenter</set>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <widget class="QToolButton" name="bitmapZoomInButton">
+        <property name="text">
+         <string>+</string>
+        </property>
+       </widget>
+      </item>
+     </layout>
+    </widget>
+   </item>
+   <item>
+    <widget class="QWidget" name="bitmapViewContainer" native="true"/>
+   </item>
+  </layout>
+ </widget>
+ <resources/>
+ <connections/>
+</ui>
