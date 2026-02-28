@@ -1,6 +1,11 @@
-# Breco Manual
+# Breco
 
 Breco is a Qt desktop app for scanning binary data for byte-pattern matches and inspecting them in synchronized text and bitmap previews.
+
+![Breco screenshot](https://raw.githubusercontent.com/DusteDdk/Breco/refs/heads/master/screenshot.png)
+
+## License
+WTFPL
 
 ## Build and run
 
