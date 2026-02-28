@@ -1,4 +1,5 @@
 #include <QApplication>
+#include <QCheckBox>
 #include <QComboBox>
 #include <QFile>
 #include <QLabel>
@@ -138,19 +139,21 @@ void MainWindowIntegrationTests::currentBytePanelShowsEndianAndWidthAwareValues(
     hover.baseOffset = 100;
     hover.data = QByteArray::fromHex("4100FF");
 
-    window.m_currentByteInfoPanel->bigEndianCharModeRadioButton()->setChecked(true);
+    window.m_currentByteInfoPanel->bigEndianCheckBox()->setChecked(true);
+    window.m_currentByteInfoPanel->decimalModeRadioButton()->setChecked(true);
     window.updateCurrentByteInfoFromHover(hover, 100);
     QCoreApplication::processEvents();
 
     QCOMPARE(window.m_currentByteInfoPanel->asciiValueLabel()->text(), QStringLiteral("A"));
     QCOMPARE(window.m_currentByteInfoPanel->u8ValueLabel()->text(), QStringLiteral("65"));
-    QCOMPARE(window.m_currentByteInfoPanel->u16LeValueLabel()->text(), QStringLiteral("65"));
-    QCOMPARE(window.m_currentByteInfoPanel->u16BeValueLabel()->text(), QStringLiteral("16640"));
-    QCOMPARE(window.m_currentByteInfoPanel->u32LeValueLabel()->text(), QStringLiteral("n/a"));
-    QCOMPARE(window.m_currentByteInfoPanel->u64LeValueLabel()->text(), QStringLiteral("n/a"));
+    QCOMPARE(window.m_currentByteInfoPanel->u16ValueLabel()->text(), QStringLiteral("16640"));
+    QCOMPARE(window.m_currentByteInfoPanel->u32ValueLabel()->text(), QStringLiteral("n/a"));
+    QCOMPARE(window.m_currentByteInfoPanel->u64ValueLabel()->text(), QStringLiteral("n/a"));
     QCOMPARE(window.m_currentByteInfoPanel->byteInterpretationLargeLabel()->text(), QStringLiteral("A"));
+    QCOMPARE(window.m_currentByteInfoPanel->hexStr8BytesValueLabel()->text(),
+             QStringLiteral("0 x 41 00 FF -- -- -- -- --"));
 
-    window.m_currentByteInfoPanel->littleEndianCharModeRadioButton()->setChecked(true);
+    window.m_currentByteInfoPanel->bigEndianCheckBox()->setChecked(false);
     window.updateCurrentByteInfoFromHover(hover, 100);
     QCoreApplication::processEvents();
     QCOMPARE(window.m_currentByteInfoPanel->byteInterpretationLargeLabel()->text(), QStringLiteral("-"));
@@ -158,8 +161,7 @@ void MainWindowIntegrationTests::currentBytePanelShowsEndianAndWidthAwareValues(
     window.updateCurrentByteInfoFromHover(hover, 101);
     QCoreApplication::processEvents();
     QCOMPARE(window.m_currentByteInfoPanel->asciiValueLabel()->text(), QStringLiteral("."));
-    QCOMPARE(window.m_currentByteInfoPanel->u16LeValueLabel()->text(), QStringLiteral("65280"));
-    QCOMPARE(window.m_currentByteInfoPanel->u16BeValueLabel()->text(), QStringLiteral("255"));
+    QCOMPARE(window.m_currentByteInfoPanel->u16ValueLabel()->text(), QStringLiteral("65280"));
 }
 
 void MainWindowIntegrationTests::shiftMarksCurrentBufferDirtyAndRestoresOnDeselect() {

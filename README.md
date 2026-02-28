@@ -162,6 +162,6 @@ Status bar is used for lifecycle and cache messages, for example:
 
 ## Current limits and caveats
 
-- source filtering accepts only readable regular files.
+- source filtering accepts readable regular files and readable block devices.
 - result table ordering follows controller batch merge order, not global byte-order sort.
 - ignore-case matching is ASCII-byte folding, not full Unicode case-folding.

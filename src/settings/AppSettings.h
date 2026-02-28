@@ -28,6 +28,8 @@ public:
     static QList<int> mainSplitterSizes();
     static int textGutterFormatIndex();
     static int textGutterWidth();
+    static int currentByteInfoNumberSystemIndex();
+    static bool currentByteInfoBigEndianEnabled();
     static bool viewScanLogVisible();
     static bool viewEditsVisible();
     static bool viewControlsVisible();
@@ -45,6 +47,8 @@ public:
     static void setMainSplitterSizes(const QList<int>& sizes);
     static void setTextGutterFormatIndex(int index);
     static void setTextGutterWidth(int width);
+    static void setCurrentByteInfoNumberSystemIndex(int index);
+    static void setCurrentByteInfoBigEndianEnabled(bool enabled);
     static void setViewScanLogVisible(bool visible);
     static void setViewEditsVisible(bool visible);
     static void setViewControlsVisible(bool visible);

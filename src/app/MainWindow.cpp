@@ -6,6 +6,14 @@
 #include <iostream>
 #include <limits>
 #include <optional>
+#include <sys/stat.h>
+
+#ifdef __linux__
+#include <fcntl.h>
+#include <linux/fs.h>
+#include <sys/ioctl.h>
+#include <unistd.h>
+#endif
 
 #include <QAction>
 #include <QCheckBox>
@@ -31,6 +39,7 @@
 #include <QStatusBar>
 #include <QSplitter>
 #include <QStringDecoder>
+#include <QStringList>
 #include <QTableView>
 #include <QThread>
 #include <QToolButton>
@@ -62,6 +71,49 @@ constexpr quint64 kTextChunkExpandStepBytes = 8ULL * 1024ULL * 1024ULL;
 constexpr int kTopPaneMinHeightPx = 180;
 constexpr int kAdvancedSnapHideThresholdPx = 190;
 constexpr int kAdvancedSnapShowThresholdPx = 260;
+
+bool isRegularOrBlockDevice(const QFileInfo& info) {
+    if (!info.exists() || !info.isReadable()) {
+        return false;
+    }
+    if (info.isFile()) {
+        return true;
+    }
+
+    struct stat st {};
+    const QByteArray pathBytes = info.absoluteFilePath().toLocal8Bit();
+    if (::stat(pathBytes.constData(), &st) != 0) {
+        return false;
+    }
+    return S_ISBLK(st.st_mode);
+}
+
+quint64 fileSizeWithBlockDeviceSupport(const QFileInfo& info) {
+    if (!isRegularOrBlockDevice(info)) {
+        return 0;
+    }
+    if (info.isFile()) {
+        const qint64 size = info.size();
+        return size > 0 ? static_cast<quint64>(size) : 0;
+    }
+
+#ifdef __linux__
+    const QByteArray pathBytes = info.absoluteFilePath().toLocal8Bit();
+    const int fd = ::open(pathBytes.constData(), O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        return 0;
+    }
+    quint64 bytes = 0;
+    const int rc = ::ioctl(fd, BLKGETSIZE64, &bytes);
+    ::close(fd);
+    if (rc != 0) {
+        return 0;
+    }
+    return bytes;
+#else
+    return 0;
+#endif
+}
 
 quint64 readUnsignedLittle(const QByteArray& bytes, int start, int widthBytes, bool* ok) {
     if (ok != nullptr) {
@@ -169,6 +221,83 @@ QString signedValueString(quint64 value, int widthBytes) {
             return QStringLiteral("n/a");
     }
 }
+
+qint64 signedValueFromWidth(quint64 value, int widthBytes) {
+    switch (widthBytes) {
+        case 1:
+            return static_cast<qint8>(value & 0xFFU);
+        case 2:
+            return static_cast<qint16>(value & 0xFFFFU);
+        case 4:
+            return static_cast<qint32>(value & 0xFFFFFFFFULL);
+        case 8:
+            return static_cast<qint64>(value);
+        default:
+            return 0;
+    }
+}
+
+enum class NumberSystem { Decimal = 0, Hex = 1, Octal = 2 };
+
+NumberSystem currentNumberSystem(const CurrentByteInfoPanel* panel) {
+    if (panel == nullptr) {
+        return NumberSystem::Decimal;
+    }
+    if (panel->hexModeRadioButton()->isChecked()) {
+        return NumberSystem::Hex;
+    }
+    if (panel->octalModeRadioButton()->isChecked()) {
+        return NumberSystem::Octal;
+    }
+    return NumberSystem::Decimal;
+}
+
+QString formatUnsignedByNumberSystem(quint64 value, int widthBytes, NumberSystem system) {
+    switch (system) {
+        case NumberSystem::Hex:
+            return QStringLiteral("0x%1").arg(value, widthBytes * 2, 16, QChar('0')).toUpper();
+        case NumberSystem::Octal:
+            return QStringLiteral("0o%1").arg(QString::number(value, 8));
+        case NumberSystem::Decimal:
+        default:
+            return QString::number(value);
+    }
+}
+
+QString formatSignedByNumberSystem(quint64 value, int widthBytes, NumberSystem system) {
+    if (system == NumberSystem::Decimal) {
+        return signedValueString(value, widthBytes);
+    }
+
+    const qint64 signedValue = signedValueFromWidth(value, widthBytes);
+    if (signedValue >= 0) {
+        return formatUnsignedByNumberSystem(static_cast<quint64>(signedValue), widthBytes, system);
+    }
+    const quint64 magnitude = static_cast<quint64>(-(signedValue + 1)) + 1ULL;
+    const QString prefix = (system == NumberSystem::Hex) ? QStringLiteral("0x") : QStringLiteral("0o");
+    const int base = (system == NumberSystem::Hex) ? 16 : 8;
+    const QString digits =
+        (system == NumberSystem::Hex)
+            ? QStringLiteral("%1").arg(magnitude, widthBytes * 2, base, QChar('0')).toUpper()
+            : QString::number(magnitude, base);
+    return QStringLiteral("-%1%2").arg(prefix, digits);
+}
+
+QString formatHexWindow8(const QByteArray& bytes, int start, bool bigEndian) {
+    std::array<QString, 8> parts;
+    for (int i = 0; i < 8; ++i) {
+        const int idx = bigEndian ? (start + i) : (start + (7 - i));
+        if (idx >= 0 && idx < bytes.size()) {
+            const unsigned char b = static_cast<unsigned char>(bytes.at(idx));
+            parts[static_cast<std::size_t>(i)] =
+                QStringLiteral("%1").arg(static_cast<int>(b), 2, 16, QChar('0')).toUpper();
+        } else {
+            parts[static_cast<std::size_t>(i)] = QStringLiteral("--");
+        }
+    }
+    return QStringLiteral("0 x %1")
+        .arg(QStringList(parts.begin(), parts.end()).join(QLatin1Char(' ')));
+}
 }
 
 MainWindow::MainWindow(QWidget* parent)
@@ -227,7 +356,8 @@ MainWindow::MainWindow(QWidget* parent)
     m_currentByteInfoPanel = new CurrentByteInfoPanel(m_ui->currentByteInfoPanelHost);
     m_currentByteInfoPanel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
     currentByteHostLayout->addWidget(m_currentByteInfoPanel);
-    m_currentByteInfoPanel->bigEndianCharModeRadioButton()->setChecked(true);
+    m_currentByteInfoPanel->bigEndianCheckBox()->setChecked(true);
+    m_currentByteInfoPanel->decimalModeRadioButton()->setChecked(true);
 
     auto* bitmapHostLayout = new QVBoxLayout(m_ui->bitmapViewPanelHost);
     bitmapHostLayout->setContentsMargins(0, 0, 0, 0);
@@ -459,10 +589,34 @@ MainWindow::MainWindow(QWidget* parent)
             &MainWindow::onBitmapHoverOffsetChanged);
     connect(m_bitmapView, &BitmapViewWidget::byteClicked, this, &MainWindow::onBitmapByteClicked);
     connect(m_bitmapView, &BitmapViewWidget::hoverLeft, this, &MainWindow::onHoverLeft);
-    connect(m_currentByteInfoPanel->littleEndianCharModeRadioButton(), &QRadioButton::toggled, this,
-            [this](bool) { refreshCurrentByteInfoFromLastHover(); });
-    connect(m_currentByteInfoPanel->bigEndianCharModeRadioButton(), &QRadioButton::toggled, this,
-            [this](bool) { refreshCurrentByteInfoFromLastHover(); });
+    connect(m_currentByteInfoPanel->bigEndianCheckBox(), &QCheckBox::toggled, this, [this](bool checked) {
+        AppSettings::setCurrentByteInfoBigEndianEnabled(checked);
+        refreshCurrentByteInfoFromLastHover();
+    });
+    connect(m_currentByteInfoPanel->decimalModeRadioButton(), &QRadioButton::toggled, this,
+            [this](bool checked) {
+                if (!checked) {
+                    return;
+                }
+                AppSettings::setCurrentByteInfoNumberSystemIndex(0);
+                refreshCurrentByteInfoFromLastHover();
+            });
+    connect(m_currentByteInfoPanel->hexModeRadioButton(), &QRadioButton::toggled, this,
+            [this](bool checked) {
+                if (!checked) {
+                    return;
+                }
+                AppSettings::setCurrentByteInfoNumberSystemIndex(1);
+                refreshCurrentByteInfoFromLastHover();
+            });
+    connect(m_currentByteInfoPanel->octalModeRadioButton(), &QRadioButton::toggled, this,
+            [this](bool checked) {
+                if (!checked) {
+                    return;
+                }
+                AppSettings::setCurrentByteInfoNumberSystemIndex(2);
+                refreshCurrentByteInfoFromLastHover();
+            });
     auto syncViewMenuChecks = [this]() {
         m_ui->actionViewScanLog->setChecked(m_scanControlsPanel->lifecycleCard()->isVisible());
         m_ui->actionViewEdits->setChecked(m_ui->editStack->isVisible());
@@ -630,6 +784,8 @@ MainWindow::MainWindow(QWidget* parent)
     const int gutterWidth = qMax(48, AppSettings::textGutterWidth());
     const int gutterFormatIdx = qBound(0, AppSettings::textGutterFormatIndex(), 6);
     const bool prefillOnMerge = AppSettings::prefillOnMergeEnabled();
+    const int currentByteNumberSystemIdx = qBound(0, AppSettings::currentByteInfoNumberSystemIndex(), 2);
+    const bool currentByteBigEndian = AppSettings::currentByteInfoBigEndianEnabled();
     m_textPanel->stringModeRadioButton()->setChecked(!byteMode);
     m_textPanel->byteModeRadioButton()->setChecked(byteMode);
     m_textPanel->wrapModeCheckBox()->setChecked(wrap);
@@ -649,6 +805,10 @@ MainWindow::MainWindow(QWidget* parent)
     m_textView->setGutterWidth(gutterWidth);
     m_textView->setGutterOffsetFormat(static_cast<TextViewWidget::GutterOffsetFormat>(gutterFormatIdx));
     m_bitmapView->setTextMode(selectedTextMode());
+    m_currentByteInfoPanel->bigEndianCheckBox()->setChecked(currentByteBigEndian);
+    m_currentByteInfoPanel->decimalModeRadioButton()->setChecked(currentByteNumberSystemIdx == 0);
+    m_currentByteInfoPanel->hexModeRadioButton()->setChecked(currentByteNumberSystemIdx == 1);
+    m_currentByteInfoPanel->octalModeRadioButton()->setChecked(currentByteNumberSystemIdx == 2);
     connect(m_scanControlsPanel->prefillOnMergeCheckBox(), &QCheckBox::toggled, this,
             [](bool checked) { AppSettings::setPrefillOnMergeEnabled(checked); });
     connect(m_textView, &TextViewWidget::gutterOffsetFormatChanged, this,
@@ -665,7 +825,7 @@ MainWindow::MainWindow(QWidget* parent)
     const QString rememberedSingleFile = AppSettings::rememberedSingleFilePath();
     if (!rememberedSingleFile.isEmpty()) {
         const QFileInfo rememberedInfo(rememberedSingleFile);
-        if (rememberedInfo.exists() && rememberedInfo.isFile() && rememberedInfo.isReadable()) {
+        if (isRegularOrBlockDevice(rememberedInfo)) {
             selectSingleFileSource(rememberedInfo.absoluteFilePath());
         }
     }
@@ -684,7 +844,7 @@ bool MainWindow::selectSourcePath(const QString& path) {
     if (info.isDir()) {
         return selectDirectorySource(info.absoluteFilePath());
     }
-    if (info.isFile()) {
+    if (isRegularOrBlockDevice(info)) {
         return selectSingleFileSource(info.absoluteFilePath());
     }
     return false;
@@ -695,12 +855,12 @@ bool MainWindow::selectSingleFileSource(const QString& filePath) {
         return false;
     }
     const QFileInfo info(filePath);
-    if (!info.exists() || !info.isFile() || !info.isReadable()) {
+    if (!isRegularOrBlockDevice(info)) {
         return false;
     }
     const QString absolutePath = info.absoluteFilePath();
 
-    m_sourceFiles = FileEnumerator::enumerateSingleFile(absolutePath);
+    m_sourceFiles = {absolutePath};
     m_sourceMode = SourceMode::SingleFile;
     m_selectedSourceDisplay = absolutePath;
     buildScanTargets(m_sourceFiles);
@@ -1080,12 +1240,13 @@ void MainWindow::buildScanTargets(const QVector<QString>& filePaths) {
     m_scanTargets.clear();
     for (const QString& path : filePaths) {
         const QFileInfo info(path);
-        if (!info.exists() || !info.isFile() || !info.isReadable() || info.size() <= 0) {
+        const quint64 size = fileSizeWithBlockDeviceSupport(info);
+        if (size == 0) {
             continue;
         }
         ScanTarget target;
         target.filePath = info.absoluteFilePath();
-        target.fileSize = static_cast<quint64>(info.size());
+        target.fileSize = size;
         m_scanTargets.push_back(target);
     }
     m_resultModel.setScanTargets(&m_scanTargets);
@@ -2247,50 +2408,51 @@ void MainWindow::updateCurrentByteInfoFromHover(const HoverBuffer& buffer, quint
     const QString utf8 = utf8Glyph(buffer.data, relativeIndex);
     const QString utf16 = utf16Glyph(buffer.data, relativeIndex);
 
-    bool ok8Le = false;
-    bool ok16Le = false;
-    bool ok32Le = false;
-    bool ok64Le = false;
-    bool ok8Be = false;
-    bool ok16Be = false;
-    bool ok32Be = false;
-    bool ok64Be = false;
-    const quint64 v8Le = readUnsignedLittle(buffer.data, relativeIndex, 1, &ok8Le);
-    const quint64 v16Le = readUnsignedLittle(buffer.data, relativeIndex, 2, &ok16Le);
-    const quint64 v32Le = readUnsignedLittle(buffer.data, relativeIndex, 4, &ok32Le);
-    const quint64 v64Le = readUnsignedLittle(buffer.data, relativeIndex, 8, &ok64Le);
-    const quint64 v8Be = readUnsignedBig(buffer.data, relativeIndex, 1, &ok8Be);
-    const quint64 v16Be = readUnsignedBig(buffer.data, relativeIndex, 2, &ok16Be);
-    const quint64 v32Be = readUnsignedBig(buffer.data, relativeIndex, 4, &ok32Be);
-    const quint64 v64Be = readUnsignedBig(buffer.data, relativeIndex, 8, &ok64Be);
+    const bool useBigEndian = m_currentByteInfoPanel->bigEndianCheckBox()->isChecked();
+    const NumberSystem numberSystem = currentNumberSystem(m_currentByteInfoPanel);
+    bool ok8 = false;
+    bool ok16 = false;
+    bool ok32 = false;
+    bool ok64 = false;
+    const quint64 v8 = useBigEndian ? readUnsignedBig(buffer.data, relativeIndex, 1, &ok8)
+                                    : readUnsignedLittle(buffer.data, relativeIndex, 1, &ok8);
+    const quint64 v16 = useBigEndian ? readUnsignedBig(buffer.data, relativeIndex, 2, &ok16)
+                                     : readUnsignedLittle(buffer.data, relativeIndex, 2, &ok16);
+    const quint64 v32 = useBigEndian ? readUnsignedBig(buffer.data, relativeIndex, 4, &ok32)
+                                     : readUnsignedLittle(buffer.data, relativeIndex, 4, &ok32);
+    const quint64 v64 = useBigEndian ? readUnsignedBig(buffer.data, relativeIndex, 8, &ok64)
+                                     : readUnsignedLittle(buffer.data, relativeIndex, 8, &ok64);
 
     const QString na = QStringLiteral("n/a");
     m_currentByteInfoPanel->asciiValueLabel()->setText(ascii);
     m_currentByteInfoPanel->utf8ValueLabel()->setText(utf8);
     m_currentByteInfoPanel->utf16ValueLabel()->setText(utf16);
-    m_currentByteInfoPanel->s8ValueLabel()->setText(ok8Le ? signedValueString(v8Le, 1) : na);
-    m_currentByteInfoPanel->u8ValueLabel()->setText(ok8Le ? QString::number(v8Le) : na);
-    m_currentByteInfoPanel->s16LeValueLabel()->setText(ok16Le ? signedValueString(v16Le, 2) : na);
-    m_currentByteInfoPanel->s16BeValueLabel()->setText(ok16Be ? signedValueString(v16Be, 2) : na);
-    m_currentByteInfoPanel->u16LeValueLabel()->setText(ok16Le ? QString::number(v16Le) : na);
-    m_currentByteInfoPanel->u16BeValueLabel()->setText(ok16Be ? QString::number(v16Be) : na);
-    m_currentByteInfoPanel->s32LeValueLabel()->setText(ok32Le ? signedValueString(v32Le, 4) : na);
-    m_currentByteInfoPanel->s32BeValueLabel()->setText(ok32Be ? signedValueString(v32Be, 4) : na);
-    m_currentByteInfoPanel->u32LeValueLabel()->setText(ok32Le ? QString::number(v32Le) : na);
-    m_currentByteInfoPanel->u32BeValueLabel()->setText(ok32Be ? QString::number(v32Be) : na);
-    m_currentByteInfoPanel->s64LeValueLabel()->setText(ok64Le ? signedValueString(v64Le, 8) : na);
-    m_currentByteInfoPanel->s64BeValueLabel()->setText(ok64Be ? signedValueString(v64Be, 8) : na);
-    m_currentByteInfoPanel->u64LeValueLabel()->setText(ok64Le ? QString::number(v64Le) : na);
-    m_currentByteInfoPanel->u64BeValueLabel()->setText(ok64Be ? QString::number(v64Be) : na);
+    m_currentByteInfoPanel->hexStr8BytesValueLabel()->setText(
+        formatHexWindow8(buffer.data, relativeIndex, useBigEndian));
+    m_currentByteInfoPanel->s8ValueLabel()->setText(
+        ok8 ? formatSignedByNumberSystem(v8, 1, numberSystem) : na);
+    m_currentByteInfoPanel->u8ValueLabel()->setText(
+        ok8 ? formatUnsignedByNumberSystem(v8, 1, numberSystem) : na);
+    m_currentByteInfoPanel->s16ValueLabel()->setText(
+        ok16 ? formatSignedByNumberSystem(v16, 2, numberSystem) : na);
+    m_currentByteInfoPanel->u16ValueLabel()->setText(
+        ok16 ? formatUnsignedByNumberSystem(v16, 2, numberSystem) : na);
+    m_currentByteInfoPanel->s32ValueLabel()->setText(
+        ok32 ? formatSignedByNumberSystem(v32, 4, numberSystem) : na);
+    m_currentByteInfoPanel->u32ValueLabel()->setText(
+        ok32 ? formatUnsignedByNumberSystem(v32, 4, numberSystem) : na);
+    m_currentByteInfoPanel->s64ValueLabel()->setText(
+        ok64 ? formatSignedByNumberSystem(v64, 8, numberSystem) : na);
+    m_currentByteInfoPanel->u64ValueLabel()->setText(
+        ok64 ? formatUnsignedByNumberSystem(v64, 8, numberSystem) : na);
 
-    const bool useLittleEndianChar = m_currentByteInfoPanel->littleEndianCharModeRadioButton()->isChecked();
-    if (useLittleEndianChar) {
+    if (!useBigEndian) {
         m_currentByteInfoPanel->byteInterpretationLargeLabel()->setText(
             littleEndianSwappedChar(buffer.data, relativeIndex));
     } else {
         const bool printable = (b0 >= 0x20 && b0 <= 0x7E);
         m_currentByteInfoPanel->byteInterpretationLargeLabel()->setText(
-            printable ? QString(QChar::fromLatin1(static_cast<char>(b0))) : formatHex(v8Be, 2));
+            printable ? QString(QChar::fromLatin1(static_cast<char>(b0))) : formatHex(v8, 2));
     }
     setCurrentByteCaptionHighlights(availableBytes);
 }
@@ -2322,10 +2484,8 @@ void MainWindow::setCurrentByteCaptionHighlights(int availableBytes) {
         styleCaption(m_currentByteInfoPanel->u32CaptionLabel(), c32);
     }
     if (availableBytes >= 8) {
-        styleCaption(m_currentByteInfoPanel->s64LeCaptionLabel(), c64);
-        styleCaption(m_currentByteInfoPanel->s64BeCaptionLabel(), c64);
-        styleCaption(m_currentByteInfoPanel->u64LeCaptionLabel(), c64);
-        styleCaption(m_currentByteInfoPanel->u64BeCaptionLabel(), c64);
+        styleCaption(m_currentByteInfoPanel->s64CaptionLabel(), c64);
+        styleCaption(m_currentByteInfoPanel->u64CaptionLabel(), c64);
     }
 }
 
@@ -2344,10 +2504,8 @@ void MainWindow::resetCurrentByteCaptionHighlights() {
     clearCaption(m_currentByteInfoPanel->u16CaptionLabel());
     clearCaption(m_currentByteInfoPanel->s32CaptionLabel());
     clearCaption(m_currentByteInfoPanel->u32CaptionLabel());
-    clearCaption(m_currentByteInfoPanel->s64LeCaptionLabel());
-    clearCaption(m_currentByteInfoPanel->s64BeCaptionLabel());
-    clearCaption(m_currentByteInfoPanel->u64LeCaptionLabel());
-    clearCaption(m_currentByteInfoPanel->u64BeCaptionLabel());
+    clearCaption(m_currentByteInfoPanel->s64CaptionLabel());
+    clearCaption(m_currentByteInfoPanel->u64CaptionLabel());
 }
 
 void MainWindow::clearCurrentByteInfo() {
@@ -2362,20 +2520,15 @@ void MainWindow::clearCurrentByteInfo() {
     m_currentByteInfoPanel->asciiValueLabel()->setText(empty);
     m_currentByteInfoPanel->utf8ValueLabel()->setText(empty);
     m_currentByteInfoPanel->utf16ValueLabel()->setText(empty);
+    m_currentByteInfoPanel->hexStr8BytesValueLabel()->setText(empty);
     m_currentByteInfoPanel->s8ValueLabel()->setText(empty);
     m_currentByteInfoPanel->u8ValueLabel()->setText(empty);
-    m_currentByteInfoPanel->s16LeValueLabel()->setText(empty);
-    m_currentByteInfoPanel->s16BeValueLabel()->setText(empty);
-    m_currentByteInfoPanel->u16LeValueLabel()->setText(empty);
-    m_currentByteInfoPanel->u16BeValueLabel()->setText(empty);
-    m_currentByteInfoPanel->s32LeValueLabel()->setText(empty);
-    m_currentByteInfoPanel->s32BeValueLabel()->setText(empty);
-    m_currentByteInfoPanel->u32LeValueLabel()->setText(empty);
-    m_currentByteInfoPanel->u32BeValueLabel()->setText(empty);
-    m_currentByteInfoPanel->s64LeValueLabel()->setText(empty);
-    m_currentByteInfoPanel->s64BeValueLabel()->setText(empty);
-    m_currentByteInfoPanel->u64LeValueLabel()->setText(empty);
-    m_currentByteInfoPanel->u64BeValueLabel()->setText(empty);
+    m_currentByteInfoPanel->s16ValueLabel()->setText(empty);
+    m_currentByteInfoPanel->u16ValueLabel()->setText(empty);
+    m_currentByteInfoPanel->s32ValueLabel()->setText(empty);
+    m_currentByteInfoPanel->u32ValueLabel()->setText(empty);
+    m_currentByteInfoPanel->s64ValueLabel()->setText(empty);
+    m_currentByteInfoPanel->u64ValueLabel()->setText(empty);
     resetCurrentByteCaptionHighlights();
     m_lastHoverAbsoluteOffset.reset();
     m_lastHoverSource = HoverSource::None;

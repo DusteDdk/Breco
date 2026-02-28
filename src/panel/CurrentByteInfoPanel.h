@@ -5,6 +5,7 @@
 #include <memory>
 
 QT_BEGIN_NAMESPACE
+class QCheckBox;
 class QLabel;
 class QRadioButton;
 namespace Ui {
@@ -25,23 +26,20 @@ public:
     QLabel* asciiValueLabel() const;
     QLabel* utf8ValueLabel() const;
     QLabel* utf16ValueLabel() const;
-    QRadioButton* littleEndianCharModeRadioButton() const;
-    QRadioButton* bigEndianCharModeRadioButton() const;
+    QLabel* hexStr8BytesValueLabel() const;
+    QRadioButton* decimalModeRadioButton() const;
+    QRadioButton* hexModeRadioButton() const;
+    QRadioButton* octalModeRadioButton() const;
+    QCheckBox* bigEndianCheckBox() const;
 
     QLabel* s8ValueLabel() const;
     QLabel* u8ValueLabel() const;
-    QLabel* s16LeValueLabel() const;
-    QLabel* s16BeValueLabel() const;
-    QLabel* u16LeValueLabel() const;
-    QLabel* u16BeValueLabel() const;
-    QLabel* s32LeValueLabel() const;
-    QLabel* s32BeValueLabel() const;
-    QLabel* u32LeValueLabel() const;
-    QLabel* u32BeValueLabel() const;
-    QLabel* s64LeValueLabel() const;
-    QLabel* s64BeValueLabel() const;
-    QLabel* u64LeValueLabel() const;
-    QLabel* u64BeValueLabel() const;
+    QLabel* s16ValueLabel() const;
+    QLabel* u16ValueLabel() const;
+    QLabel* s32ValueLabel() const;
+    QLabel* u32ValueLabel() const;
+    QLabel* s64ValueLabel() const;
+    QLabel* u64ValueLabel() const;
 
     QLabel* s8CaptionLabel() const;
     QLabel* u8CaptionLabel() const;
@@ -49,10 +47,8 @@ public:
     QLabel* u16CaptionLabel() const;
     QLabel* s32CaptionLabel() const;
     QLabel* u32CaptionLabel() const;
-    QLabel* s64LeCaptionLabel() const;
-    QLabel* s64BeCaptionLabel() const;
-    QLabel* u64LeCaptionLabel() const;
-    QLabel* u64BeCaptionLabel() const;
+    QLabel* s64CaptionLabel() const;
+    QLabel* u64CaptionLabel() const;
 
 private:
     std::unique_ptr<Ui::gbCurrentByteInfo> m_ui;

@@ -25,6 +25,8 @@ constexpr const char* kContentSplitterSizesKey = "ui/contentSplitterSizes";
 constexpr const char* kMainSplitterSizesKey = "ui/mainSplitterSizes";
 constexpr const char* kTextGutterFormatIndexKey = "ui/textGutterFormatIndex";
 constexpr const char* kTextGutterWidthKey = "ui/textGutterWidth";
+constexpr const char* kCurrentByteInfoNumberSystemIndexKey = "ui/currentByteInfoNumberSystemIndex";
+constexpr const char* kCurrentByteInfoBigEndianEnabledKey = "ui/currentByteInfoBigEndianEnabled";
 constexpr const char* kViewScanLogVisibleKey = "ui/viewScanLogVisible";
 constexpr const char* kViewEditsVisibleKey = "ui/viewEditsVisible";
 constexpr const char* kViewControlsVisibleKey = "ui/viewControlsVisible";
@@ -147,6 +149,16 @@ int AppSettings::textGutterWidth() {
     return settings.value(kTextGutterWidthKey, 110).toInt();
 }
 
+int AppSettings::currentByteInfoNumberSystemIndex() {
+    QSettings settings(kOrg, kApp);
+    return settings.value(kCurrentByteInfoNumberSystemIndexKey, 0).toInt();
+}
+
+bool AppSettings::currentByteInfoBigEndianEnabled() {
+    QSettings settings(kOrg, kApp);
+    return settings.value(kCurrentByteInfoBigEndianEnabledKey, true).toBool();
+}
+
 bool AppSettings::viewScanLogVisible() {
     QSettings settings(kOrg, kApp);
     return settings.value(kViewScanLogVisibleKey, false).toBool();
@@ -240,6 +252,16 @@ void AppSettings::setTextGutterFormatIndex(int index) {
 void AppSettings::setTextGutterWidth(int width) {
     QSettings settings(kOrg, kApp);
     settings.setValue(kTextGutterWidthKey, width);
+}
+
+void AppSettings::setCurrentByteInfoNumberSystemIndex(int index) {
+    QSettings settings(kOrg, kApp);
+    settings.setValue(kCurrentByteInfoNumberSystemIndexKey, index);
+}
+
+void AppSettings::setCurrentByteInfoBigEndianEnabled(bool enabled) {
+    QSettings settings(kOrg, kApp);
+    settings.setValue(kCurrentByteInfoBigEndianEnabledKey, enabled);
 }
 
 void AppSettings::setViewScanLogVisible(bool visible) {

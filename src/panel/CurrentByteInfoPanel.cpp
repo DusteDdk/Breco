@@ -1,5 +1,6 @@
 #include "panel/CurrentByteInfoPanel.h"
 
+#include <QCheckBox>
 #include <QLabel>
 #include <QRadioButton>
 
@@ -26,56 +27,46 @@ QLabel* CurrentByteInfoPanel::utf8ValueLabel() const { return m_ui->lblUtf8Value
 
 QLabel* CurrentByteInfoPanel::utf16ValueLabel() const { return m_ui->lblUtf16Value; }
 
-QRadioButton* CurrentByteInfoPanel::littleEndianCharModeRadioButton() const { return m_ui->rbLECharMode; }
+QLabel* CurrentByteInfoPanel::hexStr8BytesValueLabel() const { return m_ui->lblHexStr8bytes; }
 
-QRadioButton* CurrentByteInfoPanel::bigEndianCharModeRadioButton() const { return m_ui->rbBECharMode; }
+QRadioButton* CurrentByteInfoPanel::decimalModeRadioButton() const { return m_ui->rbDec; }
+
+QRadioButton* CurrentByteInfoPanel::hexModeRadioButton() const { return m_ui->rbHex; }
+
+QRadioButton* CurrentByteInfoPanel::octalModeRadioButton() const { return m_ui->rbOct; }
+
+QCheckBox* CurrentByteInfoPanel::bigEndianCheckBox() const { return m_ui->cbBigEndian; }
 
 QLabel* CurrentByteInfoPanel::s8ValueLabel() const { return m_ui->lbls8; }
 
 QLabel* CurrentByteInfoPanel::u8ValueLabel() const { return m_ui->lblu8; }
 
-QLabel* CurrentByteInfoPanel::s16LeValueLabel() const { return m_ui->lbls16le; }
+QLabel* CurrentByteInfoPanel::s16ValueLabel() const { return m_ui->lbls16; }
 
-QLabel* CurrentByteInfoPanel::s16BeValueLabel() const { return m_ui->lbls16be; }
+QLabel* CurrentByteInfoPanel::u16ValueLabel() const { return m_ui->lblu16; }
 
-QLabel* CurrentByteInfoPanel::u16LeValueLabel() const { return m_ui->lblu16le; }
+QLabel* CurrentByteInfoPanel::s32ValueLabel() const { return m_ui->lbls32; }
 
-QLabel* CurrentByteInfoPanel::u16BeValueLabel() const { return m_ui->lblu16be; }
+QLabel* CurrentByteInfoPanel::u32ValueLabel() const { return m_ui->lblu32; }
 
-QLabel* CurrentByteInfoPanel::s32LeValueLabel() const { return m_ui->lbls32le; }
+QLabel* CurrentByteInfoPanel::s64ValueLabel() const { return m_ui->lbls64le; }
 
-QLabel* CurrentByteInfoPanel::s32BeValueLabel() const { return m_ui->lbls32be; }
+QLabel* CurrentByteInfoPanel::u64ValueLabel() const { return m_ui->lblu64le; }
 
-QLabel* CurrentByteInfoPanel::u32LeValueLabel() const { return m_ui->lblu32le; }
+QLabel* CurrentByteInfoPanel::s8CaptionLabel() const { return m_ui->label_10; }
 
-QLabel* CurrentByteInfoPanel::u32BeValueLabel() const { return m_ui->lblu32be; }
+QLabel* CurrentByteInfoPanel::u8CaptionLabel() const { return m_ui->label_10; }
 
-QLabel* CurrentByteInfoPanel::s64LeValueLabel() const { return m_ui->lbls64le; }
-
-QLabel* CurrentByteInfoPanel::s64BeValueLabel() const { return m_ui->lbls64be; }
-
-QLabel* CurrentByteInfoPanel::u64LeValueLabel() const { return m_ui->lblu64le; }
-
-QLabel* CurrentByteInfoPanel::u64BeValueLabel() const { return m_ui->lblu64be; }
-
-QLabel* CurrentByteInfoPanel::s8CaptionLabel() const { return m_ui->label; }
-
-QLabel* CurrentByteInfoPanel::u8CaptionLabel() const { return m_ui->label_7; }
-
-QLabel* CurrentByteInfoPanel::s16CaptionLabel() const { return m_ui->label_10; }
+QLabel* CurrentByteInfoPanel::s16CaptionLabel() const { return m_ui->label_3; }
 
 QLabel* CurrentByteInfoPanel::u16CaptionLabel() const { return m_ui->label_3; }
 
 QLabel* CurrentByteInfoPanel::s32CaptionLabel() const { return m_ui->label_13; }
 
-QLabel* CurrentByteInfoPanel::u32CaptionLabel() const { return m_ui->label_5; }
+QLabel* CurrentByteInfoPanel::u32CaptionLabel() const { return m_ui->label_13; }
 
-QLabel* CurrentByteInfoPanel::s64LeCaptionLabel() const { return m_ui->label_14; }
+QLabel* CurrentByteInfoPanel::s64CaptionLabel() const { return m_ui->label_14; }
 
-QLabel* CurrentByteInfoPanel::s64BeCaptionLabel() const { return m_ui->label_16; }
-
-QLabel* CurrentByteInfoPanel::u64LeCaptionLabel() const { return m_ui->label_12; }
-
-QLabel* CurrentByteInfoPanel::u64BeCaptionLabel() const { return m_ui->label_17; }
+QLabel* CurrentByteInfoPanel::u64CaptionLabel() const { return m_ui->label_12; }
 
 }  // namespace breco
