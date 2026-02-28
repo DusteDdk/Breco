@@ -1,0 +1,18 @@
+flowchart TD
+mainEntry["main.cpp"] --> brecoApp["BrecoApplication"]
+mainEntry --> mainWindow["MainWindow"]
+mainWindow --> scanController["ScanController"]
+mainWindow --> resultModel["ResultModel"]
+mainWindow --> filePool["OpenFilePool"]
+mainWindow --> windowLoader["ShiftedWindowLoader"]
+mainWindow --> textWidget["TextViewWidget"]
+mainWindow --> bitmapWidget["BitmapViewWidget"]
+scanController --> readerLoop["readerLoop thread"]
+scanController --> scanWorkers["ScanWorker x N"]
+readerLoop --> windowLoader
+windowLoader --> shiftTransform["ShiftTransform"]
+scanWorkers --> matchUtils["MatchUtils"]
+scanWorkers --> finalMerge["buildFinalResults"]
+finalMerge --> resultBuffers["Result buffers + row mapping"]
+resultBuffers --> mainWindow
+mainWindow --> appSettings["AppSettings (QSettings)"]

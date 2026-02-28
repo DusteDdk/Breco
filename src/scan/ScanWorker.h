@@ -20,7 +20,7 @@ public:
     using JobCompleteCallback = std::function<void(int workerId, quint64 bufferToken)>;
 
     ScanWorker(int workerId, QByteArray searchTerm, TextInterpretationMode mode, bool ignoreCase,
-               ShiftSettings shiftSettings, std::atomic<quint64>* totalBytesScanned,
+               std::atomic<quint64>* totalBytesScanned,
                std::chrono::steady_clock::time_point scanStartTime,
                JobCompleteCallback onJobComplete);
 
@@ -45,7 +45,6 @@ private:
     QByteArray m_searchTerm;
     TextInterpretationMode m_mode = TextInterpretationMode::Ascii;
     bool m_ignoreCase = false;
-    ShiftSettings m_shiftSettings;
     std::chrono::steady_clock::time_point m_scanStartTime{};
     JobCompleteCallback m_onJobComplete;
 

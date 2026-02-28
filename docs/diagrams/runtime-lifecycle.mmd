@@ -1,0 +1,10 @@
+flowchart TD
+startup["Process startup"] --> initUi["MainWindow constructor wiring"]
+initUi --> sourceSelect["User source selection"]
+sourceSelect --> startScan["onStartScan validation + controller start"]
+startScan --> readerWorkers["Reader + workers run"]
+readerWorkers --> mergeBuffers["Merge matches + build result buffers"]
+mergeBuffers --> publishBatch["onResultsBatchReady model/cache update"]
+publishBatch --> scanFinished["onScanFinished status + first-row select"]
+scanFinished --> previewActivate["onResultActivated/showMatchPreview"]
+previewActivate --> previewRender["updateSharedPreviewNow text+bitmap"]

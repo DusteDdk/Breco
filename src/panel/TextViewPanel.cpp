@@ -19,6 +19,10 @@ QRadioButton* TextViewPanel::byteModeRadioButton() const { return m_ui->byteMode
 
 QCheckBox* TextViewPanel::wrapModeCheckBox() const { return m_ui->wrapModeCheckBox; }
 
+QCheckBox* TextViewPanel::collapseCheckBox() const { return m_ui->collapseCheckBox; }
+
+QCheckBox* TextViewPanel::breatheCheckBox() const { return m_ui->breatheCheckBox; }
+
 QComboBox* TextViewPanel::newlineModeComboBox() const { return m_ui->newlineModeComboBox; }
 
 QCheckBox* TextViewPanel::monospaceCheckBox() const { return m_ui->monospaceCheckBox; }

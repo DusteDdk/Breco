@@ -40,19 +40,37 @@ class TextViewWidget : public QWidget {
     Q_OBJECT
 
 public:
+    enum class GutterOffsetFormat {
+        HexWithPrefix = 0,
+        Hex,
+        Decimal,
+        Binary,
+        SiOneDecimal,
+        SiTwoDecimals,
+        SiExpanded,
+    };
+
     explicit TextViewWidget(QWidget* parent = nullptr);
 
     void setMode(TextInterpretationMode mode);
     void setDisplayMode(TextDisplayMode mode);
     void setData(const QByteArray& bytes, quint64 baseOffset,
-                 std::optional<unsigned char> previousByteBeforeBase = std::nullopt);
+                 std::optional<unsigned char> previousByteBeforeBase = std::nullopt,
+                 quint64 fileSizeBytes = 0);
     void setSelectedOffset(quint64 absoluteOffset, bool centerInView = true);
     void setMatchRange(quint64 startOffset, quint32 length);
     void setGutterVisible(bool visible);
+    void setGutterWidth(int width);
+    int gutterWidth() const;
     void setNewlineMode(TextNewlineMode mode);
     void setWrapMode(bool enabled);
+    void setCollapseRunsEnabled(bool enabled);
     void setByteLineMode(ByteLineMode mode);
     void setMonospaceEnabled(bool enabled);
+    void setBreatheEnabled(bool enabled);
+    void setHoverAnchorOffset(std::optional<quint64> absoluteOffset);
+    void setGutterOffsetFormat(GutterOffsetFormat format);
+    GutterOffsetFormat gutterOffsetFormat() const;
     int visibleByteCount() const;
     int scrollBytesPerWheelStepHint() const;
     int recommendedViewportByteCount() const;
@@ -63,6 +81,13 @@ signals:
     void hoverLeft();
     void selectionRangeChanged(bool hasRange, quint64 start, quint64 end);
     void backingScrollRequested(int wheelSteps, int bytesPerStepHint, int visibleBytesHint);
+    void pageNavigationRequested(int direction, quint64 edgeOffset);
+    void fileEdgeNavigationRequested(int edge);
+    void verticalScrollDragStateChanged(bool dragging);
+    void verticalScrollDragReleased(int value, int maximum);
+    void gutterOffsetFormatChanged(int formatIndex);
+    void gutterWidthChanged(int width);
+    void chunkEdgeExpansionRequested(int direction);
 
 protected:
     void resizeEvent(QResizeEvent* event) override;
@@ -73,6 +98,7 @@ protected:
 private:
     enum class TokenKind { Text, ByteBox };
     enum class CopyFormat { TextOnly, OffsetHex, Hex, CHeader, Binary };
+    enum class OffsetCopyFormat { Decimal, Hex, Binary };
 
     struct Token {
         TokenKind kind = TokenKind::Text;
@@ -110,28 +136,39 @@ private:
     int xOffsetForAbsoluteOffset(const DisplayLine& line, quint64 absoluteOffset) const;
     quint64 absoluteOffsetForPoint(const QPoint& point) const;
     std::optional<int> visibleIndexForPoint(const QPoint& point) const;
+    std::optional<quint64> gutterOffsetForPoint(const QPoint& point) const;
+    std::optional<int> gutterEdgeExpansionDirectionForPoint(const QPoint& point) const;
     void updateHoverFromPoint(const QPoint& point);
     bool hasSelectionRange() const;
     QPair<quint64, quint64> normalizedSelection() const;
     QPair<int, int> normalizedSelectionVisibleIndices() const;
     QVector<const Token*> selectedTokens() const;
     QVector<quint64> selectedVisibleOffsets() const;
+    std::optional<quint64> firstVisibleByteOffset() const;
+    std::optional<quint64> lastVisibleByteOffset() const;
     QByteArray selectedBytes() const;
     QString selectedText(bool replaceNullMarkers) const;
     QString selectedOffsetHexText() const;
     QString selectedHexText() const;
     QString selectedCHeaderText() const;
+    QString gutterOffsetText(quint64 offset) const;
+    QString formatSiOffset(quint64 offset, int decimals) const;
+    QString formatSiOffsetExpanded(quint64 offset) const;
+    QString formatOffset(quint64 offset, OffsetCopyFormat format) const;
     void copySelectionToClipboard(CopyFormat format) const;
+    void copyOffsetToClipboard(quint64 offset, OffsetCopyFormat format) const;
     int fixedBytesPerLine() const;
     bool shouldBreakAfterByte(int index, const QByteArray& data, bool byteIsVisible) const;
     void emitSelectionRangeChanged();
     void showSelectionContextMenu(const QPoint& localPos);
+    void showGutterContextMenu(const QPoint& localPos);
     int tokenVisualWidth(const Token& token) const;
     QColor colorForClass(TextByteClass cls) const;
     void layoutChildren();
     void paintContent();
     void paintGutter();
     void emitCenterAnchorOffset();
+    void emitViewportCenterAnchorOffset();
     quint64 currentCenterAnchorOffset() const;
     bool handleWheelEvent(QWheelEvent* event);
     unsigned char byteAtAbsoluteOffset(quint64 absoluteOffset) const;
@@ -145,6 +182,7 @@ private:
     std::optional<unsigned char> m_previousByteBeforeBackingBase;
     quint64 m_baseOffset = 0;
     quint64 m_backingBaseOffset = 0;
+    quint64 m_backingFileSizeBytes = 0;
     quint64 m_selectedOffset = 0;
     quint64 m_matchStartOffset = 0;
     quint32 m_matchLength = 0;
@@ -154,21 +192,30 @@ private:
     ByteLineMode m_byteLineMode = ByteLineMode::Auto;
     bool m_utf16LittleEndian = true;
     bool m_gutterVisible = true;
+    int m_gutterWidth = 110;
     bool m_wrapMode = true;
+    bool m_collapseRunsEnabled = true;
+    bool m_breatheEnabled = false;
     bool m_monospaceEnabled = false;
+    GutterOffsetFormat m_gutterOffsetFormat = GutterOffsetFormat::Hex;
     bool m_hasSelectedOffset = false;
     quint64 m_lastEmittedCenterAnchor = 0;
     qint64 m_lastHoveredAbsoluteOffset = -1;
+    std::optional<quint64> m_hoverAnchorOffset;
     bool m_selecting = false;
     bool m_hasSelection = false;
     int m_selectionStartVisibleIndex = -1;
     int m_selectionEndVisibleIndex = -1;
+    bool m_verticalSliderDragInProgress = false;
 
     QVector<DisplayLine> m_lines;
     QWidget* m_gutterWidget = nullptr;
     QWidget* m_contentWidget = nullptr;
     QScrollBar* m_vScrollBar = nullptr;
     QScrollBar* m_hScrollBar = nullptr;
+    bool m_resizingGutter = false;
+    int m_gutterResizeStartGlobalX = 0;
+    int m_gutterResizeStartWidth = 110;
 };
 
 }  // namespace breco

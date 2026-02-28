@@ -49,6 +49,23 @@
        </widget>
       </item>
       <item>
+       <widget class="QCheckBox" name="collapseCheckBox">
+        <property name="text">
+         <string>Collapse</string>
+        </property>
+        <property name="checked">
+         <bool>true</bool>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <widget class="QCheckBox" name="breatheCheckBox">
+        <property name="text">
+         <string>breathe</string>
+        </property>
+       </widget>
+      </item>
+      <item>
        <widget class="QComboBox" name="newlineModeComboBox">
         <item>
          <property name="text">

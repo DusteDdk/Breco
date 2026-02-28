@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QString>
 #include <QWidget>
 
 #include <memory>
@@ -11,7 +12,9 @@ class QLabel;
 class QLineEdit;
 class QProgressBar;
 class QPushButton;
+class QListWidget;
 class QSpinBox;
+class QToolButton;
 namespace Ui {
 class ScanControlsPanel;
 }
@@ -32,8 +35,8 @@ public:
     QSpinBox* shiftValueSpin() const;
     QComboBox* shiftUnitCombo() const;
     QPushButton* startScanButton() const;
-    QPushButton* openFileButton() const;
-    QPushButton* openDirButton() const;
+    QToolButton* openFileButton() const;
+    QToolButton* openDirButton() const;
     QLabel* blockSizeLabel() const;
     QSpinBox* blockSizeSpin() const;
     QComboBox* blockSizeUnitCombo() const;
@@ -43,6 +46,14 @@ public:
     QLabel* scannedValueLabel() const;
     QProgressBar* scanProgressBar() const;
     QLabel* selectedSourceValueLabel() const;
+    QWidget* advancedSearchGroup() const;
+    QWidget* lifecycleCard() const;
+    QToolButton* hideLifecycleCardButton() const;
+    QListWidget* lifecycleLogListWidget() const;
+    void showLifecycleCard();
+    void hideLifecycleCard();
+    void clearLifecycleLog();
+    void appendLifecycleMessage(const QString& message);
 
 private:
     std::unique_ptr<Ui::ScanControlsPanel> m_ui;

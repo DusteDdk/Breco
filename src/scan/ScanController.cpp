@@ -38,7 +38,7 @@ ScanController::~ScanController() {
 
 void ScanController::startScan(const QVector<ScanTarget>& targets, const QByteArray& searchTerm,
                                quint32 blockSize, int workerCount, TextInterpretationMode mode,
-                               bool ignoreCase, ShiftSettings shiftSettings, bool prefillOnMerge,
+                               bool ignoreCase, bool prefillOnMerge,
                                std::chrono::steady_clock::time_point scanButtonPressTime) {
     if (m_running) {
         emit scanError(QStringLiteral("Scan already running"));
@@ -70,7 +70,6 @@ void ScanController::startScan(const QVector<ScanTarget>& targets, const QByteAr
     m_blockSize = qMax<quint32>(1, blockSize);
     m_textMode = mode;
     m_ignoreCase = ignoreCase;
-    m_shiftSettings = shiftSettings;
     m_prefillOnMerge = prefillOnMerge;
     m_totalScanned.store(0, std::memory_order_release);
     m_stopRequested.store(false, std::memory_order_release);
@@ -134,7 +133,7 @@ void ScanController::startScan(const QVector<ScanTarget>& targets, const QByteAr
     m_workers.reserve(m_workerCount);
     for (int i = 0; i < m_workerCount; ++i) {
         m_workers.push_back(std::make_unique<ScanWorker>(i, m_searchTerm, m_textMode, m_ignoreCase,
-                                                         m_shiftSettings, &m_totalScanned,
+                                                         &m_totalScanned,
                                                          m_scanStartTime,
                                                          onJobComplete));
     }
@@ -297,8 +296,8 @@ void ScanController::readerLoop() {
 
             const quint64 chunkId = m_chunkCounter.fetch_add(1, std::memory_order_acq_rel) + 1;
 
-            auto rawWindow = m_windowLoader->loadRawWindow(target.filePath, target.fileSize,
-                                                           fileOffset, outputSize, m_shiftSettings);
+            auto rawWindow = m_windowLoader->loadRawWindow(
+                target.filePath, target.fileSize, fileOffset, outputSize, ShiftSettings{});
             if (!rawWindow.has_value()) {
                 std::cerr << "[scan][warn] read failed: targetIdx=" << targetIdx
                           << " offset=" << fileOffset
@@ -573,6 +572,7 @@ void ScanController::buildResultBuffers() {
             resultBuffer.scanTargetIdx = match.scanTargetIdx;
             resultBuffer.fileOffset = match.offset;
             resultBuffer.bytes.clear();
+            resultBuffer.dirty = false;
             const int bufferIndex = m_resultBuffers.size();
             m_resultBuffers.push_back(std::move(resultBuffer));
             m_matchBufferIndices[i] = bufferIndex;
@@ -637,7 +637,8 @@ void ScanController::buildResultBuffers() {
         ResultBuffer resultBuffer;
         resultBuffer.scanTargetIdx = targetIdx;
         resultBuffer.fileOffset = bufferStart;
-        resultBuffer.bytes = loadShiftedWindow(targetIdx, bufferStart, bufferSize);
+        resultBuffer.bytes = loadRawWindow(targetIdx, bufferStart, bufferSize);
+        resultBuffer.dirty = false;
         std::cout << "[scan] merge prefill done: buffer#" << bufferIndex
                   << " loadedSize=" << resultBuffer.bytes.size() << std::endl;
 
@@ -650,7 +651,7 @@ void ScanController::buildResultBuffers() {
     }
 }
 
-QByteArray ScanController::loadShiftedWindow(int scanTargetIdx, quint64 start, quint64 size) const {
+QByteArray ScanController::loadRawWindow(int scanTargetIdx, quint64 start, quint64 size) const {
     if (scanTargetIdx < 0 || scanTargetIdx >= m_targets.size() || size == 0) {
         return {};
     }
@@ -663,12 +664,12 @@ QByteArray ScanController::loadShiftedWindow(int scanTargetIdx, quint64 start, q
     if (m_windowLoader == nullptr) {
         return {};
     }
-    const auto transformed = m_windowLoader->loadTransformedWindow(
-        target.filePath, target.fileSize, start, size, m_shiftSettings);
-    if (!transformed.has_value()) {
+    const auto rawWindow =
+        m_windowLoader->loadRawWindow(target.filePath, target.fileSize, start, size, ShiftSettings{});
+    if (!rawWindow.has_value()) {
         return {};
     }
-    return transformed.value();
+    return rawWindow->bytes;
 }
 
 quint64 ScanController::fileSizeForTarget(int scanTargetIdx) const {

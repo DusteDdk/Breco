@@ -1,0 +1,9 @@
+flowchart TD
+byteIsNull{"Current byte == 0x00?"} -->|No| visibleTrue["Visible"]
+byteIsNull -->|Yes| hasPrev{"Previous byte available?"}
+hasPrev -->|No| visibleFalseNoPrev["Hidden"]
+hasPrev -->|Yes| prevIsNull{"Previous byte == 0x00?"}
+prevIsNull -->|Yes| visibleFalsePrevNull["Hidden"]
+prevIsNull -->|No| prevPrinted{"Prev is printable ASCII or CR/LF?"}
+prevPrinted -->|Yes| visibleTrueNull["Visible"]
+prevPrinted -->|No| visibleFalseNonPrinted["Hidden"]

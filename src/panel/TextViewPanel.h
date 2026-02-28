@@ -28,6 +28,8 @@ public:
     QRadioButton* stringModeRadioButton() const;
     QRadioButton* byteModeRadioButton() const;
     QCheckBox* wrapModeCheckBox() const;
+    QCheckBox* collapseCheckBox() const;
+    QCheckBox* breatheCheckBox() const;
     QComboBox* newlineModeComboBox() const;
     QCheckBox* monospaceCheckBox() const;
     QComboBox* bytesPerLineComboBox() const;

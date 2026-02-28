@@ -1,5 +1,7 @@
 #include "view/TextViewWidget.h"
 
+#include <limits>
+#include <QActionGroup>
 #include <QClipboard>
 #include <QContextMenuEvent>
 #include <QEvent>
@@ -19,6 +21,7 @@
 namespace breco {
 
 namespace {
+constexpr int kTextTokenHorizontalPadding = 1;
 bool isPrintableAscii(unsigned char byte) { return byte >= 0x20 && byte <= 0x7E; }
 
 bool decodeUtf8At(const QByteArray& bytes, int index, quint32* codepointOut, int* lengthOut) {
@@ -156,10 +159,21 @@ TextViewWidget::TextViewWidget(QWidget* parent) : QWidget(parent) {
     connect(m_vScrollBar, &QScrollBar::valueChanged, this, [this]() {
         m_contentWidget->update();
         m_gutterWidget->update();
-        emitCenterAnchorOffset();
+        if (!m_verticalSliderDragInProgress) {
+            emitCenterAnchorOffset();
+        }
     });
     connect(m_hScrollBar, &QScrollBar::valueChanged, this,
             [this]() { m_contentWidget->update(); });
+    connect(m_vScrollBar, &QScrollBar::sliderPressed, this, [this]() {
+        m_verticalSliderDragInProgress = true;
+        emit verticalScrollDragStateChanged(true);
+    });
+    connect(m_vScrollBar, &QScrollBar::sliderReleased, this, [this]() {
+        m_verticalSliderDragInProgress = false;
+        emit verticalScrollDragStateChanged(false);
+        emit verticalScrollDragReleased(m_vScrollBar->value(), m_vScrollBar->maximum());
+    });
 
     layoutChildren();
 }
@@ -187,7 +201,8 @@ void TextViewWidget::setDisplayMode(TextDisplayMode mode) {
 }
 
 void TextViewWidget::setData(const QByteArray& bytes, quint64 baseOffset,
-                             std::optional<unsigned char> previousByteBeforeBase) {
+                             std::optional<unsigned char> previousByteBeforeBase,
+                             quint64 fileSizeBytes) {
     if (debug::selectionTraceEnabled()) {
         BRECO_SELTRACE(QStringLiteral("TextViewWidget::setData: start bytes=%1 baseOffset=%2")
                            .arg(bytes.size())
@@ -195,6 +210,7 @@ void TextViewWidget::setData(const QByteArray& bytes, quint64 baseOffset,
     }
     m_backingBytes = bytes;
     m_backingBaseOffset = baseOffset;
+    m_backingFileSizeBytes = fileSizeBytes;
     m_previousByteBeforeBackingBase = previousByteBeforeBase;
     m_previousByteBeforeBase = previousByteBeforeBase;
     m_baseOffset = baseOffset;
@@ -207,6 +223,7 @@ void TextViewWidget::setData(const QByteArray& bytes, quint64 baseOffset,
     m_selectionEndVisibleIndex = -1;
     m_selecting = false;
     m_lastHoveredAbsoluteOffset = -1;
+    m_hoverAnchorOffset.reset();
     const quint64 viewportStartUs = debug::selectionTraceElapsedUs();
     setViewportWindow(baseOffset, true);
     if (debug::selectionTraceEnabled()) {
@@ -443,6 +460,30 @@ void TextViewWidget::setGutterVisible(bool visible) {
     m_contentWidget->update();
 }
 
+void TextViewWidget::setGutterWidth(int width) {
+    const int minWidth = 48;
+    const int maxWidth =
+        qMax(minWidth, this->width() - style()->pixelMetric(QStyle::PM_ScrollBarExtent) - 80);
+    const int clamped = qBound(minWidth, width, maxWidth);
+    if (m_gutterWidth == clamped) {
+        return;
+    }
+    const quint64 anchorBeforeResize = currentCenterAnchorOffset();
+    m_gutterWidth = clamped;
+    layoutChildren();
+    if (!m_backingBytes.isEmpty()) {
+        ensureOffsetInViewport(anchorBeforeResize, true);
+    } else {
+        rebuildLines();
+    }
+    m_contentWidget->update();
+    m_gutterWidget->update();
+    emitCenterAnchorOffset();
+    emit gutterWidthChanged(m_gutterWidth);
+}
+
+int TextViewWidget::gutterWidth() const { return m_gutterWidth; }
+
 void TextViewWidget::setNewlineMode(TextNewlineMode mode) {
     m_newlineMode = mode;
     if (m_displayMode == TextDisplayMode::StringMode) {
@@ -459,6 +500,17 @@ void TextViewWidget::setWrapMode(bool enabled) {
         return;
     }
     m_wrapMode = effective;
+    rebuildLines();
+    m_contentWidget->update();
+    m_gutterWidget->update();
+    emitCenterAnchorOffset();
+}
+
+void TextViewWidget::setCollapseRunsEnabled(bool enabled) {
+    if (m_collapseRunsEnabled == enabled) {
+        return;
+    }
+    m_collapseRunsEnabled = enabled;
     rebuildLines();
     m_contentWidget->update();
     m_gutterWidget->update();
@@ -488,6 +540,38 @@ void TextViewWidget::setMonospaceEnabled(bool enabled) {
     rebuildLines();
     m_contentWidget->update();
     m_gutterWidget->update();
+}
+
+void TextViewWidget::setBreatheEnabled(bool enabled) {
+    if (m_breatheEnabled == enabled) {
+        return;
+    }
+    m_breatheEnabled = enabled;
+    rebuildLines();
+    m_contentWidget->update();
+    m_gutterWidget->update();
+    emitCenterAnchorOffset();
+}
+
+void TextViewWidget::setHoverAnchorOffset(std::optional<quint64> absoluteOffset) {
+    if (m_hoverAnchorOffset == absoluteOffset) {
+        return;
+    }
+    m_hoverAnchorOffset = absoluteOffset;
+    m_contentWidget->update();
+}
+
+void TextViewWidget::setGutterOffsetFormat(GutterOffsetFormat format) {
+    if (m_gutterOffsetFormat == format) {
+        return;
+    }
+    m_gutterOffsetFormat = format;
+    m_gutterWidget->update();
+    emit gutterOffsetFormatChanged(static_cast<int>(format));
+}
+
+TextViewWidget::GutterOffsetFormat TextViewWidget::gutterOffsetFormat() const {
+    return m_gutterOffsetFormat;
 }
 
 int TextViewWidget::visibleByteCount() const {
@@ -630,6 +714,63 @@ bool TextViewWidget::eventFilter(QObject* watched, QEvent* event) {
             }
         }
     }
+    if (watched == m_gutterWidget) {
+        if (event->type() == QEvent::MouseButtonPress) {
+            auto* mouseEvent = static_cast<QMouseEvent*>(event);
+            if (mouseEvent->button() == Qt::LeftButton) {
+                const bool onResizeGrip = mouseEvent->pos().x() >= (m_gutterWidget->width() - 4);
+                if (onResizeGrip) {
+                    m_resizingGutter = true;
+                    m_gutterResizeStartGlobalX = mouseEvent->globalPosition().toPoint().x();
+                    m_gutterResizeStartWidth = m_gutterWidth;
+                    m_gutterWidget->setCursor(Qt::SplitHCursor);
+                    mouseEvent->accept();
+                    return true;
+                }
+                const std::optional<int> direction =
+                    gutterEdgeExpansionDirectionForPoint(mouseEvent->pos());
+                if (direction.has_value()) {
+                    emit chunkEdgeExpansionRequested(direction.value());
+                }
+                mouseEvent->accept();
+                return true;
+            }
+            if (mouseEvent->button() == Qt::RightButton) {
+                showGutterContextMenu(mouseEvent->pos());
+                mouseEvent->accept();
+                return true;
+            }
+        } else if (event->type() == QEvent::MouseMove) {
+            auto* mouseEvent = static_cast<QMouseEvent*>(event);
+            if (m_resizingGutter) {
+                const int deltaX = mouseEvent->globalPosition().toPoint().x() - m_gutterResizeStartGlobalX;
+                setGutterWidth(m_gutterResizeStartWidth + deltaX);
+                mouseEvent->accept();
+                return true;
+            }
+            const bool onResizeGrip = mouseEvent->pos().x() >= (m_gutterWidget->width() - 4);
+            m_gutterWidget->setCursor(onResizeGrip ? Qt::SplitHCursor : Qt::ArrowCursor);
+            return false;
+        } else if (event->type() == QEvent::MouseButtonRelease) {
+            auto* mouseEvent = static_cast<QMouseEvent*>(event);
+            if (m_resizingGutter && mouseEvent->button() == Qt::LeftButton) {
+                m_resizingGutter = false;
+                const bool onResizeGrip = mouseEvent->pos().x() >= (m_gutterWidget->width() - 4);
+                m_gutterWidget->setCursor(onResizeGrip ? Qt::SplitHCursor : Qt::ArrowCursor);
+                mouseEvent->accept();
+                return true;
+            }
+        } else if (event->type() == QEvent::ContextMenu) {
+            auto* contextEvent = static_cast<QContextMenuEvent*>(event);
+            showGutterContextMenu(contextEvent->pos());
+            contextEvent->accept();
+            return true;
+        } else if (event->type() == QEvent::Leave) {
+            if (!m_resizingGutter) {
+                m_gutterWidget->unsetCursor();
+            }
+        }
+    }
 
     return QWidget::eventFilter(watched, event);
 }
@@ -644,6 +785,32 @@ void TextViewWidget::keyPressEvent(QKeyEvent* event) {
         if (clipboard != nullptr) {
             clipboard->setText(selectedText(true));
         }
+        event->accept();
+        return;
+    }
+    if (event->key() == Qt::Key_PageUp) {
+        const std::optional<quint64> firstOffset = firstVisibleByteOffset();
+        if (firstOffset.has_value() && firstOffset.value() > 0) {
+            emit pageNavigationRequested(-1, firstOffset.value() - 1ULL);
+        }
+        event->accept();
+        return;
+    }
+    if (event->key() == Qt::Key_PageDown) {
+        const std::optional<quint64> lastOffset = lastVisibleByteOffset();
+        if (lastOffset.has_value() && lastOffset.value() < std::numeric_limits<quint64>::max()) {
+            emit pageNavigationRequested(1, lastOffset.value() + 1ULL);
+        }
+        event->accept();
+        return;
+    }
+    if (event->key() == Qt::Key_Home) {
+        emit fileEdgeNavigationRequested(-1);
+        event->accept();
+        return;
+    }
+    if (event->key() == Qt::Key_End) {
+        emit fileEdgeNavigationRequested(1);
         event->accept();
         return;
     }
@@ -776,7 +943,7 @@ QVector<TextViewWidget::Token> TextViewWidget::decodeTokens(const QByteArray& ra
         tokens.push_back(token);
     }
 
-    if (m_displayMode != TextDisplayMode::StringMode || tokens.size() < 3) {
+    if (!m_collapseRunsEnabled || m_displayMode != TextDisplayMode::StringMode || tokens.size() < 3) {
         return tokens;
     }
 
@@ -1130,6 +1297,51 @@ std::optional<int> TextViewWidget::visibleIndexForPoint(const QPoint& point) con
     return line.tokens.last().visibleIndex;
 }
 
+std::optional<quint64> TextViewWidget::gutterOffsetForPoint(const QPoint& point) const {
+    if (m_lines.isEmpty()) {
+        return std::nullopt;
+    }
+    const int lineIdx = qBound(0, firstVisibleLine() + (point.y() / qMax(1, lineHeight())),
+                               m_lines.size() - 1);
+    return m_lines.at(lineIdx).absoluteOffset;
+}
+
+std::optional<int> TextViewWidget::gutterEdgeExpansionDirectionForPoint(const QPoint& point) const {
+    if (m_lines.isEmpty() || m_backingBytes.isEmpty()) {
+        return std::nullopt;
+    }
+    const int lineIdx = qBound(0, firstVisibleLine() + (point.y() / qMax(1, lineHeight())),
+                               m_lines.size() - 1);
+    const DisplayLine& line = m_lines.at(lineIdx);
+    if (line.byteLength <= 0) {
+        return std::nullopt;
+    }
+
+    const quint64 chunkStart = m_backingBaseOffset;
+    const quint64 chunkEnd =
+        chunkStart + static_cast<quint64>(qMax(1, m_backingBytes.size())) - 1ULL;
+    const quint64 lineStart = line.absoluteOffset;
+    const quint64 lineEnd = lineStart + static_cast<quint64>(line.byteLength) - 1ULL;
+    const bool containsStart = chunkStart >= lineStart && chunkStart <= lineEnd;
+    const bool containsEnd = chunkEnd >= lineStart && chunkEnd <= lineEnd;
+    if (!containsStart && !containsEnd) {
+        return std::nullopt;
+    }
+    if (containsStart && containsEnd) {
+        return std::nullopt;
+    }
+    if (containsStart) {
+        if (chunkStart == 0ULL) {
+            return std::nullopt;
+        }
+        return -1;
+    }
+    if (m_backingFileSizeBytes > 0 && chunkEnd + 1ULL >= m_backingFileSizeBytes) {
+        return std::nullopt;
+    }
+    return 1;
+}
+
 void TextViewWidget::updateHoverFromPoint(const QPoint& point) {
     if (m_lines.isEmpty() || m_visibleOffsets.isEmpty()) {
         return;
@@ -1205,6 +1417,38 @@ QVector<quint64> TextViewWidget::selectedVisibleOffsets() const {
         offsets.push_back(token->absoluteOffset);
     }
     return offsets;
+}
+
+std::optional<quint64> TextViewWidget::firstVisibleByteOffset() const {
+    if (m_lines.isEmpty()) {
+        return std::nullopt;
+    }
+    const int first = firstVisibleLine();
+    if (first < 0 || first >= m_lines.size()) {
+        return std::nullopt;
+    }
+    const DisplayLine& line = m_lines.at(first);
+    if (line.byteLength <= 0) {
+        return std::nullopt;
+    }
+    return line.absoluteOffset;
+}
+
+std::optional<quint64> TextViewWidget::lastVisibleByteOffset() const {
+    if (m_lines.isEmpty()) {
+        return std::nullopt;
+    }
+    const int first = firstVisibleLine();
+    const int visible = visibleLineCount();
+    const int lastLineIdx = qMin(m_lines.size() - 1, first + visible - 1);
+    if (lastLineIdx < 0 || lastLineIdx >= m_lines.size()) {
+        return std::nullopt;
+    }
+    const DisplayLine& line = m_lines.at(lastLineIdx);
+    if (line.byteLength <= 0) {
+        return std::nullopt;
+    }
+    return line.absoluteOffset + static_cast<quint64>(line.byteLength) - 1ULL;
 }
 
 unsigned char TextViewWidget::byteAtAbsoluteOffset(quint64 absoluteOffset) const {
@@ -1356,6 +1600,80 @@ QString TextViewWidget::selectedCHeaderText() const {
     return out;
 }
 
+QString TextViewWidget::formatOffset(quint64 offset, OffsetCopyFormat format) const {
+    switch (format) {
+        case OffsetCopyFormat::Decimal:
+            return QString::number(offset);
+        case OffsetCopyFormat::Hex:
+            return QStringLiteral("0x%1").arg(QString::number(offset, 16).toUpper());
+        case OffsetCopyFormat::Binary:
+            return QStringLiteral("0b%1").arg(QString::number(offset, 2));
+        default:
+            return QString::number(offset);
+    }
+}
+
+QString TextViewWidget::gutterOffsetText(quint64 offset) const {
+    switch (m_gutterOffsetFormat) {
+        case GutterOffsetFormat::HexWithPrefix:
+            return QStringLiteral("0x%1").arg(QString::number(offset, 16).toUpper());
+        case GutterOffsetFormat::Hex:
+            return QString::number(offset, 16).toUpper();
+        case GutterOffsetFormat::Decimal:
+            return QString::number(offset);
+        case GutterOffsetFormat::Binary:
+            return QString::number(offset, 2);
+        case GutterOffsetFormat::SiOneDecimal:
+            return formatSiOffset(offset, 1);
+        case GutterOffsetFormat::SiTwoDecimals:
+            return formatSiOffset(offset, 2);
+        case GutterOffsetFormat::SiExpanded:
+            return formatSiOffsetExpanded(offset);
+        default:
+            return QString::number(offset, 16).toUpper();
+    }
+}
+
+QString TextViewWidget::formatSiOffset(quint64 offset, int decimals) const {
+    static const char* kUnits[] = {"B", "KiB", "MiB", "GiB"};
+    long double value = static_cast<long double>(offset);
+    int unitIdx = 0;
+    while (value >= 1024.0L && unitIdx < 3) {
+        value /= 1024.0L;
+        ++unitIdx;
+    }
+    return QStringLiteral("%1 %2")
+        .arg(QString::number(static_cast<double>(value), 'f', qMax(0, decimals)))
+        .arg(kUnits[unitIdx]);
+}
+
+QString TextViewWidget::formatSiOffsetExpanded(quint64 offset) const {
+    const quint64 gibDiv = 1024ULL * 1024ULL * 1024ULL;
+    const quint64 mibDiv = 1024ULL * 1024ULL;
+    const quint64 kibDiv = 1024ULL;
+    quint64 remainder = offset;
+    const quint64 gib = remainder / gibDiv;
+    remainder %= gibDiv;
+    const quint64 mib = remainder / mibDiv;
+    remainder %= mibDiv;
+    const quint64 kib = remainder / kibDiv;
+    remainder %= kibDiv;
+    const quint64 bytes = remainder;
+
+    QVector<QString> parts;
+    if (gib > 0) {
+        parts.push_back(QStringLiteral("%1 GiB").arg(gib));
+    }
+    if (gib > 0 || mib > 0) {
+        parts.push_back(QStringLiteral("%1 MiB").arg(mib));
+    }
+    if (gib > 0 || mib > 0 || kib > 0) {
+        parts.push_back(QStringLiteral("%1 KiB").arg(kib));
+    }
+    parts.push_back(QStringLiteral("%1 B").arg(bytes));
+    return parts.join(QStringLiteral(" + "));
+}
+
 void TextViewWidget::copySelectionToClipboard(CopyFormat format) const {
     if (!hasSelectionRange()) {
         return;
@@ -1391,6 +1709,14 @@ void TextViewWidget::copySelectionToClipboard(CopyFormat format) const {
             break;
         }
     }
+}
+
+void TextViewWidget::copyOffsetToClipboard(quint64 offset, OffsetCopyFormat format) const {
+    QClipboard* clipboard = QGuiApplication::clipboard();
+    if (clipboard == nullptr) {
+        return;
+    }
+    clipboard->setText(formatOffset(offset, format));
 }
 
 int TextViewWidget::fixedBytesPerLine() const {
@@ -1505,8 +1831,58 @@ void TextViewWidget::showSelectionContextMenu(const QPoint& localPos) {
     }
 }
 
+void TextViewWidget::showGutterContextMenu(const QPoint& localPos) {
+    const std::optional<quint64> offset = gutterOffsetForPoint(localPos);
+    if (!offset.has_value()) {
+        return;
+    }
+
+    QMenu menu(this);
+    QAction* copyDecimal = menu.addAction(QStringLiteral("Copy offset (decimal)"));
+    QAction* copyHex = menu.addAction(QStringLiteral("Copy offset (hex)"));
+    QAction* copyBinary = menu.addAction(QStringLiteral("Copy offset (binary)"));
+    menu.addSeparator();
+    QMenu* formatMenu = menu.addMenu(QStringLiteral("Format"));
+    auto* formatGroup = new QActionGroup(formatMenu);
+    formatGroup->setExclusive(true);
+    auto addFormatAction = [&](const QString& label, GutterOffsetFormat format) {
+        QAction* action = formatMenu->addAction(label);
+        action->setCheckable(true);
+        action->setChecked(m_gutterOffsetFormat == format);
+        action->setData(static_cast<int>(format));
+        formatGroup->addAction(action);
+    };
+    addFormatAction(QStringLiteral("HEX: 0x<hexvalue>"), GutterOffsetFormat::HexWithPrefix);
+    addFormatAction(QStringLiteral("HEX: <hexvalue>"), GutterOffsetFormat::Hex);
+    addFormatAction(QStringLiteral("Decimal: <decimalvalue>"), GutterOffsetFormat::Decimal);
+    addFormatAction(QStringLiteral("Binary: <binaryvalue>"), GutterOffsetFormat::Binary);
+    addFormatAction(QStringLiteral("Si: <N.0> <B|KiB|MiB|GiB>"), GutterOffsetFormat::SiOneDecimal);
+    addFormatAction(QStringLiteral("Si: <N.00> <B|KiB|MiB|GiB>"), GutterOffsetFormat::SiTwoDecimals);
+    addFormatAction(QStringLiteral("Si: [[[<Ngib> GiB + ]<Nmib> MiB + ]<Nkib> KiB + ]<Nbytes> B"),
+                    GutterOffsetFormat::SiExpanded);
+
+    QAction* selected = menu.exec(m_gutterWidget->mapToGlobal(localPos));
+    if (selected == copyDecimal) {
+        copyOffsetToClipboard(offset.value(), OffsetCopyFormat::Decimal);
+    } else if (selected == copyHex) {
+        copyOffsetToClipboard(offset.value(), OffsetCopyFormat::Hex);
+    } else if (selected == copyBinary) {
+        copyOffsetToClipboard(offset.value(), OffsetCopyFormat::Binary);
+    } else if (selected != nullptr && selected->data().isValid()) {
+        const int formatIdx = selected->data().toInt();
+        if (formatIdx >= static_cast<int>(GutterOffsetFormat::HexWithPrefix) &&
+            formatIdx <= static_cast<int>(GutterOffsetFormat::SiExpanded)) {
+            setGutterOffsetFormat(static_cast<GutterOffsetFormat>(formatIdx));
+        }
+    }
+}
+
 int TextViewWidget::tokenVisualWidth(const Token& token) const {
-    return token.pixelWidth + (token.kind == TokenKind::ByteBox ? 2 : 0);
+    if (token.kind == TokenKind::ByteBox) {
+        return token.pixelWidth + 2;
+    }
+    const int horizontalPadding = m_breatheEnabled ? kTextTokenHorizontalPadding : 0;
+    return token.pixelWidth + (horizontalPadding * 2);
 }
 
 QColor TextViewWidget::colorForClass(TextByteClass cls) const {
@@ -1536,7 +1912,7 @@ QColor TextViewWidget::colorForClass(TextByteClass cls) const {
 void TextViewWidget::layoutChildren() {
     const int scrollW = style()->pixelMetric(QStyle::PM_ScrollBarExtent);
     const int scrollH = style()->pixelMetric(QStyle::PM_ScrollBarExtent);
-    const int gutterW = m_gutterVisible ? 110 : 0;
+    const int gutterW = m_gutterVisible ? m_gutterWidth : 0;
     const int contentW = qMax(0, width() - gutterW - scrollW);
     const int contentH = qMax(0, height() - scrollH);
 
@@ -1557,7 +1933,6 @@ void TextViewWidget::paintContent() {
         return;
     }
 
-    const QFontMetrics fm(font());
     const int lineH = lineHeight();
     const int firstLine = firstVisibleLine();
     const int visible = visibleLineCount();
@@ -1568,7 +1943,6 @@ void TextViewWidget::paintContent() {
 
     for (int i = 0; i < visible && firstLine + i < m_lines.size(); ++i) {
         const int lineIdx = firstLine + i;
-        const int baselineY = fm.ascent() + 8 + i * lineH;
         const QRect rowRect(0, i * lineH, m_contentWidget->width(), lineH);
         if (lineIdx == selectedLine) {
             painter.fillRect(rowRect, palette().alternateBase());
@@ -1595,21 +1969,43 @@ void TextViewWidget::paintContent() {
                                  QColor(180, 255, 180));
             }
 
+            if (m_hoverAnchorOffset.has_value()) {
+                const quint64 hoverStart = m_hoverAnchorOffset.value();
+                const quint64 hoverEnd = hoverStart + 8ULL;
+                if (tokenEndOffset > hoverStart && tokenStartOffset < hoverEnd) {
+                    const quint64 firstHighlightedByte = qMax(tokenStartOffset, hoverStart);
+                    const int highlightIndex = static_cast<int>(firstHighlightedByte - hoverStart);
+                    QColor hoverColor;
+                    if (highlightIndex == 0) {
+                        hoverColor = QColor(173, 216, 230);
+                    } else if (highlightIndex == 1) {
+                        hoverColor = QColor(130, 190, 220);
+                    } else if (highlightIndex <= 3) {
+                        hoverColor = QColor(178, 235, 179);
+                    } else {
+                        hoverColor = QColor(120, 200, 130);
+                    }
+                    painter.fillRect(QRect(x, rowRect.top() + 1, token.pixelWidth, lineH - 2), hoverColor);
+                }
+            }
+
             if (token.kind == TokenKind::Text) {
                 painter.setPen(colorForClass(token.cls));
-                painter.drawText(x, baselineY, token.text);
-                x += token.pixelWidth;
+                const int textCellWidth = tokenVisualWidth(token);
+                const int horizontalPadding = m_breatheEnabled ? kTextTokenHorizontalPadding : 0;
+                const QRect tokenTextRect(x + horizontalPadding, rowRect.top() + 2,
+                                          token.pixelWidth, lineH - 4);
+                painter.drawText(tokenTextRect, Qt::AlignLeft | Qt::AlignVCenter, token.text);
+                x += textCellWidth;
             } else {
                 const QRect tokenRect(x, rowRect.top() + 2, token.pixelWidth, lineH - 4);
                 QColor fg = colorForClass(token.cls);
                 QColor bg = QColor(0, 0, 0, 0);
                 if (token.specialNullBox) {
                     fg = QColor(0, 180, 0);
-                    bg = QColor(0xFE, 0xFE, 0xFE);
                 }
                 if (token.controlByteBox) {
                     fg = QColor(0x00, 0x00, 0x00);
-                    bg = QColor(0xFE, 0xFE, 0xFE);
                 }
                 if (token.collapsedUnprintableRun) {
                     fg = QColor(0x00, 0x00, 0xFF);
@@ -1634,7 +2030,6 @@ void TextViewWidget::paintGutter() {
         return;
     }
 
-    const QFontMetrics fm(font());
     const int lineH = lineHeight();
     const int firstLine = firstVisibleLine();
     const int visible = visibleLineCount();
@@ -1642,22 +2037,57 @@ void TextViewWidget::paintGutter() {
 
     for (int i = 0; i < visible && firstLine + i < m_lines.size(); ++i) {
         const int lineIdx = firstLine + i;
-        const int y = fm.ascent() + 8 + i * lineH;
         const QRect rowRect(0, i * lineH, m_gutterWidget->width(), lineH);
         if (lineIdx == selectedLine) {
             painter.fillRect(rowRect, palette().highlight());
         }
+        if (!m_backingBytes.isEmpty()) {
+            const DisplayLine& line = m_lines.at(lineIdx);
+            if (line.byteLength > 0) {
+                const quint64 chunkStart = m_backingBaseOffset;
+                const quint64 chunkEnd =
+                    chunkStart + static_cast<quint64>(qMax(1, m_backingBytes.size())) - 1ULL;
+                const quint64 lineStart = line.absoluteOffset;
+                const quint64 lineEnd = lineStart + static_cast<quint64>(line.byteLength) - 1ULL;
+                const bool containsStart = chunkStart >= lineStart && chunkStart <= lineEnd;
+                const bool containsEnd = chunkEnd >= lineStart && chunkEnd <= lineEnd;
+                if (containsStart || containsEnd) {
+                    const bool isFileStart = containsStart && chunkStart == 0ULL;
+                    const bool isFileEnd =
+                        containsEnd && m_backingFileSizeBytes > 0 &&
+                        chunkEnd + 1ULL >= m_backingFileSizeBytes;
+                    const QColor edgeColor =
+                        (isFileStart || isFileEnd) ? QColor(150, 230, 150) : QColor(255, 150, 150);
+                    painter.fillRect(rowRect, edgeColor);
+                }
+            }
+        }
         painter.setPen(lineIdx == selectedLine ? palette().highlightedText().color()
                                                : palette().text().color());
-        painter.drawText(6, y,
-                         QStringLiteral("%1")
-                             .arg(m_lines.at(lineIdx).absoluteOffset, 10, 16, QChar('0'))
-                             .toUpper());
+        const QRect offsetTextRect(6, rowRect.top() + 2, qMax(0, rowRect.width() - 8), lineH - 4);
+        painter.drawText(offsetTextRect, Qt::AlignLeft | Qt::AlignVCenter,
+                         gutterOffsetText(m_lines.at(lineIdx).absoluteOffset));
     }
 }
 
 void TextViewWidget::emitCenterAnchorOffset() {
     const quint64 anchor = currentCenterAnchorOffset();
+    if (anchor != m_lastEmittedCenterAnchor) {
+        m_lastEmittedCenterAnchor = anchor;
+        emit centerAnchorOffsetChanged(anchor);
+    }
+}
+
+void TextViewWidget::emitViewportCenterAnchorOffset() {
+    quint64 anchor = m_baseOffset;
+    if (!m_lines.isEmpty()) {
+        const int centerLine =
+            qMin(m_lines.size() - 1, firstVisibleLine() + (visibleLineCount() / 2));
+        const DisplayLine& line = m_lines.at(centerLine);
+        if (!line.tokens.isEmpty()) {
+            anchor = line.tokens.first().absoluteOffset;
+        }
+    }
     if (anchor != m_lastEmittedCenterAnchor) {
         m_lastEmittedCenterAnchor = anchor;
         emit centerAnchorOffsetChanged(anchor);

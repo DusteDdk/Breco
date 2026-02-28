@@ -1,0 +1,16 @@
+flowchart TD
+textCenter["Text center request"] --> requestCenter["requestSharedCenter"]
+bitmapClick["Bitmap byte click"] --> requestCenter
+backingScroll["Text backing scroll"] --> shiftCenter["shiftSharedCenterBy"]
+shiftCenter --> requestCenter
+requestCenter --> scheduleUpdate["scheduleSharedPreviewUpdate"]
+scheduleUpdate --> queuedInvoke["Queued invoke updateSharedPreviewNow"]
+queuedInvoke --> ensureBuffer["ensureRowBufferLoaded"]
+ensureBuffer --> computeSpans["Compute centered spans for both views"]
+computeSpans --> sliceUnion["Slice union range into text/bitmap bytes"]
+sliceUnion --> guardedUpdate["Set m_previewSyncInProgress true"]
+guardedUpdate --> pushText["TextView setData/match/selected offset"]
+guardedUpdate --> pushBitmap["BitmapView setData/center/highlight"]
+pushText --> clearGuard["Set m_previewSyncInProgress false"]
+pushBitmap --> clearGuard
+clearGuard --> updateHover["Update text+bitmap hover buffers"]

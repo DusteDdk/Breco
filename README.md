@@ -39,10 +39,10 @@ Benchmark policy:
 
 1. Select a source with `Open file/device` (readable regular file) or `Open directory` (recursive).
 2. Enter `Search term`.
-3. Set scan parameters (`Ignore case`, `Scan`, `Shift`, `Block size`, `Workers`).
+3. Set scan parameters (`Ignore case`, `Shift`, `Block size`, `Workers`, `PrefillOnMerge`).
 4. Run `Scan`.
 5. Select a result row to load text and bitmap previews.
-6. Right-click the results table for export options.
+6. Hover text/bitmap bytes to inspect values in the current-byte panel.
 
 ## Scan controls
 
@@ -54,6 +54,7 @@ Benchmark policy:
 - `Bits`: range `-127..127`
 - `Block size`: `B`, `KiB`, `MiB`.
 - `Workers`: number of worker threads.
+- `PrefillOnMerge`: include transformed windows while merging result buffers.
 - `Selected`: shows currently selected file path or directory path.
 
 Info area shows:
@@ -67,25 +68,25 @@ Info area shows:
 Columns:
 1. Thread
 2. Filename
-3. Context
-4. Byte offset
-5. Valid bytes before
-6. Valid bytes after
-7. Chunk id
-8. Time offset
+3. Offset
+4. Search time
 
 ## Text preview
 
 Controls:
 - mode: `ASCII`, `UTF-8`, `UTF-16`
-- `Garbage`
-- `Newlines`
-- `Wrap`
+- display: `StringMode` / `ByteMode`
+- `Wrap` (StringMode)
+- `Collapse` (StringMode)
+- `breathe` (StringMode)
+- newline mode selector (StringMode)
+- `Monospace` (StringMode)
+- bytes-per-line selector (ByteMode)
 
 Behavior:
 - gutter uses GhostWhite (`#F8F8FF`).
 - text is selectable; `Ctrl+C` copies selection.
-- hover updates the status line with value decodes for the hovered byte.
+- hover syncs with bitmap and current-byte panel.
 
 ## Bitmap preview
 
@@ -93,6 +94,7 @@ Modes:
 - `RGB24`
 - `Grey8`
 - `Grey24`
+- `RGBi256`
 - `Binary`
 - `Text`
 
@@ -122,37 +124,44 @@ Hover behavior:
 - `<N> bytes at offset: <n>`
 - `---`
 - `<sequence-text>`
-- bitmap hover also updates the status line.
+- bitmap hover also updates current-byte panel values.
+
+## Current byte panel
+
+Hovering text or bitmap data updates:
+- ASCII, UTF-8, UTF-16 hints
+- signed/unsigned integer interpretations for 8/16/32/64-bit widths
+- little-endian and big-endian value columns (where available)
+- large character display, with selectable big-endian/little-endian char interpretation mode
+- caption highlighting by available byte width (8/16/32/64)
 
 ## Status line
 
-Hovering text or bitmap data shows:
-- filename + byte offset
-- ASCII
-- UTF-8
-- UTF-16
-- HEX-8/16/32/64 + unsigned HEX variants
-- float and double interpretations (little-endian)
-
-## Exporting
-
-Right-click results table:
-- `Save this (with markers, info & content)`
-- `Save this (content only)`
-- `Save all (single file, markers/info/content)`
-- `Save all (content only, per source file)`
+Status bar is used for lifecycle and cache messages, for example:
+- `Scanning...`
+- `Merged results: <N>`
+- `Scan finished`
+- `Current buffer: ... -- All buffers: ...`
 
 ## Persisted settings (`QSettings`)
 
 - last file dialog path
 - last directory dialog path
-- text `Garbage`
-- text `Newlines`
+- remembered single-file source path
+- text byte/string display mode
 - text `Wrap`
+- text `Collapse`
+- text `breathe`
+- text newline mode
+- text `Monospace`
+- text bytes-per-line mode
+- prefill-on-merge
+- scan block size value and unit
+- main splitter sizes
+- text gutter format and gutter width
 
 ## Current limits and caveats
 
-- scan auto-stops when merged results exceed `4000`.
 - source filtering accepts only readable regular files.
 - result table ordering follows controller batch merge order, not global byte-order sort.
 - ignore-case matching is ASCII-byte folding, not full Unicode case-folding.

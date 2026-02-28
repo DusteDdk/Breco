@@ -31,7 +31,7 @@ public:
 
     void startScan(const QVector<ScanTarget>& targets, const QByteArray& searchTerm, quint32 blockSize,
                    int workerCount, TextInterpretationMode mode, bool ignoreCase,
-                   ShiftSettings shiftSettings, bool prefillOnMerge,
+                   bool prefillOnMerge,
                    std::chrono::steady_clock::time_point scanButtonPressTime =
                        std::chrono::steady_clock::time_point{});
     void requestStop();
@@ -61,7 +61,7 @@ private:
     void markJobTokenCompleted(quint64 bufferToken);
     void buildFinalResults();
     void buildResultBuffers();
-    QByteArray loadShiftedWindow(int scanTargetIdx, quint64 start, quint64 size) const;
+    QByteArray loadRawWindow(int scanTargetIdx, quint64 start, quint64 size) const;
     quint64 fileSizeForTarget(int scanTargetIdx) const;
     void stopInternal(bool userStop);
     void emitProgress();
@@ -71,7 +71,6 @@ private:
     quint32 m_blockSize = 4096;
     TextInterpretationMode m_textMode = TextInterpretationMode::Ascii;
     bool m_ignoreCase = false;
-    ShiftSettings m_shiftSettings;
     bool m_prefillOnMerge = true;
     std::chrono::steady_clock::time_point m_scanStartTime{};
     std::atomic<quint64> m_chunkCounter{0};

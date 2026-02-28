@@ -1,0 +1,16 @@
+flowchart TD
+batchReady["onResultsBatchReady"] --> enforceBudget["enforceBufferCacheBudget"]
+enforceBudget --> overBudget{"Resident bytes > budget?"}
+overBudget -->|No| keepBuffers["Keep current buffers"]
+overBudget -->|Yes| chooseVictim["Pick largest then least-referenced buffer"]
+chooseVictim --> replacePlaceholder["Replace with zero-length placeholder(s)"]
+replacePlaceholder --> enforceBudget
+keepBuffers --> previewUpdate["updateSharedPreviewNow"]
+previewUpdate --> ensureLoaded["ensureRowBufferLoaded"]
+ensureLoaded --> isResident{"Row buffer bytes present?"}
+isResident -->|Yes| renderViews["Render text/bitmap views"]
+isResident -->|No| loadEvicted["loadEvictedWindowForMatch"]
+loadEvicted --> loadOk{"Reload succeeded?"}
+loadOk -->|No| abortPreview["Abort this preview update"]
+loadOk -->|Yes| protectAndEnforce["Protect loaded index + re-enforce budget"]
+protectAndEnforce --> renderViews

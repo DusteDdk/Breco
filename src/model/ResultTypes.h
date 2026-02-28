@@ -47,6 +47,7 @@ struct ResultBuffer {
     int scanTargetIdx = -1;
     quint64 fileOffset = 0;
     QByteArray bytes;
+    bool dirty = false;
 };
 
 }  // namespace breco

@@ -7,6 +7,7 @@
 #include <QEvent>
 #include <QObject>
 #include <QString>
+#include <QStringList>
 #include <QtGlobal>
 
 #include "app/MainWindow.h"
@@ -234,6 +235,10 @@ private:
 int main(int argc, char* argv[]) {
     BrecoApplication app(argc, argv);
     breco::MainWindow window;
+    const QStringList args = app.arguments();
+    if (args.size() >= 2) {
+        window.selectSourcePath(args.at(1));
+    }
     window.show();
     return app.exec();
 }

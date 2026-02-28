@@ -3,13 +3,11 @@
 #include <chrono>
 
 #include "scan/MatchUtils.h"
-#include "scan/ShiftTransform.h"
 
 namespace breco {
 
 ScanWorker::ScanWorker(int workerId, QByteArray searchTerm, TextInterpretationMode mode,
-                       bool ignoreCase, ShiftSettings shiftSettings,
-                       std::atomic<quint64>* totalBytesScanned,
+                       bool ignoreCase, std::atomic<quint64>* totalBytesScanned,
                        std::chrono::steady_clock::time_point scanStartTime,
                        JobCompleteCallback onJobComplete)
     : m_workerId(workerId),
@@ -17,7 +15,6 @@ ScanWorker::ScanWorker(int workerId, QByteArray searchTerm, TextInterpretationMo
       m_searchTerm(std::move(searchTerm)),
       m_mode(mode),
       m_ignoreCase(ignoreCase),
-      m_shiftSettings(shiftSettings),
       m_scanStartTime(scanStartTime),
       m_onJobComplete(std::move(onJobComplete)) {}
 
@@ -94,24 +91,18 @@ void ScanWorker::processJob(const ScanJob& job) {
     }
 
     QByteArray transformed;
-    if (m_shiftSettings.amount == 0) {
-        // No-shift fast path: scan directly from the shared read buffer without extra copy.
-        const qint64 localStart =
-            static_cast<qint64>(job.fileOffset) - static_cast<qint64>(buffer->rawStart);
-        const qint64 localEnd = localStart + static_cast<qint64>(job.size);
-        if (localStart >= 0 && localEnd >= localStart && localEnd <= buffer->rawBytes.size()) {
-            transformed = QByteArray::fromRawData(
-                buffer->rawBytes.constData() + static_cast<int>(localStart),
-                static_cast<int>(job.size));
-        } else {
-            transformed = ShiftTransform::transformWindow(
-                buffer->rawBytes, buffer->rawStart, job.fileOffset,
-                static_cast<quint64>(job.size), buffer->fileSize, m_shiftSettings);
-        }
+    const qint64 localStart =
+        static_cast<qint64>(job.fileOffset) - static_cast<qint64>(buffer->rawStart);
+    const qint64 localEnd = localStart + static_cast<qint64>(job.size);
+    if (localStart >= 0 && localEnd >= localStart && localEnd <= buffer->rawBytes.size()) {
+        transformed = QByteArray::fromRawData(
+            buffer->rawBytes.constData() + static_cast<int>(localStart),
+            static_cast<int>(job.size));
     } else {
-        transformed = ShiftTransform::transformWindow(
-            buffer->rawBytes, buffer->rawStart, job.fileOffset, static_cast<quint64>(job.size),
-            buffer->fileSize, m_shiftSettings);
+        if (m_totalBytesScanned != nullptr) {
+            m_totalBytesScanned->fetch_add(job.reportLimit, std::memory_order_relaxed);
+        }
+        return;
     }
 
     int pos = 0;

@@ -1,0 +1,8 @@
+flowchart TD
+startRun["Contiguous non-invalid byte run"] --> runLen{"Run length >= 5?"}
+runLen -->|Yes| qualifiesLong["Qualifies as sequence"]
+runLen -->|No| minLen{"Run length >= 2?"}
+minLen -->|No| notQualifyShort["Does not qualify"]
+minLen -->|Yes| followedByNull{"Immediate next byte == 0x00?"}
+followedByNull -->|Yes| qualifiesNullTerm["Qualifies as sequence"]
+followedByNull -->|No| notQualifyNoNull["Does not qualify"]
