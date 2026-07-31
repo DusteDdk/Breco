@@ -1,0 +1,333 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>HexViewControlsPanel</class>
+ <widget class="QWidget" name="HexViewControlsPanel">
+  <layout class="QVBoxLayout" name="hexViewControlsLayout">
+   <property name="leftMargin">
+    <number>4</number>
+   </property>
+   <property name="topMargin">
+    <number>4</number>
+   </property>
+   <property name="rightMargin">
+    <number>4</number>
+   </property>
+   <property name="bottomMargin">
+    <number>4</number>
+   </property>
+   <item>
+    <widget class="QGroupBox" name="hexInfoGroup">
+     <property name="title">
+      <string>Byte / Text Navigator</string>
+     </property>
+     <layout class="QFormLayout" name="hexInfoForm">
+      <item row="0" column="0">
+       <widget class="QLabel" name="fileNameLabel">
+        <property name="text">
+         <string>File name</string>
+        </property>
+       </widget>
+      </item>
+      <item row="0" column="1">
+       <widget class="QLabel" name="fileNameValueLabel">
+        <property name="text">
+         <string>-</string>
+        </property>
+        <property name="wordWrap">
+         <bool>true</bool>
+        </property>
+       </widget>
+      </item>
+      <item row="1" column="0">
+       <widget class="QLabel" name="fileSizeLabel">
+        <property name="text">
+         <string>FileSize</string>
+        </property>
+       </widget>
+      </item>
+      <item row="1" column="1">
+       <widget class="QLabel" name="fileSizeValueLabel">
+        <property name="text">
+         <string>-</string>
+        </property>
+       </widget>
+      </item>
+      <item row="2" column="0">
+       <widget class="QLabel" name="offsetLabel">
+        <property name="text">
+         <string>Offset</string>
+        </property>
+       </widget>
+      </item>
+      <item row="2" column="1">
+       <widget class="QLabel" name="offsetValueLabel">
+        <property name="text">
+         <string>-</string>
+        </property>
+       </widget>
+      </item>
+      <item row="3" column="0">
+       <widget class="QLabel" name="selectedLabel">
+        <property name="text">
+         <string>Selected</string>
+        </property>
+       </widget>
+      </item>
+      <item row="3" column="1">
+       <widget class="QLabel" name="selectedValueLabel">
+        <property name="text">
+         <string/>
+        </property>
+       </widget>
+      </item>
+     </layout>
+    </widget>
+   </item>
+   <item>
+    <widget class="QGroupBox" name="hexControlsGroup">
+     <property name="title">
+      <string>Hex View</string>
+     </property>
+     <layout class="QFormLayout" name="hexControlsForm">
+      <item row="0" column="0">
+       <widget class="QLabel" name="highlightResultLabel">
+        <property name="text">
+         <string>Highlight result</string>
+        </property>
+       </widget>
+      </item>
+      <item row="0" column="1">
+       <widget class="QCheckBox" name="highlightResultCheckBox">
+        <property name="checked">
+         <bool>true</bool>
+        </property>
+       </widget>
+      </item>
+      <item row="1" column="0">
+       <widget class="QLabel" name="showAsLabel">
+        <property name="text">
+         <string>Show as</string>
+        </property>
+       </widget>
+      </item>
+      <item row="1" column="1">
+       <widget class="QComboBox" name="showAsComboBox">
+        <item>
+         <property name="text">
+          <string>Bytes</string>
+         </property>
+        </item>
+        <item>
+         <property name="text">
+          <string>ASCII</string>
+         </property>
+        </item>
+        <item>
+         <property name="text">
+          <string>UTF-8</string>
+         </property>
+        </item>
+        <item>
+         <property name="text">
+          <string>UTF-16</string>
+         </property>
+        </item>
+       </widget>
+      </item>
+      <item row="2" column="0">
+       <widget class="QLabel" name="newlineLabel">
+        <property name="text">
+         <string>Newline</string>
+        </property>
+       </widget>
+      </item>
+      <item row="2" column="1">
+       <widget class="QComboBox" name="newlineModeComboBox">
+        <item>
+         <property name="text">
+          <string>Newline: None</string>
+         </property>
+        </item>
+        <item>
+         <property name="text">
+          <string>Newline: NL</string>
+         </property>
+        </item>
+        <item>
+         <property name="text">
+          <string>Newline: CRLF</string>
+         </property>
+        </item>
+        <item>
+         <property name="text">
+          <string>Newline: NULL</string>
+         </property>
+        </item>
+        <item>
+         <property name="text">
+          <string>Newline: NL | CR | NULL</string>
+         </property>
+        </item>
+       </widget>
+      </item>
+      <item row="3" column="0">
+       <widget class="QLabel" name="endianLabel">
+        <property name="text">
+         <string>Endian</string>
+        </property>
+       </widget>
+      </item>
+      <item row="3" column="1">
+       <layout class="QHBoxLayout" name="endianLayout">
+        <item>
+         <widget class="QRadioButton" name="littleEndianRadioButton">
+          <property name="text">
+           <string>little</string>
+          </property>
+          <property name="checked">
+           <bool>true</bool>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QRadioButton" name="bigEndianRadioButton">
+          <property name="text">
+           <string>big</string>
+          </property>
+         </widget>
+        </item>
+       </layout>
+      </item>
+      <item row="4" column="0">
+       <widget class="QLabel" name="bytesPerLineLabel">
+        <property name="text">
+         <string>Bytes/Line</string>
+        </property>
+       </widget>
+      </item>
+      <item row="4" column="1">
+       <widget class="QComboBox" name="bytesPerLineComboBox">
+        <item>
+         <property name="text">
+          <string>8</string>
+         </property>
+        </item>
+        <item>
+         <property name="text">
+          <string>16</string>
+         </property>
+        </item>
+        <item>
+         <property name="text">
+          <string>32</string>
+         </property>
+        </item>
+        <item>
+         <property name="text">
+          <string>64</string>
+         </property>
+        </item>
+        <item>
+         <property name="text">
+          <string>Auto</string>
+         </property>
+        </item>
+       </widget>
+      </item>
+      <item row="5" column="0" colspan="2">
+       <layout class="QGridLayout" name="toggleGrid">
+        <item row="0" column="0">
+         <widget class="QCheckBox" name="stringsOnlyCheckBox">
+          <property name="text">
+           <string>Strings only</string>
+          </property>
+         </widget>
+        </item>
+        <item row="0" column="1">
+         <widget class="QCheckBox" name="monospaceCheckBox">
+          <property name="text">
+           <string>Monospace</string>
+          </property>
+         </widget>
+        </item>
+        <item row="1" column="0">
+         <widget class="QCheckBox" name="wrapCheckBox">
+          <property name="text">
+           <string>Wrap</string>
+          </property>
+          <property name="checked">
+           <bool>true</bool>
+          </property>
+         </widget>
+        </item>
+        <item row="1" column="1">
+         <widget class="QCheckBox" name="breatheCheckBox">
+          <property name="text">
+           <string>Breathe</string>
+          </property>
+         </widget>
+        </item>
+        <item row="2" column="0">
+         <widget class="QCheckBox" name="collapseCheckBox">
+          <property name="text">
+           <string>Collapse</string>
+          </property>
+          <property name="checked">
+           <bool>true</bool>
+          </property>
+         </widget>
+        </item>
+       </layout>
+      </item>
+      <item row="6" column="0">
+       <widget class="QLabel" name="shiftLabel">
+        <property name="text">
+         <string>Shift</string>
+        </property>
+       </widget>
+      </item>
+      <item row="6" column="1">
+       <layout class="QHBoxLayout" name="shiftLayout">
+        <item>
+         <widget class="QSpinBox" name="shiftBitsSpinBox">
+          <property name="minimum">
+           <number>-127</number>
+          </property>
+          <property name="maximum">
+           <number>127</number>
+          </property>
+          <property name="value">
+           <number>0</number>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QLabel" name="shiftBitsLabel">
+          <property name="text">
+           <string>bits</string>
+          </property>
+         </widget>
+        </item>
+       </layout>
+      </item>
+     </layout>
+    </widget>
+   </item>
+   <item>
+    <spacer name="verticalSpacer">
+     <property name="orientation">
+      <enum>Qt::Vertical</enum>
+     </property>
+     <property name="sizeHint" stdset="0">
+      <size>
+       <width>20</width>
+       <height>40</height>
+      </size>
+     </property>
+    </spacer>
+   </item>
+  </layout>
+ </widget>
+ <resources/>
+ <connections/>
+</ui>

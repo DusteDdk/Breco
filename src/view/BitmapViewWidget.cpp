@@ -70,6 +70,18 @@ void BitmapViewWidget::setTextMode(TextInterpretationMode mode) {
     }
 }
 
+void BitmapViewWidget::setUtf16LittleEndian(bool littleEndian) {
+    if (m_utf16LittleEndian == littleEndian) {
+        return;
+    }
+    m_utf16LittleEndian = littleEndian;
+    markTextAnalysisDirty();
+    if (m_mode == BitmapMode::Text) {
+        markDirty();
+        update();
+    }
+}
+
 void BitmapViewWidget::setExternalHoverOffset(std::optional<quint64> absoluteOffset) {
     if (m_externalHoverOffset == absoluteOffset) {
         return;
@@ -212,7 +224,7 @@ void BitmapViewWidget::rebuildTextAnalysisIfNeeded() {
         return;
     }
     const quint64 startUs = debug::selectionTraceElapsedUs();
-    m_textAnalysis = TextSequenceAnalyzer::analyze(m_bytes, m_textMode);
+    m_textAnalysis = TextSequenceAnalyzer::analyze(m_bytes, m_textMode, m_utf16LittleEndian);
     m_textAnalysisDirty = false;
     if (debug::selectionTraceEnabled()) {
         BRECO_SELTRACE(QStringLiteral("BitmapViewWidget::rebuildTextAnalysisIfNeeded: elapsed=%1us")

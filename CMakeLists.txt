@@ -9,37 +9,82 @@ set(CMAKE_AUTORCC ON)
 set(CMAKE_AUTOUIC ON)
 set(CMAKE_AUTOUIC_SEARCH_PATHS "${CMAKE_CURRENT_SOURCE_DIR}/ui")
 
-find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Test)
+include(CTest)
+include(GNUInstallDirs)
+
+find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets)
+
+if(WIN32)
+    add_compile_definitions(WINVER=0x0A00 _WIN32_WINNT=0x0A00)
+endif()
+
+set(BRECO_ENABLE_LINUX_PRIVILEGED_OPEN OFF)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    set(BRECO_ENABLE_LINUX_PRIVILEGED_OPEN ON)
+    find_package(Qt6 REQUIRED COMPONENTS DBus Network)
+endif()
 
 set(BRECO_SOURCES
     src/main.cpp
     src/app/MainWindow.cpp
     src/panel/BitmapViewPanel.cpp
     src/panel/CurrentByteInfoPanel.cpp
+    src/panel/DataViewByteAndBitmapPanel.cpp
+    src/panel/DataViewImagePanel.cpp
+    src/panel/DataViewShellPanel.cpp
+    src/panel/DataViewStructuredPanel.cpp
+    src/panel/HexViewControlsPanel.cpp
     src/panel/ResultsTablePanel.cpp
     src/panel/ScanControlsPanel.cpp
+    src/panel/StructDataViewPanel.cpp
+    src/panel/StructDeclarationPanel.cpp
+    src/panel/StructModeLeftPanel.cpp
     src/panel/TextViewPanel.cpp
     src/scan/ScanController.cpp
     src/scan/ScanWorker.cpp
     src/scan/ShiftTransform.cpp
     src/scan/MatchUtils.cpp
     src/model/ResultModel.cpp
+    src/panel/MainTabsPanel.cpp
     src/view/BitmapViewWidget.cpp
     src/view/TextViewWidget.cpp
     src/io/FileEnumerator.cpp
     src/io/OpenFilePool.cpp
+    src/io/ProtectedSourceOpener.cpp
     src/io/ShiftedWindowLoader.cpp
+    src/image/EmbeddedImageScanner.cpp
     src/settings/AppSettings.cpp
     src/text/TextSequenceAnalyzer.cpp
     src/text/StringModeRules.cpp
+    src/struct/StructureGraph.cpp
+    src/struct/StructDeclarationParser.cpp
+    src/struct/StructExport.cpp
+    src/struct/StructVisualizer.cpp
+    src/struct/StructVisualizedTreeModel.cpp
 )
+
+if(BRECO_ENABLE_LINUX_PRIVILEGED_OPEN)
+    list(APPEND BRECO_SOURCES
+        src/io/PrivilegedFileOpener.cpp
+        src/io/UDisks2DeviceOpener.cpp
+    )
+endif()
 
 set(BRECO_HEADERS
     src/app/MainWindow.h
     src/panel/BitmapViewPanel.h
     src/panel/CurrentByteInfoPanel.h
+    src/panel/DataViewByteAndBitmapPanel.h
+    src/panel/DataViewImagePanel.h
+    src/panel/DataViewShellPanel.h
+    src/panel/DataViewStructuredPanel.h
+    src/panel/HexViewControlsPanel.h
+    src/panel/MainTabsPanel.h
     src/panel/ResultsTablePanel.h
     src/panel/ScanControlsPanel.h
+    src/panel/StructDataViewPanel.h
+    src/panel/StructDeclarationPanel.h
+    src/panel/StructModeLeftPanel.h
     src/panel/TextViewPanel.h
     src/scan/ScanController.h
     src/scan/ScanWorker.h
@@ -53,34 +98,141 @@ set(BRECO_HEADERS
     src/view/TextViewWidget.h
     src/io/FileEnumerator.h
     src/io/OpenFilePool.h
+    src/io/ProtectedSourceOpener.h
     src/io/ShiftedWindowLoader.h
+    src/image/EmbeddedImageScanner.h
     src/settings/AppSettings.h
     src/text/TextSequenceAnalyzer.h
     src/text/StringModeRules.h
+    src/struct/StructTypes.h
+    src/struct/StructureGraph.h
+    src/struct/VisualizedNode.h
+    src/struct/StructDeclarationParser.h
+    src/struct/StructExport.h
+    src/struct/StructVisualizer.h
+    src/struct/StructVisualizedTreeModel.h
 )
+
+if(BRECO_ENABLE_LINUX_PRIVILEGED_OPEN)
+    list(APPEND BRECO_HEADERS
+        src/io/PrivilegedFileOpener.h
+        src/io/UDisks2DeviceOpener.h
+    )
+endif()
 
 set(BRECO_UI
     ui/AboutDialog.ui
     ui/BitmapViewPanel.ui
     ui/CurrentByteInfo.ui
+    ui/DataViewByteAndBitmap.ui
+    ui/DataViewImage.ui
+    ui/DataViewShell.ui
+    ui/DataViewStructured.ui
     ui/EditStack.ui
+    ui/HexViewControlsPanel.ui
+    ui/MainTabsPanel.ui
     ui/MainWindow.ui
     ui/ResultsTablePanel.ui
     ui/ScanControlsPanel.ui
+    ui/StructDataView.ui
+    ui/StructDeclaration.ui
+    ui/StructModeLeftPanel.ui
     ui/TextViewPanel.ui
-    ui/ViewControls.ui
 )
+
+set(BRECO_RESOURCES
+    res/icons.qrc
+)
+
+set(BRECO_QT_LIBS Qt6::Core Qt6::Gui Qt6::Widgets)
+if(BRECO_ENABLE_LINUX_PRIVILEGED_OPEN)
+    list(APPEND BRECO_QT_LIBS Qt6::DBus Qt6::Network)
+endif()
 
 qt_add_executable(breco
     ${BRECO_SOURCES}
     ${BRECO_HEADERS}
     ${BRECO_UI}
+    ${BRECO_RESOURCES}
 )
 
 target_include_directories(breco PRIVATE src)
-target_link_libraries(breco PRIVATE Qt6::Core Qt6::Gui Qt6::Widgets)
+target_link_libraries(breco PRIVATE ${BRECO_QT_LIBS})
 
-enable_testing()
+if(WIN32)
+    set_target_properties(breco PROPERTIES WIN32_EXECUTABLE TRUE)
+endif()
+
+if(BRECO_ENABLE_LINUX_PRIVILEGED_OPEN)
+    add_executable(breco_privileged_open_helper
+        src/io/PrivilegedOpenHelper.cpp
+    )
+endif()
+
+add_executable(brecodump
+    src/cli/brecodump.cpp
+    src/io/OpenFilePool.cpp
+    src/io/ShiftedWindowLoader.cpp
+    src/scan/ShiftTransform.cpp
+    src/struct/StructureGraph.cpp
+    src/struct/StructDeclarationParser.cpp
+    src/struct/StructExport.cpp
+    src/struct/StructVisualizer.cpp
+)
+target_include_directories(brecodump PRIVATE src)
+target_link_libraries(brecodump PRIVATE Qt6::Core)
+
+if(WIN32)
+    set_target_properties(brecodump PROPERTIES WIN32_EXECUTABLE FALSE)
+endif()
+
+if(WIN32)
+    function(breco_add_windows_executable_icon target icon_png)
+        get_filename_component(icon_basename "${icon_png}" NAME_WE)
+        set(icon_dir "${CMAKE_CURRENT_BINARY_DIR}/win-icons/${target}")
+        set(icon_ico "${icon_dir}/${icon_basename}.ico")
+        set(icon_rc "${icon_dir}/${target}.rc")
+
+        find_program(BRECO_ICON_CONVERTER NAMES magick convert)
+        if(NOT BRECO_ICON_CONVERTER)
+            message(WARNING "ImageMagick (magick/convert) not found; ${target} will be built without a custom icon.")
+            return()
+        endif()
+
+        if(BRECO_ICON_CONVERTER MATCHES "magick$")
+            set(_icon_convert_cmd "${BRECO_ICON_CONVERTER}" convert)
+        else()
+            set(_icon_convert_cmd "${BRECO_ICON_CONVERTER}")
+        endif()
+
+        file(MAKE_DIRECTORY "${icon_dir}")
+        file(WRITE "${icon_rc}" "IDI_ICON1 ICON DISCARDABLE \"${icon_basename}.ico\"\n")
+
+        add_custom_command(
+            OUTPUT "${icon_ico}"
+            COMMAND ${_icon_convert_cmd}
+                    "${CMAKE_CURRENT_SOURCE_DIR}/res/${icon_png}"
+                    -define icon:auto-resize=256,128,64,48,32,16
+                    "${icon_ico}"
+            DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/res/${icon_png}"
+            COMMENT "Generating Windows icon ${icon_ico}"
+            VERBATIM
+        )
+
+        target_sources(${target} PRIVATE "${icon_rc}")
+        set_source_files_properties("${icon_rc}" PROPERTIES OBJECT_DEPENDS "${icon_ico}")
+    endfunction()
+
+    breco_add_windows_executable_icon(breco breco-icon.png)
+    breco_add_windows_executable_icon(brecodump brecodump-icon.png)
+endif()
+
+install(TARGETS breco brecodump
+    RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
+)
+
+if(BUILD_TESTING)
+find_package(Qt6 REQUIRED COMPONENTS Test)
 
 set(BRECO_APP_SOURCES ${BRECO_SOURCES})
 list(REMOVE_ITEM BRECO_APP_SOURCES src/main.cpp)
@@ -90,14 +242,15 @@ qt_add_executable(breco_ui_integration_tests
     ${BRECO_APP_SOURCES}
     ${BRECO_HEADERS}
     ${BRECO_UI}
+    ${BRECO_RESOURCES}
 )
 target_include_directories(breco_ui_integration_tests PRIVATE src)
 target_link_libraries(
-    breco_ui_integration_tests PRIVATE Qt6::Core Qt6::Gui Qt6::Widgets Qt6::Test)
+    breco_ui_integration_tests PRIVATE ${BRECO_QT_LIBS} Qt6::Test)
 
 add_test(NAME breco_ui_integration_tests COMMAND breco_ui_integration_tests)
 
-add_executable(breco_unit_tests
+qt_add_executable(breco_unit_tests
     tests/unit_tests.cpp
     src/scan/MatchUtils.cpp
     src/scan/ShiftTransform.cpp
@@ -105,14 +258,38 @@ add_executable(breco_unit_tests
     src/io/FileEnumerator.cpp
     src/io/OpenFilePool.cpp
     src/io/ShiftedWindowLoader.cpp
+    src/image/EmbeddedImageScanner.cpp
+    src/settings/AppSettings.cpp
     src/text/TextSequenceAnalyzer.cpp
     src/text/StringModeRules.cpp
+    src/struct/StructureGraph.cpp
+    src/struct/StructDeclarationParser.cpp
+    src/struct/StructExport.cpp
+    src/struct/StructVisualizer.cpp
+    src/struct/StructVisualizedTreeModel.cpp
+    src/panel/StructModeLeftPanel.cpp
+    src/panel/StructModeLeftPanel.h
+    ui/StructModeLeftPanel.ui
     src/view/BitmapViewWidget.cpp
+    src/view/BitmapViewWidget.h
+    src/view/TextViewWidget.cpp
+    src/view/TextViewWidget.h
 )
 target_include_directories(breco_unit_tests PRIVATE src)
 target_link_libraries(breco_unit_tests PRIVATE Qt6::Core Qt6::Gui Qt6::Widgets)
 
 add_test(NAME breco_unit_tests COMMAND breco_unit_tests)
+
+qt_add_executable(brecodump_cli_tests
+    tests/brecodump_cli_tests.cpp
+)
+target_compile_definitions(
+    brecodump_cli_tests PRIVATE BRECODUMP_PATH="$<TARGET_FILE:brecodump>")
+target_link_libraries(brecodump_cli_tests PRIVATE Qt6::Core Qt6::Test)
+add_dependencies(brecodump_cli_tests brecodump)
+
+add_test(NAME brecodump_cli_tests COMMAND brecodump_cli_tests)
+endif()
 
 add_executable(breco_text_analysis_benchmark
     tests/text_analysis_benchmark.cpp

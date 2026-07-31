@@ -53,12 +53,17 @@ public:
     explicit TextViewWidget(QWidget* parent = nullptr);
 
     void setMode(TextInterpretationMode mode);
+    TextInterpretationMode mode() const;
+    void setUtf16LittleEndian(bool littleEndian);
     void setDisplayMode(TextDisplayMode mode);
     void setData(const QByteArray& bytes, quint64 baseOffset,
                  std::optional<unsigned char> previousByteBeforeBase = std::nullopt,
                  quint64 fileSizeBytes = 0);
     void setSelectedOffset(quint64 absoluteOffset, bool centerInView = true);
+    void setExternalSelectionRange(
+        std::optional<QPair<quint64, quint64>> absoluteRange);
     void setMatchRange(quint64 startOffset, quint32 length);
+    void setResultHighlightEnabled(bool enabled);
     void setGutterVisible(bool visible);
     void setGutterWidth(int width);
     int gutterWidth() const;
@@ -68,18 +73,24 @@ public:
     void setByteLineMode(ByteLineMode mode);
     void setMonospaceEnabled(bool enabled);
     void setBreatheEnabled(bool enabled);
+    void setStringsOnlyEnabled(bool enabled);
     void setHoverAnchorOffset(std::optional<quint64> absoluteOffset);
     void setGutterOffsetFormat(GutterOffsetFormat format);
     GutterOffsetFormat gutterOffsetFormat() const;
     int visibleByteCount() const;
     int scrollBytesPerWheelStepHint() const;
     int recommendedViewportByteCount() const;
+    std::optional<quint64> firstVisibleByteOffset() const;
+    std::optional<quint64> selectedOffset() const;
+    std::optional<quint64> selectionStartOffset() const;
+    std::optional<QPair<quint64, quint64>> selectionRangeOffsets() const;
 
 signals:
     void centerAnchorOffsetChanged(quint64 offset);
     void hoverAbsoluteOffsetChanged(quint64 offset);
     void hoverLeft();
     void selectionRangeChanged(bool hasRange, quint64 start, quint64 end);
+    void byteClicked(quint64 absoluteOffset);
     void backingScrollRequested(int wheelSteps, int bytesPerStepHint, int visibleBytesHint);
     void pageNavigationRequested(int direction, quint64 edgeOffset);
     void fileEdgeNavigationRequested(int edge);
@@ -88,6 +99,7 @@ signals:
     void gutterOffsetFormatChanged(int formatIndex);
     void gutterWidthChanged(int width);
     void chunkEdgeExpansionRequested(int direction);
+    void viewportFirstByteOffsetChanged(bool hasOffset, quint64 offset);
 
 protected:
     void resizeEvent(QResizeEvent* event) override;
@@ -136,6 +148,7 @@ private:
     int xOffsetForAbsoluteOffset(const DisplayLine& line, quint64 absoluteOffset) const;
     quint64 absoluteOffsetForPoint(const QPoint& point) const;
     std::optional<int> visibleIndexForPoint(const QPoint& point) const;
+    bool isByteBoxAtVisibleIndex(int visibleIndex) const;
     std::optional<quint64> gutterOffsetForPoint(const QPoint& point) const;
     std::optional<int> gutterEdgeExpansionDirectionForPoint(const QPoint& point) const;
     void updateHoverFromPoint(const QPoint& point);
@@ -144,7 +157,6 @@ private:
     QPair<int, int> normalizedSelectionVisibleIndices() const;
     QVector<const Token*> selectedTokens() const;
     QVector<quint64> selectedVisibleOffsets() const;
-    std::optional<quint64> firstVisibleByteOffset() const;
     std::optional<quint64> lastVisibleByteOffset() const;
     QByteArray selectedBytes() const;
     QString selectedText(bool replaceNullMarkers) const;
@@ -196,9 +208,12 @@ private:
     bool m_wrapMode = true;
     bool m_collapseRunsEnabled = true;
     bool m_breatheEnabled = false;
+    bool m_stringsOnlyEnabled = false;
     bool m_monospaceEnabled = false;
+    bool m_resultHighlightEnabled = true;
     GutterOffsetFormat m_gutterOffsetFormat = GutterOffsetFormat::Hex;
     bool m_hasSelectedOffset = false;
+    std::optional<QPair<quint64, quint64>> m_externalSelectionRange;
     quint64 m_lastEmittedCenterAnchor = 0;
     qint64 m_lastHoveredAbsoluteOffset = -1;
     std::optional<quint64> m_hoverAnchorOffset;
@@ -206,6 +221,7 @@ private:
     bool m_hasSelection = false;
     int m_selectionStartVisibleIndex = -1;
     int m_selectionEndVisibleIndex = -1;
+    int m_clickPressVisibleIndex = -1;
     bool m_verticalSliderDragInProgress = false;
 
     QVector<DisplayLine> m_lines;

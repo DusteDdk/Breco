@@ -34,7 +34,8 @@ struct TextAnalysisResult {
 
 class TextSequenceAnalyzer {
 public:
-    static TextAnalysisResult analyze(const QByteArray& bytes, TextInterpretationMode mode);
+    static TextAnalysisResult analyze(const QByteArray& bytes, TextInterpretationMode mode,
+                                      bool utf16LittleEndian = true);
     static QString decodeRange(const QByteArray& bytes, int startIndex, int length,
                                TextInterpretationMode mode, bool utf16LittleEndian = true);
 };

@@ -1,0 +1,440 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>StructModeLeftPanel</class>
+ <widget class="QWidget" name="StructModeLeftPanel">
+  <property name="geometry">
+   <rect>
+    <x>0</x>
+    <y>0</y>
+    <width>731</width>
+    <height>534</height>
+   </rect>
+  </property>
+  <property name="windowTitle">
+   <string>Form</string>
+  </property>
+  <layout class="QVBoxLayout" name="structModeLeftPanelLayout">
+   <item>
+    <layout class="QGridLayout" name="sectionControlsLayout">
+     <item row="0" column="1">
+      <widget class="QCheckBox" name="viewsCheckBox">
+       <property name="text">
+        <string>Views</string>
+       </property>
+      </widget>
+     </item>
+     <item row="0" column="2">
+      <widget class="QCheckBox" name="languageCheckBox">
+       <property name="text">
+        <string>Language</string>
+       </property>
+      </widget>
+     </item>
+     <item row="0" column="0">
+      <widget class="QCheckBox" name="editorCheckBox">
+       <property name="checked">
+        <bool>true</bool>
+       </property>
+       <property name="text">
+        <string>Editor</string>
+       </property>
+      </widget>
+     </item>
+     <item row="0" column="4">
+      <widget class="QToolButton" name="saveStructDefinitionButton">
+       <property name="text">
+        <string>Save</string>
+       </property>
+      </widget>
+     </item>
+     <item row="0" column="3">
+      <widget class="QToolButton" name="loadStructDefinitionButton">
+       <property name="text">
+        <string>Load</string>
+       </property>
+      </widget>
+     </item>
+    </layout>
+   </item>
+   <item>
+    <widget class="QWidget" name="structEditorWidgetPlaceholder" native="true">
+     <layout class="QVBoxLayout" name="structDeclarationLayout">
+      <property name="leftMargin">
+       <number>0</number>
+      </property>
+      <property name="topMargin">
+       <number>0</number>
+      </property>
+      <property name="rightMargin">
+       <number>0</number>
+      </property>
+      <property name="bottomMargin">
+       <number>0</number>
+      </property>
+      <item>
+       <layout class="QHBoxLayout" name="structControlsLayout">
+        <item>
+         <widget class="QComboBox" name="entryComboBox">
+          <property name="sizeAdjustPolicy">
+           <enum>QComboBox::AdjustToContents</enum>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QSpinBox" name="entryCountSpinBox">
+          <property name="minimum">
+           <number>1</number>
+          </property>
+          <property name="maximum">
+           <number>1000000</number>
+          </property>
+          <property name="value">
+           <number>1</number>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QCheckBox" name="previewEnabledCheckBox">
+          <property name="text">
+           <string>Enable</string>
+          </property>
+          <property name="enabled">
+           <bool>false</bool>
+          </property>
+          <property name="checked">
+           <bool>true</bool>
+          </property>
+         </widget>
+        </item>
+       </layout>
+      </item>
+      <item>
+       <widget class="QPlainTextEdit" name="structDeclarationEdit">
+        <property name="lineWrapMode">
+         <enum>QPlainTextEdit::NoWrap</enum>
+        </property>
+        <property name="tabStopDistance">
+         <double>32.000000000000000</double>
+        </property>
+        <property name="placeholderText">
+         <string>struct declaration</string>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <widget class="QLabel" name="structDeclarationStatusLabel">
+        <property name="visible">
+         <bool>true</bool>
+        </property>
+        <property name="wordWrap">
+         <bool>true</bool>
+        </property>
+       </widget>
+      </item>
+     </layout>
+    </widget>
+   </item>
+   <item>
+    <widget class="QWidget" name="structViewEntriesWidget" native="true">
+     <property name="visible">
+      <bool>false</bool>
+     </property>
+     <layout class="QVBoxLayout" name="structEditorLayout">
+      <item>
+       <widget class="QTableWidget" name="currentViewsTableWidget">
+        <column>
+         <property name="text">
+          <string>Name</string>
+         </property>
+        </column>
+        <column>
+         <property name="text">
+          <string>Type</string>
+         </property>
+        </column>
+        <column>
+         <property name="text">
+          <string>Repeat</string>
+         </property>
+        </column>
+        <column>
+         <property name="text">
+          <string>Offset</string>
+         </property>
+        </column>
+       </widget>
+      </item>
+      <item>
+       <layout class="QGridLayout" name="viewControlsLayout">
+        <property name="topMargin">
+         <number>0</number>
+        </property>
+        <item row="0" column="3">
+         <widget class="QToolButton" name="removeViewButton">
+          <property name="text">
+           <string>Remove</string>
+          </property>
+         </widget>
+        </item>
+        <item row="0" column="1">
+         <widget class="QToolButton" name="addViewButton">
+          <property name="text">
+           <string>Add previewed</string>
+          </property>
+         </widget>
+        </item>
+       </layout>
+      </item>
+     </layout>
+    </widget>
+   </item>
+   <item>
+    <widget class="QWidget" name="languageReferenceWidget" native="true">
+     <property name="visible">
+      <bool>false</bool>
+     </property>
+     <layout class="QGridLayout" name="languageReferenceLayout">
+      <item row="3" column="2">
+       <widget class="QLabel" name="int64TypeLabel">
+        <property name="text">
+         <string>int64</string>
+        </property>
+       </widget>
+      </item>
+      <item row="4" column="2">
+       <widget class="QLabel" name="utf16StringTypeLabel">
+        <property name="toolTip">
+         <string>UTF-16 string, terminated by a zero code unit unless &lt;len:N&gt; is used. &lt;le&gt; or &lt;be&gt; controls code-unit endianness.</string>
+        </property>
+        <property name="text">
+         <string>utf16str</string>
+        </property>
+       </widget>
+      </item>
+      <item row="0" column="1">
+       <widget class="QLabel" name="uint8TypeLabel">
+        <property name="text">
+         <string>uint8</string>
+        </property>
+       </widget>
+      </item>
+      <item row="1" column="1">
+       <widget class="QLabel" name="uint16TypeLabel">
+        <property name="text">
+         <string>uint16</string>
+        </property>
+       </widget>
+      </item>
+      <item row="1" column="2">
+       <widget class="QLabel" name="int16TypeLabel">
+        <property name="text">
+         <string>int16</string>
+        </property>
+       </widget>
+      </item>
+      <item row="2" column="1">
+       <widget class="QLabel" name="uint32TypeLabel">
+        <property name="text">
+         <string>uint32</string>
+        </property>
+       </widget>
+      </item>
+      <item row="4" column="0">
+       <widget class="QLabel" name="asciiStringTypeLabel">
+        <property name="toolTip">
+         <string>ASCII string, NUL-terminated unless &lt;len:N&gt; or &lt;max:N&gt; is used.</string>
+        </property>
+        <property name="text">
+         <string>asciistr</string>
+        </property>
+       </widget>
+      </item>
+      <item row="0" column="2">
+       <widget class="QLabel" name="int8TypeLabel">
+        <property name="text">
+         <string>int8</string>
+        </property>
+       </widget>
+      </item>
+      <item row="2" column="2">
+       <widget class="QLabel" name="int32TypeLabel">
+        <property name="text">
+         <string>int32</string>
+        </property>
+       </widget>
+      </item>
+      <item row="2" column="0">
+       <widget class="QLabel" name="bigEndianModifierLabel">
+        <property name="toolTip">
+         <string>Treat as big endian</string>
+        </property>
+        <property name="text">
+         <string>&lt;be&gt;</string>
+        </property>
+       </widget>
+      </item>
+      <item row="3" column="0">
+       <widget class="QLabel" name="littleEndianModifierLabel">
+        <property name="toolTip">
+         <string>Treat as little endian</string>
+        </property>
+        <property name="text">
+         <string>&lt;le&gt;</string>
+        </property>
+       </widget>
+      </item>
+      <item row="3" column="1">
+       <widget class="QLabel" name="uint64TypeLabel">
+        <property name="text">
+         <string>uint64</string>
+        </property>
+       </widget>
+      </item>
+      <item row="5" column="1">
+       <widget class="QLabel" name="maxLengthModifierLabel">
+        <property name="toolTip">
+         <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Read at most N units. Strings stop earlier at and consume their NUL terminator. For byte and string fields N counts bytes; for integer fields N counts elements.&lt;/p&gt;&lt;p&gt;Example:&lt;br/&gt;asciistr&amp;lt;max:32&amp;gt; someString;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+        </property>
+        <property name="text">
+         <string>&lt;max:N&gt;</string>
+        </property>
+       </widget>
+      </item>
+      <item row="0" column="0">
+       <widget class="QLabel" name="structKeywordLabel">
+        <property name="toolTip">
+         <string>A datastructure</string>
+        </property>
+        <property name="text">
+         <string>struct</string>
+        </property>
+       </widget>
+      </item>
+      <item row="4" column="1">
+       <widget class="QLabel" name="utf8StringTypeLabel">
+        <property name="toolTip">
+         <string>UTF-8 string, NUL-terminated unless &lt;len:N&gt; or &lt;max:N&gt; is used.</string>
+        </property>
+        <property name="text">
+         <string>utf8str</string>
+        </property>
+       </widget>
+      </item>
+      <item row="1" column="0">
+       <widget class="QLabel" name="typedefKeywordLabel">
+        <property name="toolTip">
+         <string>A type definition (alias)</string>
+        </property>
+        <property name="text">
+         <string>typedef</string>
+        </property>
+       </widget>
+      </item>
+      <item row="6" column="1">
+       <widget class="QLabel" name="variableDirectiveLabel">
+        <property name="toolTip">
+         <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Bind a scalar integer field to NAME. Reference it later as $NAME, or through a nested member path such as $header.itemCount.&lt;/p&gt;&lt;p&gt;Example:&lt;br/&gt;/var(itemCount) uint8 count;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+        </property>
+        <property name="text">
+         <string>/var(NAME)</string>
+        </property>
+       </widget>
+      </item>
+      <item row="5" column="0">
+       <widget class="QLabel" name="byteTypeLabel">
+        <property name="toolTip">
+         <string>One binary byte. With &lt;len:N&gt;, read N bytes.</string>
+        </property>
+        <property name="text">
+         <string>byte</string>
+        </property>
+       </widget>
+      </item>
+      <item row="5" column="2">
+       <widget class="QLabel" name="fixedLengthModifierLabel">
+        <property name="toolTip">
+         <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Read exactly N units. For byte and string fields N counts bytes; for integer fields N counts elements. N may reference a bound variable. NUL bytes are content in fixed-length strings.&lt;/p&gt;&lt;p&gt;Examples:&lt;br/&gt;byte&amp;lt;len:$payloadLength&amp;gt; payload;&lt;br/&gt;int16&amp;lt;len:2&amp;gt; values;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+        </property>
+        <property name="text">
+         <string>&lt;len:N&gt;</string>
+        </property>
+       </widget>
+      </item>
+      <item row="6" column="2">
+       <widget class="QLabel" name="repeatDirectiveLabel">
+        <property name="toolTip">
+         <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Decode the following field or struct N times. N may be an integer or a bound variable path.&lt;/p&gt;&lt;p&gt;Example:&lt;br/&gt;struct Header { /var(itemCount) uint8 count; }&lt;br/&gt;struct File { Header head; /repeat($head.itemCount) FileItem; }&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+        </property>
+        <property name="text">
+         <string>/repeat(N)</string>
+        </property>
+       </widget>
+      </item>
+      <item row="6" column="0">
+       <widget class="QLabel" name="untilExpressionModifierLabel">
+        <property name="toolTip">
+         <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Read bytes or typed elements until =, &amp;lt;, or &amp;gt; matches. The matching element or string sentinel is not consumed, so the next field starts at it.&lt;/p&gt;&lt;p&gt;Example:&lt;br/&gt;byte&amp;lt;until:=&amp;quot;END&amp;quot;&amp;gt; prefix;&lt;br/&gt;asciistr marker;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+        </property>
+        <property name="text">
+         <string>&lt;until:expr&gt;</string>
+        </property>
+       </widget>
+      </item>
+      <item row="7" column="0">
+       <widget class="QLabel" name="conditionDirectiveLabel">
+        <property name="toolTip">
+         <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Validate the following scalar field. If the comparison fails, mark the containing struct invalid and stop it after the failing field.&lt;/p&gt;&lt;p&gt;Operators: =, &amp;lt;, &amp;gt;&lt;br/&gt;Values: quoted string, decimal, hexadecimal, or $variable&lt;/p&gt;&lt;p&gt;Example: /cond(=0x2450) uint16 magic;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+        </property>
+        <property name="text">
+         <string>/cond(expr)</string>
+        </property>
+       </widget>
+      </item>
+      <item row="7" column="1">
+       <widget class="QLabel" name="whenDirectiveLabel">
+        <property name="toolTip">
+         <string>Decode a field only when a two-sided integer comparison is true. A false /when consumes no bytes and emits no row.</string>
+        </property>
+        <property name="text">
+         <string>/when(expr)</string>
+        </property>
+       </widget>
+      </item>
+      <item row="7" column="2">
+       <widget class="QLabel" name="assertDirectiveLabel">
+        <property name="toolTip">
+         <string>Validate a struct after decoding prior members without consuming bytes.</string>
+        </property>
+        <property name="text">
+         <string>/assert(expr)</string>
+        </property>
+       </widget>
+      </item>
+      <item row="8" column="0">
+       <widget class="QLabel" name="bitfieldBlockLabel">
+        <property name="toolTip">
+         <string>Add display-only bit or bits children under a scalar integer field.</string>
+        </property>
+        <property name="text">
+         <string>bitfields</string>
+        </property>
+       </widget>
+      </item>
+      <item row="8" column="1">
+       <widget class="QLabel" name="defaultDirectiveLabel">
+        <property name="toolTip">
+         <string>Select the named top-level entry by default for previews. This file-level directive may appear once.</string>
+        </property>
+        <property name="text">
+         <string>/default NAME</string>
+        </property>
+       </widget>
+      </item>
+     </layout>
+    </widget>
+   </item>
+  </layout>
+ </widget>
+ <resources/>
+ <connections/>
+</ui>

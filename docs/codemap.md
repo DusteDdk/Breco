@@ -51,6 +51,11 @@ mainWindow --> appLoop["Qt event loop (app.exec)"]
 - `OpenFilePool` provides thread-local file handle reuse and bounded per-thread LRU.
 - `ShiftedWindowLoader` uses `OpenFilePool` and `ShiftTransform` to load transformed windows.
 
+### `src/image`
+
+- `EmbeddedImageScanner` finds plausible embedded image starts, validates cheap header fields, and decodes bounded candidates through `QImageReader`.
+- `EmbeddedImageScanController` runs asynchronous View Data image scans, streams progress/live results, and keeps source I/O on one coordinator while worker jobs scan shared immutable chunks.
+
 ### `src/model`
 
 - `ResultModel` is a `QAbstractTableModel` wrapper over `QVector<MatchRecord>`.
@@ -59,6 +64,12 @@ mainWindow --> appLoop["Qt event loop (app.exec)"]
   - `Filename`
   - `Offset` (approximate humanized units)
   - `Search time` (milliseconds)
+
+### `src/struct`
+
+- `StructDeclarationParser` and `StructureGraph` parse and retain BrecoScript declarations.
+- `StructVisualizer` decodes source bytes into `VisualizedNode` trees.
+- `StructVisualizedTreeModel` presents the visible `Name`, `Type`, `Value`, `Bytes`, and `Valid` columns and supplies condition/truncation row backgrounds.
 
 ### `src/view`
 
@@ -71,6 +82,12 @@ mainWindow --> appLoop["Qt event loop (app.exec)"]
   - `ScanControlsPanel`
   - `ResultsTablePanel`
   - `TextViewPanel`
+  - `DataViewShellPanel`
+  - `DataViewByteAndBitmapPanel`
+  - `DataViewStructuredPanel`
+  - `StructModeLeftPanel`
+  - `StructDataViewPanel`
+  - `DataViewImagePanel`
   - `CurrentByteInfoPanel`
   - `BitmapViewPanel`
 
@@ -80,7 +97,7 @@ mainWindow --> appLoop["Qt event loop (app.exec)"]
 
 ### `src/settings`
 
-- `AppSettings` is a static wrapper around `QSettings` for persisted UI preferences and dialog paths.
+- `AppSettings` is a static wrapper around `QSettings` for persisted UI preferences and dialog paths, including the last loaded struct declaration file used by startup preview restoration.
 
 ### `src/debug`
 
@@ -96,10 +113,14 @@ mainWindow --> scanController[ScanController]
 mainWindow --> resultModel[ResultModel]
 mainWindow --> filePool[OpenFilePool]
 mainWindow --> windowLoader[ShiftedWindowLoader]
+mainWindow --> imageScanner[EmbeddedImageScanController]
 mainWindow --> textWidget[TextViewWidget]
 mainWindow --> bitmapWidget[BitmapViewWidget]
 scanController --> readerLoop[readerLoop Thread]
 scanController --> workers[ScanWorker N]
+imageScanner --> imageCoordinator[Image coordinator thread]
+imageCoordinator --> imageJobs[Shared-chunk image jobs]
+imageCoordinator --> imageDecode[Serial QImageReader decode]
 readerLoop --> windowLoader
 windowLoader --> shiftTransform[ShiftTransform]
 workers --> matchUtils[MatchUtils]
@@ -123,6 +144,9 @@ mainWindow --> appSettings[AppSettings]
 - UI result/preview:
   - `MainWindow::onResultsBatchReady()`, `MainWindow::onResultActivated()`
   - `MainWindow::updateSharedPreviewNow()`
+- View Data image scan:
+  - `MainWindow::startImageScan()`, `MainWindow::finishImageScan()`
+  - `EmbeddedImageScanController::startScan()`, `scanEmbeddedImages()`
 - Cache/reload:
   - `MainWindow::enforceBufferCacheBudget()`
   - `MainWindow::evictOneBufferLargestFirstLeastUsed()`
@@ -140,6 +164,10 @@ Qt UI resources are listed in `CMakeLists.txt` and materialized under `ui/`:
 - `ui/TextViewPanel.ui`
 - `ui/CurrentByteInfo.ui`
 - `ui/BitmapViewPanel.ui`
+- `ui/DataViewShell.ui`
+- `ui/DataViewByteAndBitmap.ui`
+- `ui/DataViewStructured.ui`
+- `ui/DataViewImage.ui`
 
 ## UI Designer Naming Paradigm
 

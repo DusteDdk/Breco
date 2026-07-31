@@ -16,9 +16,6 @@
   <widget class="QWidget" name="centralwidget">
    <layout class="QVBoxLayout" name="verticalLayout">
     <item>
-     <widget class="QWidget" name="scanControlsHost" native="true"/>
-    </item>
-    <item>
      <widget class="QWidget" name="lowerContentHost" native="true">
       <layout class="QVBoxLayout" name="lowerContentLayout">
        <property name="leftMargin">
@@ -41,38 +38,7 @@
       <property name="orientation">
        <enum>Qt::Vertical</enum>
       </property>
-      <widget class="QWidget" name="resultsStackHost" native="true">
-       <layout class="QVBoxLayout" name="resultsStackLayout">
-        <property name="leftMargin">
-         <number>0</number>
-        </property>
-        <property name="topMargin">
-         <number>0</number>
-        </property>
-        <property name="rightMargin">
-         <number>0</number>
-        </property>
-        <property name="bottomMargin">
-         <number>0</number>
-        </property>
-        <property name="spacing">
-         <number>4</number>
-        </property>
-        <item>
-         <widget class="QWidget" name="resultsPanelHost" native="true"/>
-        </item>
-        <item>
-         <widget class="QFrame" name="editStack">
-          <property name="frameShape">
-           <enum>QFrame::StyledPanel</enum>
-          </property>
-          <property name="frameShadow">
-           <enum>QFrame::Raised</enum>
-          </property>
-         </widget>
-        </item>
-       </layout>
-      </widget>
+      <widget class="breco::MainTabsPanel" name="mainTabsPanel"/>
          <widget class="QWidget" name="viewsStackHost" native="true">
           <layout class="QVBoxLayout" name="viewsStackLayout">
            <property name="leftMargin">
@@ -91,23 +57,12 @@
             <number>0</number>
            </property>
            <item>
-            <widget class="QWidget" name="viewControlsHost" native="true">
-             <property name="sizePolicy">
-              <sizepolicy hsizetype="Expanding" vsizetype="Fixed">
-               <horstretch>0</horstretch>
-               <verstretch>0</verstretch>
-              </sizepolicy>
-             </property>
-            </widget>
-           </item>
-           <item>
             <widget class="QSplitter" name="mainSplitter">
        <property name="orientation">
         <enum>Qt::Horizontal</enum>
        </property>
+       <widget class="QWidget" name="hexViewControlsPanelHost" native="true"/>
        <widget class="QWidget" name="textViewPanelHost" native="true"/>
-       <widget class="QWidget" name="currentByteInfoPanelHost" native="true"/>
-       <widget class="QWidget" name="bitmapViewPanelHost" native="true"/>
             </widget>
            </item>
           </layout>
@@ -143,7 +98,6 @@
     </property>
     <addaction name="actionViewScanLog"/>
     <addaction name="actionViewEdits"/>
-    <addaction name="actionViewControls"/>
    </widget>
    <widget class="QMenu" name="menuAbout">
     <property name="title">
@@ -187,20 +141,20 @@
     <string>Edits</string>
    </property>
   </action>
-  <action name="actionViewControls">
-   <property name="checkable">
-    <bool>true</bool>
-   </property>
-   <property name="text">
-    <string>View controls</string>
-   </property>
-  </action>
   <action name="actionAbout">
    <property name="text">
     <string>About</string>
    </property>
   </action>
  </widget>
+ <customwidgets>
+  <customwidget>
+   <class>breco::MainTabsPanel</class>
+   <extends>QWidget</extends>
+   <header>panel/MainTabsPanel.h</header>
+   <container>1</container>
+  </customwidget>
+ </customwidgets>
  <resources/>
  <connections/>
 </ui>

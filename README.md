@@ -15,6 +15,10 @@ WTFPL
 ./scripts/install_deps_ubuntu.sh
 ```
 
+### Windows cross-build (from Ubuntu)
+
+See [docs/windows-build.md](docs/windows-build.md) for MXE toolchain setup, packaging, and platform limits.
+
 ### Configure and build
 
 ```bash
@@ -140,6 +144,50 @@ Hovering text or bitmap data updates:
 - large character display, with selectable big-endian/little-endian char interpretation mode
 - caption highlighting by available byte width (8/16/32/64)
 
+## View Data Struct mode
+
+Struct mode parses BrecoScript declarations and previews a selected entry at
+the active file offset. Its tree shows `Name`, `Type`, `Value`, `Bytes`, and
+`Valid`; the name column sizes itself to its content. Passing `/cond` rows are
+light green, while failed `/cond` and truncated rows are light red. Odd rows
+use darker variants of those colors; unqualified complete rows retain the
+normal alternating backgrounds. `Valid` reports `true`, `false`, the
+missing-byte count, or both when applicable. Condition diagnostics appear
+only on the failing member; containing struct rows keep their normal value.
+
+Clicking a decoded tree item centers the hex view on that item's first byte
+in natural file order and highlights its byte range. Clicking a row in the
+saved `Views` table centers on that view's starting offset and highlights the
+decoded view range.
+
+Loading a declaration file remembers its path. On the next launch Breco
+reloads that file when it still exists; when both the declaration and the
+remembered single-file source are valid, it creates the struct preview
+automatically.
+
+## View Data Image mode
+
+`View Data` includes an `Image` mode for finding embedded images in the active preview source.
+
+Controls:
+- format checkboxes for `TGA`, `TIFF`, `PNG`, `JPEG`, `BMP`, `ICO`, `GIF`, `XBM`, `XPM`, and `SVG`
+- scope: `From start of file`, `From Here`, or `Only visible buffer`
+- `Jobs`, defaulting to the main scan worker count
+- `maxPixels` in decimal kilopixels, default `4096 K`
+- `maxresults`, default `5`; `0` means unlimited until EOF or Stop
+- `Scan`, which toggles to `Stop` while active
+- file progress and, when `maxresults` is positive, result progress
+
+Behavior:
+- PNG, TIFF/BigTIFF, JPEG, BMP, ICO, GIF, XPM, and SVG are searched by signature/text opener.
+- TGA and XBM are attempted only at the selected byte, falling back to the first visible byte.
+- Scans use the same shifted logical byte stream as the hex view.
+- The image scanner uses one reader/coordinator and shared immutable chunks scanned by worker jobs, so workers do not compete for source I/O.
+- Decoded images are shown live as they are accepted; Stop keeps partial results.
+- Candidates with implausible headers or dimensions above `maxPixels` are rejected before decode where possible.
+- Results show image format, dimensions, and file offset. GIF results also show frame count and play continuously, with encoded delays below `16 ms` clamped to `16 ms`.
+- Hovering a preview highlights its result card. Left-clicking reloads and centers the hex view at the image's first byte; right-clicking opens a format-aware Save File dialog that writes the original encoded image, including every GIF frame.
+
 ## Status line
 
 Status bar is used for lifecycle and cache messages, for example:
@@ -164,9 +212,12 @@ Status bar is used for lifecycle and cache messages, for example:
 - scan block size value and unit
 - main splitter sizes
 - text gutter format and gutter width
+- View Data mode, endian/text/bitmap options, and image scan options including Jobs
+- Struct declaration text, last loaded declaration file, entry, and repeat count
 
 ## Current limits and caveats
 
 - source filtering accepts readable regular files and readable block devices.
 - result table ordering follows controller batch merge order, not global byte-order sort.
 - ignore-case matching is ASCII-byte folding, not full Unicode case-folding.
+- TGA, TIFF, and SVG decoding depend on Qt image-format/SVG runtime plugins being installed.

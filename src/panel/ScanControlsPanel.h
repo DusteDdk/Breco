@@ -8,12 +8,14 @@
 QT_BEGIN_NAMESPACE
 class QCheckBox;
 class QComboBox;
+class QCompleter;
 class QLabel;
 class QLineEdit;
 class QProgressBar;
 class QPushButton;
 class QListWidget;
 class QSpinBox;
+class QStringListModel;
 class QToolButton;
 namespace Ui {
 class ScanControlsPanel;
@@ -32,8 +34,6 @@ public:
     QLineEdit* searchTermLineEdit() const;
     QCheckBox* ignoreCaseCheckBox() const;
     QCheckBox* prefillOnMergeCheckBox() const;
-    QSpinBox* shiftValueSpin() const;
-    QComboBox* shiftUnitCombo() const;
     QPushButton* startScanButton() const;
     QToolButton* openFileButton() const;
     QToolButton* openDirButton() const;
@@ -45,7 +45,8 @@ public:
     QLabel* searchSpaceValueLabel() const;
     QLabel* scannedValueLabel() const;
     QProgressBar* scanProgressBar() const;
-    QLabel* selectedSourceValueLabel() const;
+    QLabel* selectedSourceTypeIconLabel() const;
+    QLineEdit* sourcePathLineEdit() const;
     QWidget* advancedSearchGroup() const;
     QWidget* lifecycleCard() const;
     QToolButton* hideLifecycleCardButton() const;
@@ -55,8 +56,15 @@ public:
     void clearLifecycleLog();
     void appendLifecycleMessage(const QString& message);
 
+protected:
+    bool eventFilter(QObject* watched, QEvent* event) override;
+
 private:
+    void updateSourcePathSuggestions(const QString& text);
+
     std::unique_ptr<Ui::ScanControlsPanel> m_ui;
+    QCompleter* m_sourcePathCompleter = nullptr;
+    QStringListModel* m_sourcePathCompletionModel = nullptr;
 };
 
 }  // namespace breco

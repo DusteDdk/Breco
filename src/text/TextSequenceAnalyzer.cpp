@@ -213,11 +213,12 @@ QString decodeUtf16Range(const QByteArray& bytes, bool littleEndian) {
 
 }  // namespace
 
-TextAnalysisResult TextSequenceAnalyzer::analyze(const QByteArray& bytes, TextInterpretationMode mode) {
+TextAnalysisResult TextSequenceAnalyzer::analyze(const QByteArray& bytes, TextInterpretationMode mode,
+                                                 bool utf16LittleEndian) {
     TextAnalysisResult result;
     result.classes.fill(TextByteClass::Invalid, bytes.size());
     result.sequenceIndexByByte.fill(-1, bytes.size());
-    result.utf16LittleEndian = true;
+    result.utf16LittleEndian = utf16LittleEndian;
 
     if (bytes.isEmpty()) {
         return result;

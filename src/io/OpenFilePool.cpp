@@ -3,7 +3,12 @@
 #include <QFile>
 #include <QThread>
 
+#include <cerrno>
 #include <limits>
+
+#ifdef Q_OS_UNIX
+#include <unistd.h>
+#endif
 
 namespace breco {
 
@@ -25,15 +30,71 @@ std::optional<QByteArray> OpenFilePool::readChunk(const QString& filePath, quint
         return std::nullopt;
     }
 
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (m_externalReads.contains(filePath)) {
+            return readExternalChunkLocked(filePath, offset, bytesToRead);
+        }
+    }
+
     const QSharedPointer<QFile> file = acquireFileForCurrentThread(filePath);
     if (file.isNull()) {
         return std::nullopt;
     }
-
     if (!file->seek(static_cast<qint64>(offset))) {
         return std::nullopt;
     }
     return file->read(static_cast<qint64>(bytesToRead));
+}
+
+bool OpenFilePool::registerExternalReadFd(const QString& filePath, int fd, quint64 fileSize) {
+    if (filePath.isEmpty() || fd < 0 || fileSize == 0) {
+        return false;
+    }
+
+    std::lock_guard<std::mutex> lock(m_mutex);
+    if (auto it = m_externalReads.find(filePath); it != m_externalReads.end()) {
+        closeExternalReadEntry(*it);
+        m_externalReads.erase(it);
+    }
+
+    ExternalReadEntry entry;
+    entry.fd = fd;
+    entry.fileSize = fileSize;
+    m_externalReads.insert(filePath, entry);
+    return true;
+}
+
+void OpenFilePool::forgetExternalReadFd(const QString& filePath) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    auto it = m_externalReads.find(filePath);
+    if (it == m_externalReads.end()) {
+        return;
+    }
+    closeExternalReadEntry(*it);
+    m_externalReads.erase(it);
+}
+
+void OpenFilePool::clearExternalReadFds() {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    for (ExternalReadEntry& entry : m_externalReads) {
+        closeExternalReadEntry(entry);
+    }
+    m_externalReads.clear();
+}
+
+bool OpenFilePool::hasExternalReadFd(const QString& filePath) const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return m_externalReads.contains(filePath);
+}
+
+std::optional<quint64> OpenFilePool::externalReadSize(const QString& filePath) const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    const auto it = m_externalReads.constFind(filePath);
+    if (it == m_externalReads.constEnd()) {
+        return std::nullopt;
+    }
+    return it->fileSize;
 }
 
 void OpenFilePool::clearThreadLocal() {
@@ -71,6 +132,46 @@ QSharedPointer<QFile> OpenFilePool::acquireFileForCurrentThread(const QString& f
     }
 
     return it->file;
+}
+
+std::optional<QByteArray> OpenFilePool::readExternalChunkLocked(const QString& filePath,
+                                                               quint64 offset,
+                                                               quint64 bytesToRead) const {
+#ifdef Q_OS_UNIX
+    const auto it = m_externalReads.constFind(filePath);
+    if (it == m_externalReads.constEnd() || it->fd < 0) {
+        return std::nullopt;
+    }
+
+    QByteArray bytes;
+    bytes.resize(static_cast<qsizetype>(bytesToRead));
+    ssize_t nread = 0;
+    do {
+        nread = ::pread(it->fd, bytes.data(), static_cast<size_t>(bytes.size()),
+                        static_cast<off_t>(offset));
+    } while (nread < 0 && errno == EINTR);
+    if (nread < 0) {
+        return std::nullopt;
+    }
+    bytes.resize(static_cast<qsizetype>(nread));
+    return bytes;
+#else
+    Q_UNUSED(filePath);
+    Q_UNUSED(offset);
+    Q_UNUSED(bytesToRead);
+    return std::nullopt;
+#endif
+}
+
+void OpenFilePool::closeExternalReadEntry(ExternalReadEntry& entry) {
+#ifdef Q_OS_UNIX
+    if (entry.fd >= 0) {
+        ::close(entry.fd);
+        entry.fd = -1;
+    }
+#else
+    Q_UNUSED(entry);
+#endif
 }
 
 void OpenFilePool::trimBucketIfNeeded(ThreadBucket& bucket, const QString& keepPath) const {

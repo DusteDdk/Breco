@@ -38,6 +38,7 @@ If selection tracing is enabled, `BrecoApplication::notify()` wraps event delive
   - `TextViewPanel`
   - `CurrentByteInfoPanel`
   - `BitmapViewPanel`
+  - `DataViewImagePanel`
 - view widget creation:
   - `TextViewWidget`
   - `BitmapViewWidget`
@@ -49,8 +50,14 @@ If selection tracing is enabled, `BrecoApplication::notify()` wraps event delive
 Notable startup behavior:
 - Worker-count control is populated from `1..QThread::idealThreadCount()`.
 - Bitmap zoom initializes to `1x`.
+- Image View Data defaults to all supported formats enabled, `From start of file`, main-scan worker count for Jobs, `4096 K` max pixels, and `5` max results.
 - Shift defaults to bytes mode with value `0`.
 - If file context later becomes single-file, `loadNotEmptyPreview()` can synthesize an initial row to display preview bytes before scanning.
+- The last loaded struct declaration file is re-read when its path still names a file, so external declaration edits take effect on restart.
+- A valid `/default EntryName` file directive selects that entry in the Struct
+  dropdown when the declaration is parsed and takes precedence over a
+  remembered entry selection during startup.
+- After restoring a valid declaration and remembered single-file source, startup creates the selected struct preview automatically.
 
 ## 3) Source Selection
 
@@ -145,7 +152,90 @@ Preview update path (`updateSharedPreviewNow()`):
 Deferred update behavior:
 - `scheduleSharedPreviewUpdate()` coalesces repeated triggers with `m_previewUpdateScheduled` and posts a queued lambda to avoid re-entrant immediate updates.
 
-## 7) Hover/Status Behavior
+## 7) View Data Struct Preview
+
+`StructVisualizedTreeModel` exposes five columns: `Name`, `Type`, `Value`,
+`Bytes`, and `Valid`. `StructDataViewPanel` sizes `Name` to its contents and
+stretches `Value` into remaining space.
+
+Struct/object and scalar rows display their decoded type in `Type`; struct
+rows keep `Value` empty. Repeat and array containers keep `Type` empty, while
+their children display the element type. Container `Value` is `(empty)`,
+`1 item`, or `N items`. Struct previews render as a top-level `Preview` row;
+saved views use their editable list name and default to
+`TypeName@0xHEX_OFFSET`. Single-repeat struct views hoist the synthetic
+`StructName[0]` entry so the view row contains the struct fields directly.
+Top-level views with multiple repeats remain containers over the typed
+`StructName[N]` entries.
+
+The Struct editor's persisted `Enable` checkbox defaults on. It remains
+checked or unchecked while an invalid declaration disables the control.
+When checked and the declaration is valid, Breco maintains the preview for
+the selected entry. `Add previewed` is enabled exactly when those two
+conditions hold and copies the current preview into `Views`.
+Parse errors appear below the declaration editor as `Line N: message`, while
+the corresponding source line remains highlighted. The status remains visible
+without errors as `N lines, no errors`.
+
+`Valid` is empty for ordinary complete nodes. It reports condition validity
+for `/cond` fields and `/assert` nodes, and missing-byte counts for truncated
+nodes, combining both when applicable. Passing conditional rows use light
+green; failed conditional or truncated rows use light red. Odd rows use darker
+variants of those colors, while unqualified complete rows retain the normal
+alternating backgrounds. A condition or assertion error is shown in the
+failing node's `Value` cell; containing struct rows keep an empty `Value`
+instead of repeating the child error.
+
+`/when` is evaluated before its field decodes. A false `/when` consumes zero
+bytes and emits no tree node; a true `/when` decodes the field normally.
+Bitfield members are display-only child rows under their scalar integer word
+and do not advance the byte cursor.
+
+Decoded nodes retain the absolute offset of their first byte, independent of
+decode endianness, together with the number of source bytes they cover.
+Clicking a tree item or saved `Views` row routes that source range through
+`MainWindow::jumpToAbsoluteOffset()`, loading the source when necessary,
+centering the hex view, and highlighting the range in the byte and bitmap
+views without clearing an active struct preview for same-source navigation.
+Clicking a decoded tree field also centers the Structure editor on its field
+declaration and highlights that full line. Repeated containers and elements
+map back to their repeated field line; top-level view rows map to the selected
+type declaration.
+Scrolling or reloading the hex viewport also preserves an active struct
+preview. While `Enable` is checked, clicking a byte in the hex view decodes
+or re-decodes the preview with the clicked byte as its new start offset.
+
+Successful declaration-file loads persist the absolute path through
+`AppSettings`. Startup prefers that file over the cached editor text when the
+file still exists. Automatic preview creation requires `Enable`, a valid
+restored declaration, and a successfully restored single-file source. The
+`Views` and `Language` section checkboxes are persisted as well.
+
+## 8) View Data Image Scans
+
+`MainWindow::startImageScan()` builds an `EmbeddedImageScanRequest` from the active preview target and the Image mode controls.
+
+Scopes:
+- `From start of file`: scans the active target from byte `0`.
+- `From Here`: scans inclusively from `TextViewWidget::selectedOffset()`, falling back to the first visible byte.
+- `Only visible buffer`: scans a snapshot of `m_textHoverBuffer`.
+
+The image scanner:
+- runs through `EmbeddedImageScanController` on a `std::jthread`
+- reads transformed windows with the current hex shift for file-wide scopes from a single coordinator thread
+- shares each immutable chunk across configured worker jobs for signature scanning, then merges candidates deterministically and decodes them serially on the coordinator
+- searches magic/text openers for PNG, TIFF/BigTIFF, JPEG, BMP, ICO, GIF, XPM, and SVG
+- attempts TGA and XBM only at the chosen start offset
+- rejects candidates over `maxPixelsK * 1000` pixels
+- streams accepted image cards and progress updates while the scan is running
+- stops at `maxresults` when it is positive; `maxresults == 0` is unlimited until EOF or Stop
+- keeps partial live results when Stop cancels the scan
+- retains each accepted image's encoded payload for format-aware right-click saving
+- decodes all GIF frames, reports their count, and plays them with a minimum per-frame delay of `16 ms`
+
+Hovering an image highlights its result card. Left-clicking calls `MainWindow::jumpToAbsoluteOffset()`, which reloads the active backing buffer around that offset if needed before centering the text/bitmap preview. Right-clicking opens a Save File dialog seeded with the detected format's extension and writes the retained encoded payload without flattening animated GIFs.
+
+## 9) Hover/Status Behavior
 
 - Text hover -> propagates to bitmap external hover, updates current-byte panel, and anchors text hover caret
 - Bitmap hover -> updates current-byte panel and text hover anchor
@@ -176,6 +266,11 @@ textHover[TextView hoverAbsoluteOffsetChanged] --> onTextHover[MainWindow onText
 textCenter[TextView centerAnchorOffsetChanged] --> onTextCenter[MainWindow onTextCenterAnchorRequested]
 bitmapHover[BitmapView hoverAbsoluteOffsetChanged] --> onBitmapHover[MainWindow onBitmapHoverOffsetChanged]
 bitmapClick[BitmapView byteClicked] --> onBitmapClick[MainWindow onBitmapByteClicked]
+imageScan[ImageScanButton clicked] --> onImageScan[MainWindow startImageScan/Stop toggle]
+imageProgress[EmbeddedImageScanController progressUpdated] --> imageBars[DataViewImagePanel progress bars]
+imageReady[EmbeddedImageScanController resultReady] --> imageResults[DataViewImagePanel live results]
+imageDone[EmbeddedImageScanController scanFinished] --> imageDoneUi[DataViewImagePanel scan state]
+imageClick[Image result clicked] --> imageJump[MainWindow jumpToAbsoluteOffset]
 ```
 
 ## Error Surface in Runtime Path

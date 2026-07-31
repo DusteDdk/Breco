@@ -106,9 +106,30 @@ Evidence:
 - Center requests are coalesced through queued updates to avoid re-entrancy storms.
 - Text/bitmap updates run under `m_previewSyncInProgress` guard.
 - Hover decode uses only the currently rendered hover buffers (text or bitmap side).
+- Image-result jumps that land outside the resident buffer reload the active backing window before centering.
 
 Evidence:
 - `src/app/MainWindow.cpp` (`scheduleSharedPreviewUpdate`, `updateSharedPreviewNow`)
+
+## Embedded Image Scan Rules
+
+- PNG, TIFF/BigTIFF, JPEG, BMP, ICO, GIF, XPM, and SVG are scanned from the chosen scope start to scope end.
+- TGA and XBM are attempted only once at the chosen start offset.
+- `From Here` is inclusive and can return an image already starting at the selected byte.
+- Candidates are rejected when cheap header validation finds zero, implausible, or over-limit dimensions.
+- Decoded results must fit `maxPixelsK * 1000` pixels.
+- File-wide scans use one coordinator as the only `source.read(...)` caller; worker jobs scan the same shared immutable chunks and never perform source I/O.
+- Per-chunk candidates are merged by offset/format before serial decode, keeping one-job and multi-job result order equivalent.
+- Accepted images are streamed to the UI as live result cards.
+- Accepted results retain encoded payload bytes so saving does not re-encode or flatten them.
+- GIF results retain all decoded frames and show their frame count; encoded frame delays below `16 ms` are clamped to `16 ms` for playback.
+- The scanner stops when positive `maxresults` accepted images have been found.
+- `maxresults == 0` is unlimited until EOF or cooperative Stop.
+- User Stop preserves displayed partial results; source/target/shift invalidation clears them as stale.
+
+Evidence:
+- `src/image/EmbeddedImageScanner.cpp`
+- `src/app/MainWindow.cpp` (`startImageScan`, `buildImageScanRequest`)
 
 ## Result Model Contract
 
@@ -136,12 +157,37 @@ Evidence:
 - newline mode combo index
 - byte line mode combo index
 - prefill-on-merge toggle
+- View Data Image format mask, scope, max pixels K, max results, and Jobs
+- Struct declaration text, selected entry, repeat count, and last loaded declaration-file path
+
+When the remembered declaration path still exists, startup reloads its current
+contents instead of relying on cached editor text. A struct preview is restored
+only when that declaration parses successfully and the remembered single-file
+source also opens successfully.
 
 Settings are saved immediately at control-change call sites (no delayed batch commit).
 
 Evidence:
 - `src/settings/AppSettings.cpp`
 - `src/app/MainWindow.cpp` constructor + control handlers
+
+## Struct Declaration Runtime Invariants
+
+- Arithmetic expressions are evaluated at decode time in the current variable
+  scope. Count expressions must be non-negative and no larger than the dynamic
+  element limit.
+- A false `/when` emits no visualized node and consumes no bytes. A failing or
+  unevaluable `/when` invalidates the containing struct.
+- `/assert` runs after preceding struct members have decoded. It emits a
+  condition-style node, and a failing assertion invalidates the struct without
+  hiding already decoded members.
+- Bitfield rows are children of the scalar integer word that owns them. They do
+  not consume bytes separately.
+
+Evidence:
+- `src/struct/StructDeclarationParser.cpp`
+- `src/struct/StructVisualizer.cpp`
+- `tests/unit_tests.cpp` (`testDynamicStructLanguage`)
 
 ## Error Handling Invariants
 

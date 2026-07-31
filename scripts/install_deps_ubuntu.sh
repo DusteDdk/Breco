@@ -7,6 +7,8 @@ PACKAGES=(
   ninja-build
   qt6-base-dev
   qt6-base-dev-tools
+  qt6-image-formats-plugins
+  libqt6svg6
   qt6-tools-dev
   qt6-tools-dev-tools
 )

@@ -36,6 +36,7 @@ public:
     void setCenterAnchorOffset(quint64 absoluteOffset);
     void setOverlapIntervals(const QVector<QPair<quint64, quint64>>& intervals);
     void setTextMode(TextInterpretationMode mode);
+    void setUtf16LittleEndian(bool littleEndian);
     void setExternalHoverOffset(std::optional<quint64> absoluteOffset);
     void setExternalSelectionRange(std::optional<QPair<quint64, quint64>> absoluteRange);
 
@@ -72,6 +73,7 @@ private:
     QByteArray m_bytes;
     BitmapMode m_mode = BitmapMode::Rgb24;
     TextInterpretationMode m_textMode = TextInterpretationMode::Ascii;
+    bool m_utf16LittleEndian = true;
     bool m_resultOverlayEnabled = true;
     quint64 m_resultOffset = 0;
     quint32 m_validBefore = 0;

@@ -1,7 +1,9 @@
 #include "settings/AppSettings.h"
 
 #include <QDir>
+#include <QFileInfo>
 #include <QSettings>
+#include <QVariant>
 
 namespace breco {
 
@@ -10,7 +12,10 @@ constexpr const char* kOrg = "breco";
 constexpr const char* kApp = "breco";
 constexpr const char* kLastFilePathKey = "ui/lastFileDialogPath";
 constexpr const char* kLastDirPathKey = "ui/lastDirectoryDialogPath";
+constexpr const char* kLastBrowseDialogDirectoryKey = "ui/lastBrowseDialogDirectory";
 constexpr const char* kRememberedSingleFilePathKey = "ui/rememberedSingleFilePath";
+constexpr const char* kRememberedSingleFileOffsetKey =
+    "ui/rememberedSingleFileOffset";
 constexpr const char* kTextByteModeKey = "ui/textByteModeEnabled";
 constexpr const char* kTextWrapModeKey = "ui/textWrapModeEnabled";
 constexpr const char* kTextCollapseKey = "ui/textCollapseEnabled";
@@ -27,9 +32,66 @@ constexpr const char* kTextGutterFormatIndexKey = "ui/textGutterFormatIndex";
 constexpr const char* kTextGutterWidthKey = "ui/textGutterWidth";
 constexpr const char* kCurrentByteInfoNumberSystemIndexKey = "ui/currentByteInfoNumberSystemIndex";
 constexpr const char* kCurrentByteInfoBigEndianEnabledKey = "ui/currentByteInfoBigEndianEnabled";
+constexpr const char* kHexShowAsIndexKey = "ui/hexShowAsIndex";
+constexpr const char* kHexBigEndianEnabledKey = "ui/hexBigEndianEnabled";
+constexpr const char* kHexStringsOnlyEnabledKey = "ui/hexStringsOnlyEnabled";
+constexpr const char* kHexHighlightResultEnabledKey = "ui/hexHighlightResultEnabled";
+constexpr const char* kDataViewModeIndexKey = "ui/dataViewModeIndex";
+constexpr const char* kDataViewBigEndianEnabledKey = "ui/dataViewBigEndianEnabled";
+constexpr const char* kDataViewTextModeIndexKey = "ui/dataViewTextModeIndex";
+constexpr const char* kDataViewBitmapModeIndexKey = "ui/dataViewBitmapModeIndex";
+constexpr const char* kDataViewBitmapZoomKey = "ui/dataViewBitmapZoom";
+constexpr const char* kDataViewImageFormatMaskKey = "ui/dataViewImageFormatMask";
+constexpr const char* kDataViewImageScopeIndexKey = "ui/dataViewImageScopeIndex";
+constexpr const char* kDataViewImageMaxPixelsKKey = "ui/dataViewImageMaxPixelsK";
+constexpr const char* kDataViewImageMaxResultsKey = "ui/dataViewImageMaxResults";
+constexpr const char* kDataViewImageJobsKey = "ui/dataViewImageJobs";
+constexpr const char* kDataViewByteAndBitmapSplitterSizesKey =
+    "ui/dataViewByteAndBitmapSplitterSizes";
+constexpr const char* kDataViewStructuredSplitterSizesKey =
+    "ui/dataViewStructuredSplitterSizes";
 constexpr const char* kViewScanLogVisibleKey = "ui/viewScanLogVisible";
 constexpr const char* kViewEditsVisibleKey = "ui/viewEditsVisible";
-constexpr const char* kViewControlsVisibleKey = "ui/viewControlsVisible";
+constexpr const char* kLastStructDefinitionFilePathKey =
+    "ui/lastStructDefinitionFilePath";
+constexpr const char* kStructDeclarationTextKey = "ui/structDeclarationText";
+constexpr const char* kStructEntryNameKey = "ui/structEntryName";
+constexpr const char* kStructEntryCountKey = "ui/structEntryCount";
+constexpr const char* kStructPreviewEnabledKey = "ui/structPreviewEnabled";
+constexpr const char* kStructViewsVisibleKey = "ui/structViewsVisible";
+constexpr const char* kStructLanguageVisibleKey = "ui/structLanguageVisible";
+
+QList<int> readIntList(const char* key) {
+    QSettings settings(kOrg, kApp);
+    const QVariantList raw = settings.value(key).toList();
+    QList<int> sizes;
+    sizes.reserve(raw.size());
+    for (const QVariant& value : raw) {
+        sizes.push_back(value.toInt());
+    }
+    return sizes;
+}
+
+void writeIntList(const char* key, const QList<int>& values) {
+    QSettings settings(kOrg, kApp);
+    QVariantList raw;
+    raw.reserve(values.size());
+    for (const int value : values) {
+        raw.push_back(value);
+    }
+    settings.setValue(key, raw);
+}
+
+QString directoryFromPath(const QString& path) {
+    if (path.isEmpty()) {
+        return QString();
+    }
+    const QFileInfo info(path);
+    if (info.isDir()) {
+        return info.absoluteFilePath();
+    }
+    return info.absolutePath();
+}
 }  // namespace
 
 QString AppSettings::lastFileDialogPath() {
@@ -42,9 +104,37 @@ QString AppSettings::lastDirectoryDialogPath() {
     return settings.value(kLastDirPathKey, QDir::homePath()).toString();
 }
 
+QString AppSettings::lastBrowseDialogDirectory() {
+    QSettings settings(kOrg, kApp);
+    if (settings.contains(kLastBrowseDialogDirectoryKey)) {
+        return settings.value(kLastBrowseDialogDirectoryKey, QDir::homePath()).toString();
+    }
+    const QString fromFilePath = directoryFromPath(
+        settings.value(kLastFilePathKey).toString());
+    if (!fromFilePath.isEmpty()) {
+        return fromFilePath;
+    }
+    const QString fromDirPath = settings.value(kLastDirPathKey).toString();
+    if (!fromDirPath.isEmpty()) {
+        return fromDirPath;
+    }
+    return QDir::homePath();
+}
+
+QString AppSettings::lastStructDefinitionDialogDirectory() {
+    const QString path = lastStructDefinitionFilePath();
+    const QString directory = directoryFromPath(path);
+    return directory.isEmpty() ? QDir::homePath() : directory;
+}
+
 QString AppSettings::rememberedSingleFilePath() {
     QSettings settings(kOrg, kApp);
     return settings.value(kRememberedSingleFilePathKey, QString()).toString();
+}
+
+quint64 AppSettings::rememberedSingleFileOffset() {
+    QSettings settings(kOrg, kApp);
+    return settings.value(kRememberedSingleFileOffsetKey, 0).toULongLong();
 }
 
 void AppSettings::setLastFileDialogPath(const QString& path) {
@@ -57,14 +147,34 @@ void AppSettings::setLastDirectoryDialogPath(const QString& path) {
     settings.setValue(kLastDirPathKey, path);
 }
 
+void AppSettings::setLastBrowseDialogDirectory(const QString& path) {
+    const QString directory = directoryFromPath(path);
+    if (directory.isEmpty()) {
+        return;
+    }
+    QSettings settings(kOrg, kApp);
+    settings.setValue(kLastBrowseDialogDirectoryKey, directory);
+}
+
 void AppSettings::setRememberedSingleFilePath(const QString& path) {
     QSettings settings(kOrg, kApp);
     settings.setValue(kRememberedSingleFilePathKey, path);
 }
 
+void AppSettings::setRememberedSingleFileOffset(quint64 offset) {
+    QSettings settings(kOrg, kApp);
+    settings.setValue(kRememberedSingleFileOffsetKey,
+                      QVariant::fromValue<qulonglong>(offset));
+}
+
 void AppSettings::clearRememberedSingleFilePath() {
     QSettings settings(kOrg, kApp);
     settings.remove(kRememberedSingleFilePathKey);
+}
+
+void AppSettings::clearRememberedSingleFileOffset() {
+    QSettings settings(kOrg, kApp);
+    settings.remove(kRememberedSingleFileOffsetKey);
 }
 
 bool AppSettings::textByteModeEnabled() {
@@ -118,25 +228,11 @@ int AppSettings::scanBlockSizeUnitIndex() {
 }
 
 QList<int> AppSettings::contentSplitterSizes() {
-    QSettings settings(kOrg, kApp);
-    const QVariantList raw = settings.value(kContentSplitterSizesKey).toList();
-    QList<int> sizes;
-    sizes.reserve(raw.size());
-    for (const QVariant& value : raw) {
-        sizes.push_back(value.toInt());
-    }
-    return sizes;
+    return readIntList(kContentSplitterSizesKey);
 }
 
 QList<int> AppSettings::mainSplitterSizes() {
-    QSettings settings(kOrg, kApp);
-    const QVariantList raw = settings.value(kMainSplitterSizesKey).toList();
-    QList<int> sizes;
-    sizes.reserve(raw.size());
-    for (const QVariant& value : raw) {
-        sizes.push_back(value.toInt());
-    }
-    return sizes;
+    return readIntList(kMainSplitterSizesKey);
 }
 
 int AppSettings::textGutterFormatIndex() {
@@ -159,6 +255,87 @@ bool AppSettings::currentByteInfoBigEndianEnabled() {
     return settings.value(kCurrentByteInfoBigEndianEnabledKey, true).toBool();
 }
 
+int AppSettings::hexShowAsIndex() {
+    QSettings settings(kOrg, kApp);
+    if (!settings.contains(kHexShowAsIndexKey)) {
+        return settings.value(kTextByteModeKey, false).toBool() ? 0 : 1;
+    }
+    return settings.value(kHexShowAsIndexKey, 0).toInt();
+}
+
+bool AppSettings::hexBigEndianEnabled() {
+    QSettings settings(kOrg, kApp);
+    return settings.value(kHexBigEndianEnabledKey, false).toBool();
+}
+
+bool AppSettings::hexStringsOnlyEnabled() {
+    QSettings settings(kOrg, kApp);
+    return settings.value(kHexStringsOnlyEnabledKey, false).toBool();
+}
+
+bool AppSettings::hexHighlightResultEnabled() {
+    QSettings settings(kOrg, kApp);
+    return settings.value(kHexHighlightResultEnabledKey, true).toBool();
+}
+
+int AppSettings::dataViewModeIndex() {
+    QSettings settings(kOrg, kApp);
+    return settings.value(kDataViewModeIndexKey, 0).toInt();
+}
+
+bool AppSettings::dataViewBigEndianEnabled() {
+    QSettings settings(kOrg, kApp);
+    return settings.value(kDataViewBigEndianEnabledKey, false).toBool();
+}
+
+int AppSettings::dataViewTextModeIndex() {
+    QSettings settings(kOrg, kApp);
+    return settings.value(kDataViewTextModeIndexKey, 0).toInt();
+}
+
+int AppSettings::dataViewBitmapModeIndex() {
+    QSettings settings(kOrg, kApp);
+    return settings.value(kDataViewBitmapModeIndexKey, 0).toInt();
+}
+
+int AppSettings::dataViewBitmapZoom() {
+    QSettings settings(kOrg, kApp);
+    return settings.value(kDataViewBitmapZoomKey, 1).toInt();
+}
+
+int AppSettings::dataViewImageFormatMask(int defaultMask) {
+    QSettings settings(kOrg, kApp);
+    return settings.value(kDataViewImageFormatMaskKey, defaultMask).toInt();
+}
+
+int AppSettings::dataViewImageScopeIndex() {
+    QSettings settings(kOrg, kApp);
+    return settings.value(kDataViewImageScopeIndexKey, 0).toInt();
+}
+
+int AppSettings::dataViewImageMaxPixelsK() {
+    QSettings settings(kOrg, kApp);
+    return settings.value(kDataViewImageMaxPixelsKKey, 4096).toInt();
+}
+
+int AppSettings::dataViewImageMaxResults() {
+    QSettings settings(kOrg, kApp);
+    return settings.value(kDataViewImageMaxResultsKey, 5).toInt();
+}
+
+int AppSettings::dataViewImageJobs(int defaultValue) {
+    QSettings settings(kOrg, kApp);
+    return settings.value(kDataViewImageJobsKey, defaultValue).toInt();
+}
+
+QList<int> AppSettings::dataViewByteAndBitmapSplitterSizes() {
+    return readIntList(kDataViewByteAndBitmapSplitterSizesKey);
+}
+
+QList<int> AppSettings::dataViewStructuredSplitterSizes() {
+    return readIntList(kDataViewStructuredSplitterSizesKey);
+}
+
 bool AppSettings::viewScanLogVisible() {
     QSettings settings(kOrg, kApp);
     return settings.value(kViewScanLogVisibleKey, false).toBool();
@@ -169,9 +346,39 @@ bool AppSettings::viewEditsVisible() {
     return settings.value(kViewEditsVisibleKey, false).toBool();
 }
 
-bool AppSettings::viewControlsVisible() {
+QString AppSettings::lastStructDefinitionFilePath() {
     QSettings settings(kOrg, kApp);
-    return settings.value(kViewControlsVisibleKey, false).toBool();
+    return settings.value(kLastStructDefinitionFilePathKey, QString()).toString();
+}
+
+QString AppSettings::structDeclarationText() {
+    QSettings settings(kOrg, kApp);
+    return settings.value(kStructDeclarationTextKey, QString()).toString();
+}
+
+QString AppSettings::structEntryName() {
+    QSettings settings(kOrg, kApp);
+    return settings.value(kStructEntryNameKey, QString()).toString();
+}
+
+int AppSettings::structEntryCount() {
+    QSettings settings(kOrg, kApp);
+    return settings.value(kStructEntryCountKey, 1).toInt();
+}
+
+bool AppSettings::structPreviewEnabled() {
+    QSettings settings(kOrg, kApp);
+    return settings.value(kStructPreviewEnabledKey, true).toBool();
+}
+
+bool AppSettings::structViewsVisible() {
+    QSettings settings(kOrg, kApp);
+    return settings.value(kStructViewsVisibleKey, false).toBool();
+}
+
+bool AppSettings::structLanguageVisible() {
+    QSettings settings(kOrg, kApp);
+    return settings.value(kStructLanguageVisibleKey, false).toBool();
 }
 
 void AppSettings::setTextByteModeEnabled(bool enabled) {
@@ -225,23 +432,11 @@ void AppSettings::setScanBlockSizeUnitIndex(int index) {
 }
 
 void AppSettings::setContentSplitterSizes(const QList<int>& sizes) {
-    QSettings settings(kOrg, kApp);
-    QVariantList raw;
-    raw.reserve(sizes.size());
-    for (const int size : sizes) {
-        raw.push_back(size);
-    }
-    settings.setValue(kContentSplitterSizesKey, raw);
+    writeIntList(kContentSplitterSizesKey, sizes);
 }
 
 void AppSettings::setMainSplitterSizes(const QList<int>& sizes) {
-    QSettings settings(kOrg, kApp);
-    QVariantList raw;
-    raw.reserve(sizes.size());
-    for (const int size : sizes) {
-        raw.push_back(size);
-    }
-    settings.setValue(kMainSplitterSizesKey, raw);
+    writeIntList(kMainSplitterSizesKey, sizes);
 }
 
 void AppSettings::setTextGutterFormatIndex(int index) {
@@ -264,6 +459,84 @@ void AppSettings::setCurrentByteInfoBigEndianEnabled(bool enabled) {
     settings.setValue(kCurrentByteInfoBigEndianEnabledKey, enabled);
 }
 
+void AppSettings::setHexShowAsIndex(int index) {
+    QSettings settings(kOrg, kApp);
+    settings.setValue(kHexShowAsIndexKey, index);
+}
+
+void AppSettings::setHexBigEndianEnabled(bool enabled) {
+    QSettings settings(kOrg, kApp);
+    settings.setValue(kHexBigEndianEnabledKey, enabled);
+}
+
+void AppSettings::setHexStringsOnlyEnabled(bool enabled) {
+    QSettings settings(kOrg, kApp);
+    settings.setValue(kHexStringsOnlyEnabledKey, enabled);
+}
+
+void AppSettings::setHexHighlightResultEnabled(bool enabled) {
+    QSettings settings(kOrg, kApp);
+    settings.setValue(kHexHighlightResultEnabledKey, enabled);
+}
+
+void AppSettings::setDataViewModeIndex(int index) {
+    QSettings settings(kOrg, kApp);
+    settings.setValue(kDataViewModeIndexKey, index);
+}
+
+void AppSettings::setDataViewBigEndianEnabled(bool enabled) {
+    QSettings settings(kOrg, kApp);
+    settings.setValue(kDataViewBigEndianEnabledKey, enabled);
+}
+
+void AppSettings::setDataViewTextModeIndex(int index) {
+    QSettings settings(kOrg, kApp);
+    settings.setValue(kDataViewTextModeIndexKey, index);
+}
+
+void AppSettings::setDataViewBitmapModeIndex(int index) {
+    QSettings settings(kOrg, kApp);
+    settings.setValue(kDataViewBitmapModeIndexKey, index);
+}
+
+void AppSettings::setDataViewBitmapZoom(int zoom) {
+    QSettings settings(kOrg, kApp);
+    settings.setValue(kDataViewBitmapZoomKey, zoom);
+}
+
+void AppSettings::setDataViewImageFormatMask(int mask) {
+    QSettings settings(kOrg, kApp);
+    settings.setValue(kDataViewImageFormatMaskKey, mask);
+}
+
+void AppSettings::setDataViewImageScopeIndex(int index) {
+    QSettings settings(kOrg, kApp);
+    settings.setValue(kDataViewImageScopeIndexKey, index);
+}
+
+void AppSettings::setDataViewImageMaxPixelsK(int value) {
+    QSettings settings(kOrg, kApp);
+    settings.setValue(kDataViewImageMaxPixelsKKey, value);
+}
+
+void AppSettings::setDataViewImageMaxResults(int value) {
+    QSettings settings(kOrg, kApp);
+    settings.setValue(kDataViewImageMaxResultsKey, value);
+}
+
+void AppSettings::setDataViewImageJobs(int value) {
+    QSettings settings(kOrg, kApp);
+    settings.setValue(kDataViewImageJobsKey, value);
+}
+
+void AppSettings::setDataViewByteAndBitmapSplitterSizes(const QList<int>& sizes) {
+    writeIntList(kDataViewByteAndBitmapSplitterSizesKey, sizes);
+}
+
+void AppSettings::setDataViewStructuredSplitterSizes(const QList<int>& sizes) {
+    writeIntList(kDataViewStructuredSplitterSizesKey, sizes);
+}
+
 void AppSettings::setViewScanLogVisible(bool visible) {
     QSettings settings(kOrg, kApp);
     settings.setValue(kViewScanLogVisibleKey, visible);
@@ -274,9 +547,39 @@ void AppSettings::setViewEditsVisible(bool visible) {
     settings.setValue(kViewEditsVisibleKey, visible);
 }
 
-void AppSettings::setViewControlsVisible(bool visible) {
+void AppSettings::setLastStructDefinitionFilePath(const QString& path) {
     QSettings settings(kOrg, kApp);
-    settings.setValue(kViewControlsVisibleKey, visible);
+    settings.setValue(kLastStructDefinitionFilePathKey, path);
+}
+
+void AppSettings::setStructDeclarationText(const QString& text) {
+    QSettings settings(kOrg, kApp);
+    settings.setValue(kStructDeclarationTextKey, text);
+}
+
+void AppSettings::setStructEntryName(const QString& name) {
+    QSettings settings(kOrg, kApp);
+    settings.setValue(kStructEntryNameKey, name);
+}
+
+void AppSettings::setStructEntryCount(int count) {
+    QSettings settings(kOrg, kApp);
+    settings.setValue(kStructEntryCountKey, count);
+}
+
+void AppSettings::setStructPreviewEnabled(bool enabled) {
+    QSettings settings(kOrg, kApp);
+    settings.setValue(kStructPreviewEnabledKey, enabled);
+}
+
+void AppSettings::setStructViewsVisible(bool visible) {
+    QSettings settings(kOrg, kApp);
+    settings.setValue(kStructViewsVisibleKey, visible);
+}
+
+void AppSettings::setStructLanguageVisible(bool visible) {
+    QSettings settings(kOrg, kApp);
+    settings.setValue(kStructLanguageVisibleKey, visible);
 }
 
 }  // namespace breco

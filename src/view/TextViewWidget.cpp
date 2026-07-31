@@ -186,6 +186,21 @@ void TextViewWidget::setMode(TextInterpretationMode mode) {
     emitCenterAnchorOffset();
 }
 
+TextInterpretationMode TextViewWidget::mode() const { return m_mode; }
+
+void TextViewWidget::setUtf16LittleEndian(bool littleEndian) {
+    if (m_utf16LittleEndian == littleEndian) {
+        return;
+    }
+    m_utf16LittleEndian = littleEndian;
+    if (m_mode == TextInterpretationMode::Utf16) {
+        rebuildLines();
+        m_contentWidget->update();
+        m_gutterWidget->update();
+        emitCenterAnchorOffset();
+    }
+}
+
 void TextViewWidget::setDisplayMode(TextDisplayMode mode) {
     if (m_displayMode == mode) {
         return;
@@ -441,6 +456,15 @@ void TextViewWidget::setSelectedOffset(quint64 absoluteOffset, bool centerInView
     }
 }
 
+void TextViewWidget::setExternalSelectionRange(
+    std::optional<QPair<quint64, quint64>> absoluteRange) {
+    if (m_externalSelectionRange == absoluteRange) {
+        return;
+    }
+    m_externalSelectionRange = absoluteRange;
+    m_contentWidget->update();
+}
+
 void TextViewWidget::setMatchRange(quint64 startOffset, quint32 length) {
     if (debug::selectionTraceEnabled()) {
         BRECO_SELTRACE(QStringLiteral("TextViewWidget::setMatchRange: start=%1 length=%2")
@@ -449,6 +473,14 @@ void TextViewWidget::setMatchRange(quint64 startOffset, quint32 length) {
     }
     m_matchStartOffset = startOffset;
     m_matchLength = length;
+    m_contentWidget->update();
+}
+
+void TextViewWidget::setResultHighlightEnabled(bool enabled) {
+    if (m_resultHighlightEnabled == enabled) {
+        return;
+    }
+    m_resultHighlightEnabled = enabled;
     m_contentWidget->update();
 }
 
@@ -551,6 +583,20 @@ void TextViewWidget::setBreatheEnabled(bool enabled) {
     m_contentWidget->update();
     m_gutterWidget->update();
     emitCenterAnchorOffset();
+}
+
+void TextViewWidget::setStringsOnlyEnabled(bool enabled) {
+    if (m_stringsOnlyEnabled == enabled) {
+        return;
+    }
+    m_stringsOnlyEnabled = enabled;
+    if (m_displayMode == TextDisplayMode::StringMode) {
+        rebuildLines();
+        m_contentWidget->update();
+        m_gutterWidget->update();
+        emitSelectionRangeChanged();
+        emitCenterAnchorOffset();
+    }
 }
 
 void TextViewWidget::setHoverAnchorOffset(std::optional<quint64> absoluteOffset) {
@@ -656,6 +702,7 @@ bool TextViewWidget::eventFilter(QObject* watched, QEvent* event) {
                 if (visibleIdx.has_value()) {
                     m_selectionStartVisibleIndex = visibleIdx.value();
                     m_selectionEndVisibleIndex = visibleIdx.value();
+                    m_clickPressVisibleIndex = visibleIdx.value();
                     m_hasSelection = true;
                     m_selecting = true;
                     m_selectedOffset = m_visibleOffsets.at(visibleIdx.value());
@@ -697,6 +744,13 @@ bool TextViewWidget::eventFilter(QObject* watched, QEvent* event) {
             if (mouseEvent->button() == Qt::LeftButton && m_selecting) {
                 m_selecting = false;
                 emitSelectionRangeChanged();
+                if (m_clickPressVisibleIndex >= 0 &&
+                    m_selectionStartVisibleIndex == m_selectionEndVisibleIndex &&
+                    m_selectionStartVisibleIndex == m_clickPressVisibleIndex &&
+                    isByteBoxAtVisibleIndex(m_clickPressVisibleIndex)) {
+                    emit byteClicked(m_visibleOffsets.at(m_clickPressVisibleIndex));
+                }
+                m_clickPressVisibleIndex = -1;
                 mouseEvent->accept();
                 return true;
             }
@@ -858,6 +912,9 @@ QVector<TextViewWidget::Token> TextViewWidget::decodeTokens(const QByteArray& ra
         const qint64 relSigned =
             static_cast<qint64>(tokenAbsoluteOffset) - static_cast<qint64>(m_baseOffset);
         const int rel = static_cast<int>(relSigned);
+        if (rel >= 0 && rel < m_stringVisibilityMask.size() && !m_stringVisibilityMask.at(rel)) {
+            continue;
+        }
         const TextByteClass cls = (rel >= 0 && rel < m_byteClasses.size())
                                       ? m_byteClasses.at(rel)
                                       : TextByteClass::Invalid;
@@ -895,10 +952,14 @@ QVector<TextViewWidget::Token> TextViewWidget::decodeTokens(const QByteArray& ra
                     tokens.push_back(token);
 
                     for (int j = 1; j < cpLen; ++j) {
+                        const int relNext = rel + j;
+                        if (relNext >= 0 && relNext < m_stringVisibilityMask.size() &&
+                            !m_stringVisibilityMask.at(relNext)) {
+                            continue;
+                        }
                         Token cont;
                         cont.absoluteOffset = tokenAbsoluteOffset + static_cast<quint64>(j);
                         cont.byteLen = 1;
-                        const int relNext = rel + j;
                         cont.cls = (relNext >= 0 && relNext < m_byteClasses.size())
                                        ? m_byteClasses.at(relNext)
                                        : token.cls;
@@ -1013,9 +1074,12 @@ void TextViewWidget::rebuildLines() {
     }
 
     const quint64 analyzeStartUs = debug::selectionTraceElapsedUs();
-    const TextAnalysisResult analysis = TextSequenceAnalyzer::analyze(m_bytes, m_mode);
+    const TextAnalysisResult analysis =
+        TextSequenceAnalyzer::analyze(m_bytes, m_mode, m_utf16LittleEndian);
     m_byteClasses = analysis.classes;
-    m_utf16LittleEndian = analysis.utf16LittleEndian;
+    if (m_mode == TextInterpretationMode::Utf16) {
+        m_utf16LittleEndian = analysis.utf16LittleEndian;
+    }
     if (debug::selectionTraceEnabled()) {
         BRECO_SELTRACE(QStringLiteral("TextViewWidget::rebuildLines: analyze elapsed=%1us")
                            .arg(debug::selectionTraceElapsedUs() - analyzeStartUs));
@@ -1024,8 +1088,13 @@ void TextViewWidget::rebuildLines() {
         m_byteClasses.fill(TextByteClass::Invalid, m_bytes.size());
     }
 
-    // Visibility is byte-complete in both modes: no byte hiding/skipping in viewport.
     m_stringVisibilityMask.fill(true, m_bytes.size());
+    if (m_stringsOnlyEnabled && m_displayMode == TextDisplayMode::StringMode) {
+        for (int i = 0; i < m_stringVisibilityMask.size(); ++i) {
+            m_stringVisibilityMask[i] =
+                i < analysis.sequenceIndexByByte.size() && analysis.sequenceIndexByByte.at(i) >= 0;
+        }
+    }
 
     int nextVisibleIndex = 0;
     auto finalizeLineFromTokens = [&](QVector<Token>&& rawTokens) {
@@ -1297,6 +1366,54 @@ std::optional<int> TextViewWidget::visibleIndexForPoint(const QPoint& point) con
     return line.tokens.last().visibleIndex;
 }
 
+bool TextViewWidget::isByteBoxAtVisibleIndex(int visibleIndex) const {
+    if (visibleIndex < 0 || visibleIndex >= m_visibleOffsets.size()) {
+        return false;
+    }
+    for (const DisplayLine& line : m_lines) {
+        for (const Token& token : line.tokens) {
+            if (token.visibleIndex == visibleIndex) {
+                return token.kind == TokenKind::ByteBox;
+            }
+        }
+    }
+    return false;
+}
+
+std::optional<quint64> TextViewWidget::selectionStartOffset() const {
+    if (!hasSelectionRange()) {
+        return std::nullopt;
+    }
+    const QPair<int, int> indices = normalizedSelectionVisibleIndices();
+    if (indices.first < 0 || indices.first >= m_visibleOffsets.size()) {
+        return std::nullopt;
+    }
+    return m_visibleOffsets.at(indices.first);
+}
+
+std::optional<quint64> TextViewWidget::selectedOffset() const {
+    if (!m_hasSelectedOffset) {
+        return std::nullopt;
+    }
+    return m_selectedOffset;
+}
+
+std::optional<QPair<quint64, quint64>> TextViewWidget::selectionRangeOffsets() const {
+    if (!hasSelectionRange()) {
+        return std::nullopt;
+    }
+    const QVector<quint64> offsets = selectedVisibleOffsets();
+    if (offsets.isEmpty()) {
+        return std::nullopt;
+    }
+    for (int i = 1; i < offsets.size(); ++i) {
+        if (offsets.at(i) != offsets.at(i - 1) + 1ULL) {
+            return std::nullopt;
+        }
+    }
+    return qMakePair(offsets.first(), offsets.last() + 1ULL);
+}
+
 std::optional<quint64> TextViewWidget::gutterOffsetForPoint(const QPoint& point) const {
     if (m_lines.isEmpty()) {
         return std::nullopt;
@@ -1355,8 +1472,7 @@ void TextViewWidget::updateHoverFromPoint(const QPoint& point) {
 
 bool TextViewWidget::hasSelectionRange() const {
     return m_hasSelection && m_selectionStartVisibleIndex >= 0 &&
-           m_selectionEndVisibleIndex >= 0 &&
-           m_selectionStartVisibleIndex != m_selectionEndVisibleIndex;
+           m_selectionEndVisibleIndex >= 0;
 }
 
 QPair<quint64, quint64> TextViewWidget::normalizedSelection() const {
@@ -1372,9 +1488,9 @@ QPair<int, int> TextViewWidget::normalizedSelectionVisibleIndices() const {
         return qMakePair(0, 0);
     }
     if (m_selectionStartVisibleIndex <= m_selectionEndVisibleIndex) {
-        return qMakePair(m_selectionStartVisibleIndex, m_selectionEndVisibleIndex);
+        return qMakePair(m_selectionStartVisibleIndex, m_selectionEndVisibleIndex + 1);
     }
-    return qMakePair(m_selectionEndVisibleIndex, m_selectionStartVisibleIndex);
+    return qMakePair(m_selectionEndVisibleIndex, m_selectionStartVisibleIndex + 1);
 }
 
 QVector<const TextViewWidget::Token*> TextViewWidget::selectedTokens() const {
@@ -1786,22 +1902,12 @@ bool TextViewWidget::shouldBreakAfterByte(int index, const QByteArray& data,
 }
 
 void TextViewWidget::emitSelectionRangeChanged() {
-    if (!hasSelectionRange()) {
+    const std::optional<QPair<quint64, quint64>> range = selectionRangeOffsets();
+    if (!range.has_value()) {
         emit selectionRangeChanged(false, 0, 0);
         return;
     }
-    const QVector<quint64> offsets = selectedVisibleOffsets();
-    if (offsets.isEmpty()) {
-        emit selectionRangeChanged(false, 0, 0);
-        return;
-    }
-    for (int i = 1; i < offsets.size(); ++i) {
-        if (offsets.at(i) != offsets.at(i - 1) + 1ULL) {
-            emit selectionRangeChanged(false, 0, 0);
-            return;
-        }
-    }
-    emit selectionRangeChanged(true, offsets.first(), offsets.last() + 1ULL);
+    emit selectionRangeChanged(true, range->first, range->second);
 }
 
 void TextViewWidget::showSelectionContextMenu(const QPoint& localPos) {
@@ -1963,10 +2069,21 @@ void TextViewWidget::paintContent() {
             const quint64 matchStart = m_matchStartOffset;
             const quint64 matchEnd = m_matchStartOffset + static_cast<quint64>(m_matchLength);
             const bool overlapsMatch =
-                m_matchLength > 0 && tokenEndOffset > matchStart && tokenStartOffset < matchEnd;
+                m_resultHighlightEnabled && m_matchLength > 0 &&
+                tokenEndOffset > matchStart && tokenStartOffset < matchEnd;
             if (overlapsMatch) {
                 painter.fillRect(QRect(x, rowRect.top() + 1, token.pixelWidth, lineH - 2),
                                  QColor(180, 255, 180));
+            }
+
+            if (m_externalSelectionRange.has_value() &&
+                m_externalSelectionRange->second >
+                    m_externalSelectionRange->first &&
+                tokenEndOffset > m_externalSelectionRange->first &&
+                tokenStartOffset < m_externalSelectionRange->second) {
+                painter.fillRect(
+                    QRect(x, rowRect.top() + 1, token.pixelWidth, lineH - 2),
+                    palette().highlight().color().lighter(135));
             }
 
             if (m_hoverAnchorOffset.has_value()) {
@@ -2071,6 +2188,9 @@ void TextViewWidget::paintGutter() {
 }
 
 void TextViewWidget::emitCenterAnchorOffset() {
+    const std::optional<quint64> firstVisible = firstVisibleByteOffset();
+    emit viewportFirstByteOffsetChanged(firstVisible.has_value(),
+                                        firstVisible.value_or(0));
     const quint64 anchor = currentCenterAnchorOffset();
     if (anchor != m_lastEmittedCenterAnchor) {
         m_lastEmittedCenterAnchor = anchor;
