@@ -161,7 +161,7 @@ Evidence:
 - newline mode combo index
 - byte line mode combo index
 - prefill-on-merge toggle
-- View Data Image format mask, scope, max pixels K, max results, and Jobs
+- Image tab format mask, scope, max pixels K, max results, and Jobs
 - Struct declaration text, selected entry, repeat count, and last loaded declaration-file path
 
 When the remembered declaration path still exists, startup reloads its current

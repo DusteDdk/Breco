@@ -5,6 +5,7 @@
 #include <QComboBox>
 #include <QCompleter>
 #include <QDir>
+#include <QDockWidget>
 #include <QEnterEvent>
 #include <QFile>
 #include <QFileInfo>
@@ -26,9 +27,9 @@
 #include <QSplitter>
 #include <QSpinBox>
 #include <QStatusBar>
-#include <QStackedWidget>
 #include <QTableView>
 #include <QTableWidget>
+#include <QTabWidget>
 #include <QTemporaryDir>
 #include <QTest>
 #include <QTextBlock>
@@ -144,7 +145,7 @@ private slots:
     void sourcePathInputValidatesAndOpensTargets();
     void sourcePathAutocompleteKeepsTypingFocusAndLimitsSuggestions();
 #ifdef Q_OS_UNIX
-    void protectedSourceOpenUsesConfirmationAndFd();
+    void protectedSourceOpenElevatesAutomaticallyAndReportsFailures();
 #endif
     void structModePanelPreviewViewsAndSnippets();
     void outformContextSubmenuListsAndSavesDeclarations();
@@ -187,9 +188,9 @@ void MainWindowIntegrationTests::structureRuleRunsThroughAsyncScanPipeline() {
     QVERIFY(window.m_structModeLeftPanel->scanStructureButton()->isEnabled());
     window.m_scanControlsPanel->searchTermLineEdit()->setText(
         QStringLiteral("remember me"));
-    window.m_mainTabsPanel->mainTabWidget()->setCurrentIndex(1);
-    QCOMPARE(window.m_mainTabsPanel->mainTabWidget()->tabText(1),
-             QStringLiteral("View Data"));
+    window.m_mainTabsPanel->activateTab(window.m_mainTabsPanel->structDataTab());
+    QCOMPARE(window.m_mainTabsPanel->mainTabWidget()->currentWidget(),
+             window.m_mainTabsPanel->structDataTab());
     window.m_structModeLeftPanel->scanStructureButton()->click();
     QVERIFY(window.m_scanController.isRunning());
     QCOMPARE(window.m_mainTabsPanel->mainTabWidget()->currentIndex(), 0);
@@ -393,32 +394,64 @@ void MainWindowIntegrationTests::twoColumnCompositionAndDataViewToolbar() {
     QCOMPARE(mainSplitter->count(), 2);
     QVERIFY(window.m_hexControlsPanel != nullptr);
     QVERIFY(window.m_textView != nullptr);
-    QVERIFY(window.m_dataViewShellPanel != nullptr);
+    QVERIFY(window.m_rawDataViewShellPanel != nullptr);
+    QVERIFY(window.m_structDataViewShellPanel != nullptr);
     QVERIFY(window.m_dataViewByteAndBitmapPanel != nullptr);
     QVERIFY(window.m_dataViewStructuredPanel != nullptr);
     QVERIFY(window.m_dataViewImagePanel != nullptr);
     QVERIFY(window.m_structModeLeftPanel != nullptr);
-    QCOMPARE(window.m_dataViewShellPanel->bodyStackedWidget()->count(), 3);
-    window.m_dataViewShellPanel->modeComboBox()->setCurrentIndex(0);
-    QCoreApplication::processEvents();
-    QCOMPARE(window.m_dataViewShellPanel->bodyStackedWidget()->currentWidget(),
-             static_cast<QWidget*>(window.m_dataViewByteAndBitmapPanel));
+    QTabWidget* tabs = window.m_mainTabsPanel->mainTabWidget();
+    QCOMPARE(tabs->count(), 4);
+    QCOMPARE(tabs->tabText(0), QStringLiteral("Scan"));
+    QCOMPARE(tabs->tabText(1), QStringLiteral("Raw"));
+    QCOMPARE(tabs->tabText(2), QStringLiteral("Struct"));
+    QCOMPARE(tabs->tabText(3), QStringLiteral("Image"));
+    QCOMPARE(tabs->indexOf(window.m_mainTabsPanel->rawDataTab()), 1);
+    QCOMPARE(tabs->indexOf(window.m_mainTabsPanel->structDataTab()), 2);
+    QCOMPARE(tabs->indexOf(window.m_mainTabsPanel->imageDataTab()), 3);
+    QVERIFY(window.m_rawDataViewShellPanel->bodyHost()->isAncestorOf(
+        window.m_dataViewByteAndBitmapPanel));
+    QVERIFY(window.m_structDataViewShellPanel->bodyHost()->isAncestorOf(
+        window.m_dataViewStructuredPanel));
+    QVERIFY(window.m_mainTabsPanel->imageDataHost()->isAncestorOf(
+        window.m_dataViewImagePanel));
+    QCOMPARE(window.m_rawDataViewShellPanel->controlMode(),
+             breco::DataViewShellPanel::ControlMode::Raw);
+    QCOMPARE(window.m_structDataViewShellPanel->controlMode(),
+             breco::DataViewShellPanel::ControlMode::Struct);
+    QVERIFY(!window.m_rawDataViewShellPanel->bitmapModeComboBox()->isHidden());
+    QVERIFY(!window.m_rawDataViewShellPanel->zoomInButton()->isHidden());
+    QVERIFY(window.m_structDataViewShellPanel->bitmapModeComboBox()->isHidden());
+    QVERIFY(window.m_structDataViewShellPanel->zoomInButton()->isHidden());
+    QVERIFY(!window.m_structDataViewShellPanel->littleEndianRadioButton()->isHidden());
 
-    window.m_dataViewShellPanel->modeComboBox()->setCurrentIndex(1);
+    window.m_structDataViewShellPanel->bigEndianRadioButton()->setChecked(true);
     QCoreApplication::processEvents();
-    QCOMPARE(window.m_dataViewShellPanel->bodyStackedWidget()->currentWidget(),
-             static_cast<QWidget*>(window.m_dataViewStructuredPanel));
-    QVERIFY(window.m_dataViewShellPanel->bitmapModeComboBox()->isHidden());
-    QVERIFY(window.m_dataViewShellPanel->zoomInButton()->isHidden());
-    QVERIFY(!window.m_dataViewShellPanel->littleEndianRadioButton()->isHidden());
+    QVERIFY(window.m_rawDataViewShellPanel->bigEndianRadioButton()->isChecked());
+    window.m_rawDataViewShellPanel->littleEndianRadioButton()->setChecked(true);
+    QCoreApplication::processEvents();
+    QVERIFY(window.m_structDataViewShellPanel->littleEndianRadioButton()->isChecked());
 
-    window.m_dataViewShellPanel->modeComboBox()->setCurrentIndex(2);
+    for (QWidget* page : {window.m_mainTabsPanel->rawDataTab(),
+                          window.m_mainTabsPanel->structDataTab(),
+                          window.m_mainTabsPanel->imageDataTab()}) {
+        QVERIFY(window.m_mainTabsPanel->detachTab(tabs->indexOf(page)));
+        QVERIFY(window.m_mainTabsPanel->isTabDetached(page));
+        QVERIFY(window.m_mainTabsPanel->detachedWindow(page) != nullptr);
+    }
+    QCOMPARE(tabs->count(), 1);
+    window.m_mainTabsPanel->detachedWindow(window.m_mainTabsPanel->imageDataTab())->close();
     QCoreApplication::processEvents();
-    QCOMPARE(window.m_dataViewShellPanel->bodyStackedWidget()->currentWidget(),
-             static_cast<QWidget*>(window.m_dataViewImagePanel));
-    QVERIFY(window.m_dataViewShellPanel->bitmapModeComboBox()->isHidden());
-    QVERIFY(window.m_dataViewShellPanel->zoomInButton()->isHidden());
-    QVERIFY(window.m_dataViewShellPanel->littleEndianRadioButton()->isHidden());
+    window.m_mainTabsPanel->detachedWindow(window.m_mainTabsPanel->rawDataTab())->close();
+    QCoreApplication::processEvents();
+    window.m_mainTabsPanel->detachedWindow(window.m_mainTabsPanel->structDataTab())->close();
+    QCoreApplication::processEvents();
+    QCOMPARE(tabs->count(), 4);
+    QCOMPARE(tabs->tabText(0), QStringLiteral("Scan"));
+    QCOMPARE(tabs->tabText(1), QStringLiteral("Raw"));
+    QCOMPARE(tabs->tabText(2), QStringLiteral("Struct"));
+    QCOMPARE(tabs->tabText(3), QStringLiteral("Image"));
+
     QCOMPARE(window.m_dataViewImagePanel->maxPixelsKSpinBox()->value(), 4096);
     QCOMPARE(window.m_dataViewImagePanel->maxResultsSpinBox()->value(), 5);
     QCOMPARE(window.m_dataViewImagePanel->jobsSpinBox()->value(),
@@ -435,12 +468,8 @@ void MainWindowIntegrationTests::twoColumnCompositionAndDataViewToolbar() {
     QCoreApplication::processEvents();
     QCOMPARE(restoredWindow.m_dataViewImagePanel->jobsSpinBox()->value(), 1);
 
-    window.m_dataViewShellPanel->modeComboBox()->setCurrentIndex(0);
-    QCoreApplication::processEvents();
-    QCOMPARE(window.m_dataViewShellPanel->bodyStackedWidget()->currentWidget(),
-             static_cast<QWidget*>(window.m_dataViewByteAndBitmapPanel));
-    QVERIFY(!window.m_dataViewShellPanel->bitmapModeComboBox()->isHidden());
-    QVERIFY(!window.m_dataViewShellPanel->zoomInButton()->isHidden());
+    QVERIFY(!window.m_rawDataViewShellPanel->bitmapModeComboBox()->isHidden());
+    QVERIFY(!window.m_rawDataViewShellPanel->zoomInButton()->isHidden());
 }
 
 void MainWindowIntegrationTests::navigatorLabelsAndDataViewEndianFollowSelection() {
@@ -495,9 +524,10 @@ void MainWindowIntegrationTests::navigatorLabelsAndDataViewEndianFollowSelection
              QStringLiteral("0X1 (+3 bytes)"));
     QCOMPARE(window.m_currentByteInfoPanel->asciiValueLabel()->text(), QStringLiteral("E"));
 
-    window.m_dataViewShellPanel->bigEndianRadioButton()->setChecked(true);
+    window.m_rawDataViewShellPanel->bigEndianRadioButton()->setChecked(true);
     QCoreApplication::processEvents();
     QVERIFY(window.m_currentByteInfoPanel->bigEndianCheckBox()->isChecked());
+    QVERIFY(window.m_structDataViewShellPanel->bigEndianRadioButton()->isChecked());
 }
 
 void MainWindowIntegrationTests::currentBytePanelShowsEndianAndWidthAwareValues() {
@@ -770,7 +800,7 @@ void MainWindowIntegrationTests::sourcePathAutocompleteKeepsTypingFocusAndLimits
 }
 
 #ifdef Q_OS_UNIX
-void MainWindowIntegrationTests::protectedSourceOpenUsesConfirmationAndFd() {
+void MainWindowIntegrationTests::protectedSourceOpenElevatesAutomaticallyAndReportsFailures() {
     SettingsValueGuard sourcePathGuard(
         QStringLiteral("ui/rememberedSingleFilePath"));
     SettingsValueGuard sourceOffsetGuard(
@@ -797,22 +827,27 @@ void MainWindowIntegrationTests::protectedSourceOpenUsesConfirmationAndFd() {
     QVERIFY(!window.tryOpenProtectedSource(absolutePath, breco::MainWindow::SourceTargetKind::File));
     QCOMPARE(unavailablePtr->openCount, 0);
 
-    auto declined = std::make_unique<FakeProtectedSourceOpener>();
-    FakeProtectedSourceOpener* declinedPtr = declined.get();
-    declinedPtr->available = true;
-    window.setProtectedSourceOpenerForTests(std::move(declined));
-    window.m_protectedSourceDialogAnswerForTests = QMessageBox::Cancel;
-    QVERIFY(!window.tryOpenProtectedSource(absolutePath, breco::MainWindow::SourceTargetKind::File));
-    QCOMPARE(declinedPtr->openCount, 0);
-
     auto failed = std::make_unique<FakeProtectedSourceOpener>();
     FakeProtectedSourceOpener* failedPtr = failed.get();
     failedPtr->available = true;
     failedPtr->result = breco::ProtectedOpenResult::failed(QStringLiteral("nope"));
     window.setProtectedSourceOpenerForTests(std::move(failed));
-    window.m_protectedSourceDialogAnswerForTests = QMessageBox::Yes;
     QVERIFY(!window.tryOpenProtectedSource(absolutePath, breco::MainWindow::SourceTargetKind::File));
     QCOMPARE(failedPtr->openCount, 1);
+    QCOMPARE(window.statusBar()->currentMessage(),
+             QStringLiteral("Could not open %1 with elevated permissions: nope").arg(absolutePath));
+
+    auto opaqueFailure = std::make_unique<FakeProtectedSourceOpener>();
+    FakeProtectedSourceOpener* opaqueFailurePtr = opaqueFailure.get();
+    opaqueFailurePtr->available = true;
+    opaqueFailurePtr->result = breco::ProtectedOpenResult::failed(
+        QStringLiteral("org.freedesktop.UDisks2.Error.NotAuthorized"));
+    window.setProtectedSourceOpenerForTests(std::move(opaqueFailure));
+    QVERIFY(!window.tryOpenProtectedSource(absolutePath, breco::MainWindow::SourceTargetKind::File));
+    QCOMPARE(opaqueFailurePtr->openCount, 1);
+    QCOMPARE(window.statusBar()->currentMessage(),
+             QStringLiteral("Could not open %1 with elevated permissions: authorization was denied")
+                 .arg(absolutePath));
 
     const int fd = ::open(absolutePath.toLocal8Bit().constData(), O_RDONLY | O_CLOEXEC);
     QVERIFY(fd >= 0);
@@ -822,7 +857,6 @@ void MainWindowIntegrationTests::protectedSourceOpenUsesConfirmationAndFd() {
     openedPtr->result =
         breco::ProtectedOpenResult::opened(fd, static_cast<quint64>(bytes.size()));
     window.setProtectedSourceOpenerForTests(std::move(opened));
-    window.m_protectedSourceDialogAnswerForTests = QMessageBox::Yes;
     QVERIFY(window.tryOpenProtectedSource(absolutePath, breco::MainWindow::SourceTargetKind::File));
     QCOMPARE(openedPtr->openCount, 1);
     QCOMPARE(window.m_sourceMode, breco::MainWindow::SourceMode::SingleFile);
@@ -873,11 +907,49 @@ void MainWindowIntegrationTests::structModePanelPreviewViewsAndSnippets() {
     QCoreApplication::processEvents();
     QVERIFY(window.selectSourcePath(absolutePath));
     QCoreApplication::processEvents();
-    window.m_dataViewShellPanel->modeComboBox()->setCurrentIndex(1);
+    window.m_mainTabsPanel->activateTab(window.m_mainTabsPanel->structDataTab());
     QCoreApplication::processEvents();
 
     auto* panel = window.m_structModeLeftPanel;
     QVERIFY(panel != nullptr);
+    QDockWidget* editorDock = window.m_dataViewStructuredPanel->structEditorDock();
+    QDockWidget* viewDock = window.m_dataViewStructuredPanel->structViewDock();
+    QVERIFY(editorDock != nullptr);
+    QVERIFY(viewDock != nullptr);
+    QVERIFY(!editorDock->isFloating());
+    QVERIFY(!viewDock->isFloating());
+    QCOMPARE(editorDock->widget(), window.m_dataViewStructuredPanel->structEditorHost());
+    QCOMPARE(viewDock->widget(), window.m_dataViewStructuredPanel->structViewHost());
+    editorDock->setFloating(true);
+    QCoreApplication::processEvents();
+    QVERIFY(editorDock->isFloating());
+    QVERIFY(panel->isVisible());
+    editorDock->setFloating(false);
+    QCoreApplication::processEvents();
+    QVERIFY(!editorDock->isFloating());
+    viewDock->setFloating(true);
+    QCoreApplication::processEvents();
+    QVERIFY(viewDock->isFloating());
+    QVERIFY(window.m_structDataViewPanel->isVisible());
+    viewDock->setFloating(false);
+    QCoreApplication::processEvents();
+    QVERIFY(!viewDock->isFloating());
+    QTabWidget* tabs = window.m_mainTabsPanel->mainTabWidget();
+    QVERIFY(window.m_mainTabsPanel->detachTab(
+        tabs->indexOf(window.m_mainTabsPanel->structDataTab())));
+    editorDock->setFloating(true);
+    QCoreApplication::processEvents();
+    QVERIFY(editorDock->isFloating());
+    QWidget* detachedStructWindow = window.m_mainTabsPanel->detachedWindow(
+        window.m_mainTabsPanel->structDataTab());
+    QVERIFY(detachedStructWindow != nullptr);
+    detachedStructWindow->close();
+    QCoreApplication::processEvents();
+    QCOMPARE(tabs->indexOf(window.m_mainTabsPanel->structDataTab()), 2);
+    QVERIFY(editorDock->isFloating());
+    editorDock->setFloating(false);
+    QCoreApplication::processEvents();
+    QVERIFY(!editorDock->isFloating());
     QHBoxLayout* structControls = panel->findChild<QHBoxLayout*>(
         QStringLiteral("structControlsLayout"));
     QVERIFY(structControls != nullptr);
@@ -885,6 +957,8 @@ void MainWindowIntegrationTests::structModePanelPreviewViewsAndSnippets() {
              structControls->indexOf(panel->entryComboBox()) + 1);
     auto* editorToggle =
         panel->findChild<QCheckBox*>(QStringLiteral("editorCheckBox"));
+    auto* libraryToggle =
+        panel->findChild<QCheckBox*>(QStringLiteral("libraryCheckBox"));
     auto* viewsToggle =
         panel->findChild<QCheckBox*>(QStringLiteral("viewsCheckBox"));
     auto* languageToggle =
@@ -894,28 +968,47 @@ void MainWindowIntegrationTests::structModePanelPreviewViewsAndSnippets() {
         QStringLiteral("structDeclarationStatusLabel"));
     auto* editorWidget =
         panel->findChild<QWidget*>(QStringLiteral("structEditorWidgetPlaceholder"));
+    auto* libraryWidget =
+        panel->findChild<QWidget*>(QStringLiteral("structureLibraryWidget"));
     auto* viewsWidget =
         panel->findChild<QWidget*>(QStringLiteral("structViewEntriesWidget"));
     auto* languageWidget =
         panel->findChild<QWidget*>(QStringLiteral("languageReferenceWidget"));
+    QVERIFY(libraryToggle != nullptr);
     QVERIFY(editorToggle != nullptr);
     QVERIFY(viewsToggle != nullptr);
     QVERIFY(languageToggle != nullptr);
     QVERIFY(previewToggle != nullptr);
+    QVERIFY(libraryWidget != nullptr);
     QVERIFY(statusLabel != nullptr);
     QVERIFY(panel->structDeclarationLayout()->indexOf(
                 panel->structDeclarationEdit()) <
             panel->structDeclarationLayout()->indexOf(statusLabel));
     QVERIFY(!statusLabel->isHidden());
     QCOMPARE(statusLabel->text(), QStringLiteral("0 lines, no errors"));
+    QVERIFY(libraryToggle->isChecked());
     QVERIFY(editorToggle->isChecked());
     QVERIFY(!viewsToggle->isChecked());
     QVERIFY(!languageToggle->isChecked());
     QVERIFY(previewToggle->isChecked());
     QVERIFY(!previewToggle->isEnabled());
+    QVERIFY(!libraryWidget->isHidden());
     QVERIFY(!editorWidget->isHidden());
     QVERIFY(viewsWidget->isHidden());
     QVERIFY(languageWidget->isHidden());
+    auto* sectionSplitter =
+        panel->findChild<QSplitter*>(QStringLiteral("structSectionsSplitter"));
+    QVERIFY(sectionSplitter != nullptr);
+    QCOMPARE(sectionSplitter->orientation(), Qt::Vertical);
+    QCOMPARE(sectionSplitter->count(), 4);
+    QCOMPARE(sectionSplitter->widget(0), libraryWidget);
+    QCOMPARE(sectionSplitter->widget(1), editorWidget);
+    QCOMPARE(sectionSplitter->widget(2), viewsWidget);
+    QCOMPARE(sectionSplitter->widget(3), languageWidget);
+    libraryToggle->setChecked(false);
+    QCoreApplication::processEvents();
+    QVERIFY(libraryWidget->isHidden());
+    libraryToggle->setChecked(true);
     viewsToggle->setChecked(true);
     languageToggle->setChecked(true);
     QCoreApplication::processEvents();
@@ -1306,7 +1399,6 @@ void MainWindowIntegrationTests::restoresStructDefinitionAndPreviewOnStartup() {
         QStringLiteral("ui/structDeclarationText"));
     SettingsValueGuard entryNameGuard(QStringLiteral("ui/structEntryName"));
     SettingsValueGuard entryCountGuard(QStringLiteral("ui/structEntryCount"));
-    SettingsValueGuard dataViewModeGuard(QStringLiteral("ui/dataViewModeIndex"));
     SettingsValueGuard previewEnabledGuard(
         QStringLiteral("ui/structPreviewEnabled"));
 
@@ -1341,7 +1433,6 @@ void MainWindowIntegrationTests::restoresStructDefinitionAndPreviewOnStartup() {
     settings.setValue(QStringLiteral("ui/structEntryName"),
                       QStringLiteral("Remembered"));
     settings.setValue(QStringLiteral("ui/structEntryCount"), 1);
-    settings.setValue(QStringLiteral("ui/dataViewModeIndex"), 1);
     settings.setValue(QStringLiteral("ui/structPreviewEnabled"), true);
 
     {
@@ -1472,7 +1563,7 @@ void MainWindowIntegrationTests::imageModeScansAndJumpsToResult() {
     QVERIFY(window.m_activePreviewRow >= 0);
     QVERIFY(window.m_textHoverBuffer.baseOffset <= 1024);
 
-    window.m_dataViewShellPanel->modeComboBox()->setCurrentIndex(2);
+    window.m_mainTabsPanel->activateTab(window.m_mainTabsPanel->imageDataTab());
     window.m_dataViewImagePanel->setSelectedFormats(breco::EmbeddedImageFormat::Png);
     window.m_dataViewImagePanel->setSelectedScope(breco::EmbeddedImageScope::FromStart);
     window.m_dataViewImagePanel->maxPixelsKSpinBox()->setValue(4);
@@ -1533,7 +1624,7 @@ void MainWindowIntegrationTests::imageModeStopPreservesPartialResults() {
     QVERIFY(window.selectSourcePath(absolutePath));
     QCoreApplication::processEvents();
 
-    window.m_dataViewShellPanel->modeComboBox()->setCurrentIndex(2);
+    window.m_mainTabsPanel->activateTab(window.m_mainTabsPanel->imageDataTab());
     window.m_dataViewImagePanel->setSelectedFormats(breco::EmbeddedImageFormat::Png);
     window.m_dataViewImagePanel->setSelectedScope(breco::EmbeddedImageScope::FromStart);
     window.m_dataViewImagePanel->jobsSpinBox()->setValue(1);

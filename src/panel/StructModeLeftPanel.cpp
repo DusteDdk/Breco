@@ -23,6 +23,7 @@
 #include <QPlainTextEdit>
 #include <QSaveFile>
 #include <QSpinBox>
+#include <QSplitter>
 #include <QTableWidget>
 #include <QTableWidgetItem>
 #include <QTextBlock>
@@ -66,7 +67,26 @@ QString structDeclarationDialogStartPath() {
 StructModeLeftPanel::StructModeLeftPanel(QWidget* parent)
     : QWidget(parent), m_ui(std::make_unique<Ui::StructModeLeftPanel>()) {
     m_ui->setupUi(this);
+
+    // Designer owns the three substantial sections. Move them into a splitter
+    // and add the dynamically built library as its first pane.
+    m_sectionSplitter = new QSplitter(Qt::Vertical, this);
+    m_sectionSplitter->setObjectName(QStringLiteral("structSectionsSplitter"));
+    m_sectionSplitter->setChildrenCollapsible(false);
+    m_ui->structModeLeftPanelLayout->insertWidget(1, m_sectionSplitter, 1);
     setupStructureLibrary();
+    m_sectionSplitter->addWidget(m_ui->structEditorWidgetPlaceholder);
+    m_sectionSplitter->addWidget(m_ui->structViewEntriesWidget);
+    m_sectionSplitter->addWidget(m_ui->languageReferenceWidget);
+    m_sectionSplitter->setStretchFactor(0, 1);
+    m_sectionSplitter->setStretchFactor(1, 2);
+    m_sectionSplitter->setStretchFactor(2, 1);
+    m_sectionSplitter->setStretchFactor(3, 1);
+
+    // Keep the toggle/action strip at its natural one-row height; the splitter
+    // receives all surplus vertical space.
+    m_ui->sectionControlsLayout->setContentsMargins(0, 0, 0, 0);
+    m_ui->sectionControlsLayout->setVerticalSpacing(0);
 
     m_ui->previewEnabledCheckBox->setChecked(
         AppSettings::structPreviewEnabled());
@@ -76,6 +96,9 @@ StructModeLeftPanel::StructModeLeftPanel(QWidget* parent)
     m_ui->structEditorWidgetPlaceholder->setVisible(m_ui->editorCheckBox->isChecked());
     m_ui->structViewEntriesWidget->setVisible(m_ui->viewsCheckBox->isChecked());
     m_ui->languageReferenceWidget->setVisible(m_ui->languageCheckBox->isChecked());
+    m_libraryWidget->setVisible(m_ui->libraryCheckBox->isChecked());
+    connect(m_ui->libraryCheckBox, &QCheckBox::toggled,
+            m_libraryWidget, &QWidget::setVisible);
     connect(m_ui->editorCheckBox, &QCheckBox::toggled,
             m_ui->structEditorWidgetPlaceholder, &QWidget::setVisible);
     connect(m_ui->viewsCheckBox, &QCheckBox::toggled,
@@ -448,7 +471,9 @@ bool StructModeLeftPanel::loadDeclarationFromFile(const QString& filePath) {
 }
 
 void StructModeLeftPanel::setupStructureLibrary() {
-    auto* container = new QWidget(this);
+    auto* container = new QWidget(m_sectionSplitter);
+    container->setObjectName(QStringLiteral("structureLibraryWidget"));
+    m_libraryWidget = container;
     auto* layout = new QVBoxLayout(container);
     layout->setContentsMargins(0, 0, 0, 0);
     auto* controls = new QHBoxLayout();
@@ -464,10 +489,9 @@ void StructModeLeftPanel::setupStructureLibrary() {
     m_libraryTree = new QTreeWidget(container);
     m_libraryTree->setHeaderLabels({QStringLiteral("File / structure")});
     m_libraryTree->setRootIsDecorated(true);
-    m_libraryTree->setMaximumHeight(150);
     layout->addLayout(controls);
     layout->addWidget(m_libraryTree);
-    m_ui->structModeLeftPanelLayout->insertWidget(1, container);
+    m_sectionSplitter->addWidget(container);
     connect(directoryButton, &QToolButton::clicked, this,
             &StructModeLeftPanel::chooseStructureLibraryDirectory);
     connect(refreshButton, &QToolButton::clicked, this,

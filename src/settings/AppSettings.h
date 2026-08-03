@@ -40,7 +40,6 @@ public:
     static bool hexBigEndianEnabled();
     static bool hexStringsOnlyEnabled();
     static bool hexHighlightResultEnabled();
-    static int dataViewModeIndex();
     static bool dataViewBigEndianEnabled();
     static int dataViewTextModeIndex();
     static int dataViewBitmapModeIndex();
@@ -85,7 +84,6 @@ public:
     static void setHexBigEndianEnabled(bool enabled);
     static void setHexStringsOnlyEnabled(bool enabled);
     static void setHexHighlightResultEnabled(bool enabled);
-    static void setDataViewModeIndex(int index);
     static void setDataViewBigEndianEnabled(bool enabled);
     static void setDataViewTextModeIndex(int index);
     static void setDataViewBitmapModeIndex(int index);

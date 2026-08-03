@@ -36,7 +36,6 @@ constexpr const char* kHexShowAsIndexKey = "ui/hexShowAsIndex";
 constexpr const char* kHexBigEndianEnabledKey = "ui/hexBigEndianEnabled";
 constexpr const char* kHexStringsOnlyEnabledKey = "ui/hexStringsOnlyEnabled";
 constexpr const char* kHexHighlightResultEnabledKey = "ui/hexHighlightResultEnabled";
-constexpr const char* kDataViewModeIndexKey = "ui/dataViewModeIndex";
 constexpr const char* kDataViewBigEndianEnabledKey = "ui/dataViewBigEndianEnabled";
 constexpr const char* kDataViewTextModeIndexKey = "ui/dataViewTextModeIndex";
 constexpr const char* kDataViewBitmapModeIndexKey = "ui/dataViewBitmapModeIndex";
@@ -279,11 +278,6 @@ bool AppSettings::hexHighlightResultEnabled() {
     return settings.value(kHexHighlightResultEnabledKey, true).toBool();
 }
 
-int AppSettings::dataViewModeIndex() {
-    QSettings settings(kOrg, kApp);
-    return settings.value(kDataViewModeIndexKey, 0).toInt();
-}
-
 bool AppSettings::dataViewBigEndianEnabled() {
     QSettings settings(kOrg, kApp);
     return settings.value(kDataViewBigEndianEnabledKey, false).toBool();
@@ -483,11 +477,6 @@ void AppSettings::setHexStringsOnlyEnabled(bool enabled) {
 void AppSettings::setHexHighlightResultEnabled(bool enabled) {
     QSettings settings(kOrg, kApp);
     settings.setValue(kHexHighlightResultEnabledKey, enabled);
-}
-
-void AppSettings::setDataViewModeIndex(int index) {
-    QSettings settings(kOrg, kApp);
-    settings.setValue(kDataViewModeIndexKey, index);
 }
 
 void AppSettings::setDataViewBigEndianEnabled(bool enabled) {

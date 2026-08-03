@@ -381,19 +381,37 @@ MainWindow::MainWindow(QWidget* parent)
     resultsHostLayout->addWidget(m_resultsPanel);
     m_mainTabsPanel->resultsPanelHost()->setMinimumHeight(kTopPaneMinHeightPx);
 
-    auto* dataViewHostLayout = new QVBoxLayout(m_mainTabsPanel->dataViewHost());
-    dataViewHostLayout->setContentsMargins(0, 0, 0, 0);
-    dataViewHostLayout->setSpacing(0);
-    m_dataViewShellPanel = new DataViewShellPanel(m_mainTabsPanel->dataViewHost());
-    dataViewHostLayout->addWidget(m_dataViewShellPanel);
+    auto* rawDataHostLayout = new QVBoxLayout(m_mainTabsPanel->rawDataHost());
+    rawDataHostLayout->setContentsMargins(0, 0, 0, 0);
+    rawDataHostLayout->setSpacing(0);
+    m_rawDataViewShellPanel = new DataViewShellPanel(
+        DataViewShellPanel::ControlMode::Raw, m_mainTabsPanel->rawDataHost());
+    rawDataHostLayout->addWidget(m_rawDataViewShellPanel);
+    auto* rawBodyLayout = new QVBoxLayout(m_rawDataViewShellPanel->bodyHost());
+    rawBodyLayout->setContentsMargins(0, 0, 0, 0);
+    rawBodyLayout->setSpacing(0);
     m_dataViewByteAndBitmapPanel =
-        new DataViewByteAndBitmapPanel(m_dataViewShellPanel->bodyStackedWidget());
+        new DataViewByteAndBitmapPanel(m_rawDataViewShellPanel->bodyHost());
+    rawBodyLayout->addWidget(m_dataViewByteAndBitmapPanel);
+
+    auto* structDataHostLayout = new QVBoxLayout(m_mainTabsPanel->structDataHost());
+    structDataHostLayout->setContentsMargins(0, 0, 0, 0);
+    structDataHostLayout->setSpacing(0);
+    m_structDataViewShellPanel = new DataViewShellPanel(
+        DataViewShellPanel::ControlMode::Struct, m_mainTabsPanel->structDataHost());
+    structDataHostLayout->addWidget(m_structDataViewShellPanel);
+    auto* structBodyLayout = new QVBoxLayout(m_structDataViewShellPanel->bodyHost());
+    structBodyLayout->setContentsMargins(0, 0, 0, 0);
+    structBodyLayout->setSpacing(0);
     m_dataViewStructuredPanel =
-        new DataViewStructuredPanel(m_dataViewShellPanel->bodyStackedWidget());
-    m_dataViewImagePanel = new DataViewImagePanel(m_dataViewShellPanel->bodyStackedWidget());
-    m_dataViewShellPanel->bodyStackedWidget()->addWidget(m_dataViewByteAndBitmapPanel);
-    m_dataViewShellPanel->bodyStackedWidget()->addWidget(m_dataViewStructuredPanel);
-    m_dataViewShellPanel->bodyStackedWidget()->addWidget(m_dataViewImagePanel);
+        new DataViewStructuredPanel(m_structDataViewShellPanel->bodyHost());
+    structBodyLayout->addWidget(m_dataViewStructuredPanel);
+
+    auto* imageDataHostLayout = new QVBoxLayout(m_mainTabsPanel->imageDataHost());
+    imageDataHostLayout->setContentsMargins(0, 0, 0, 0);
+    imageDataHostLayout->setSpacing(0);
+    m_dataViewImagePanel = new DataViewImagePanel(m_mainTabsPanel->imageDataHost());
+    imageDataHostLayout->addWidget(m_dataViewImagePanel);
 
     auto* hexControlsHostLayout = new QVBoxLayout(m_ui->hexViewControlsPanelHost);
     hexControlsHostLayout->setContentsMargins(0, 0, 0, 0);
@@ -598,37 +616,37 @@ MainWindow::MainWindow(QWidget* parent)
                 scheduleSharedPreviewUpdate();
             });
 
-    connect(m_dataViewShellPanel->modeComboBox(), qOverload<int>(&QComboBox::currentIndexChanged), this,
-            &MainWindow::onDataViewModeChanged);
-    connect(m_dataViewShellPanel->bitmapModeComboBox(), qOverload<int>(&QComboBox::currentIndexChanged), this,
+    connect(m_rawDataViewShellPanel->bitmapModeComboBox(), qOverload<int>(&QComboBox::currentIndexChanged), this,
             &MainWindow::onBitmapModeChanged);
-    connect(m_dataViewShellPanel->textInterpretationComboBox(),
+    connect(m_rawDataViewShellPanel->textInterpretationComboBox(),
             qOverload<int>(&QComboBox::currentIndexChanged), this, [this](int idx) {
                 m_bitmapView->setTextMode(selectedDataViewTextMode());
                 AppSettings::setDataViewTextModeIndex(idx);
                 refreshDataViewFromNavigator();
             });
-    connect(m_dataViewShellPanel->littleEndianRadioButton(), &QRadioButton::toggled, this,
+    connect(m_rawDataViewShellPanel->littleEndianRadioButton(), &QRadioButton::toggled, this,
             [this](bool checked) {
-                if (!checked) {
-                    return;
+                if (checked) {
+                    setDataViewBigEndianEnabled(false);
                 }
-                m_currentByteInfoPanel->bigEndianCheckBox()->setChecked(false);
-                m_bitmapView->setUtf16LittleEndian(true);
-                AppSettings::setDataViewBigEndianEnabled(false);
-                refreshCurrentByteInfoFromLastHover();
-                refreshDataViewFromNavigator();
             });
-    connect(m_dataViewShellPanel->bigEndianRadioButton(), &QRadioButton::toggled, this,
+    connect(m_rawDataViewShellPanel->bigEndianRadioButton(), &QRadioButton::toggled, this,
             [this](bool checked) {
-                if (!checked) {
-                    return;
+                if (checked) {
+                    setDataViewBigEndianEnabled(true);
                 }
-                m_currentByteInfoPanel->bigEndianCheckBox()->setChecked(true);
-                m_bitmapView->setUtf16LittleEndian(false);
-                AppSettings::setDataViewBigEndianEnabled(true);
-                refreshCurrentByteInfoFromLastHover();
-                refreshDataViewFromNavigator();
+            });
+    connect(m_structDataViewShellPanel->littleEndianRadioButton(), &QRadioButton::toggled, this,
+            [this](bool checked) {
+                if (checked) {
+                    setDataViewBigEndianEnabled(false);
+                }
+            });
+    connect(m_structDataViewShellPanel->bigEndianRadioButton(), &QRadioButton::toggled, this,
+            [this](bool checked) {
+                if (checked) {
+                    setDataViewBigEndianEnabled(true);
+                }
             });
     connect(m_dataViewImagePanel, &DataViewImagePanel::scanRequested, this,
             &MainWindow::startImageScan);
@@ -863,21 +881,21 @@ MainWindow::MainWindow(QWidget* parent)
     m_mainTabsPanel->editStack()->setVisible(AppSettings::viewEditsVisible());
     syncViewMenuChecks();
 
-    connect(m_dataViewShellPanel->zoomOutButton(), &QToolButton::clicked, this, [this]() {
+    connect(m_rawDataViewShellPanel->zoomOutButton(), &QToolButton::clicked, this, [this]() {
         const int next = qMax(1, m_bitmapView->zoom() - 1);
         m_bitmapView->setZoom(next);
-        m_dataViewShellPanel->zoomLabel()->setText(QStringLiteral("%1x").arg(next));
+        m_rawDataViewShellPanel->zoomLabel()->setText(QStringLiteral("%1x").arg(next));
         AppSettings::setDataViewBitmapZoom(next);
     });
-    connect(m_dataViewShellPanel->zoomInButton(), &QToolButton::clicked, this, [this]() {
+    connect(m_rawDataViewShellPanel->zoomInButton(), &QToolButton::clicked, this, [this]() {
         const int next = qMin(32, m_bitmapView->zoom() + 1);
         m_bitmapView->setZoom(next);
-        m_dataViewShellPanel->zoomLabel()->setText(QStringLiteral("%1x").arg(next));
+        m_rawDataViewShellPanel->zoomLabel()->setText(QStringLiteral("%1x").arg(next));
         AppSettings::setDataViewBitmapZoom(next);
     });
     connect(m_bitmapView, &BitmapViewWidget::zoomChanged, this,
             [this](int zoom) {
-                m_dataViewShellPanel->zoomLabel()->setText(QStringLiteral("%1x").arg(zoom));
+                m_rawDataViewShellPanel->zoomLabel()->setText(QStringLiteral("%1x").arg(zoom));
                 AppSettings::setDataViewBitmapZoom(zoom);
                 scheduleSharedPreviewUpdate();
             });
@@ -911,13 +929,6 @@ MainWindow::MainWindow(QWidget* parent)
         m_dataViewByteAndBitmapPanel->splitter()->setSizes(savedRawDataSplitterSizes);
     } else {
         m_dataViewByteAndBitmapPanel->splitter()->setSizes({35, 65});
-    }
-    const QList<int> savedStructuredSplitterSizes =
-        AppSettings::dataViewStructuredSplitterSizes();
-    if (savedStructuredSplitterSizes.size() == 2) {
-        m_dataViewStructuredPanel->splitter()->setSizes(savedStructuredSplitterSizes);
-    } else {
-        m_dataViewStructuredPanel->splitter()->setSizes({45, 55});
     }
     if (m_ui->contentSplitter != nullptr && m_ui->contentSplitter->count() == 2) {
         m_ui->contentSplitter->setHandleWidth(8);
@@ -961,13 +972,6 @@ MainWindow::MainWindow(QWidget* parent)
                     AppSettings::setDataViewByteAndBitmapSplitterSizes(sizes);
                 }
             });
-    connect(m_dataViewStructuredPanel->splitter(), &QSplitter::splitterMoved,
-            this, [this](int, int) {
-                const QList<int> sizes = m_dataViewStructuredPanel->splitter()->sizes();
-                if (sizes.size() == 2) {
-                    AppSettings::setDataViewStructuredSplitterSizes(sizes);
-                }
-            });
     connect(m_ui->contentSplitter, &QSplitter::splitterMoved, this, [this](int, int) {
         const QList<int> sizes = m_ui->contentSplitter->sizes();
         if (sizes.size() == 2) {
@@ -982,10 +986,10 @@ MainWindow::MainWindow(QWidget* parent)
         }
     });
     const int controlsH = m_hexControlsPanel->showAsComboBox()->sizeHint().height();
-    m_dataViewShellPanel->zoomOutButton()->setFixedHeight(controlsH);
-    m_dataViewShellPanel->zoomInButton()->setFixedHeight(controlsH);
-    m_dataViewShellPanel->zoomLabel()->setFixedHeight(controlsH);
-    m_dataViewShellPanel->zoomLabel()->setMinimumWidth(36);
+    m_rawDataViewShellPanel->zoomOutButton()->setFixedHeight(controlsH);
+    m_rawDataViewShellPanel->zoomInButton()->setFixedHeight(controlsH);
+    m_rawDataViewShellPanel->zoomLabel()->setFixedHeight(controlsH);
+    m_rawDataViewShellPanel->zoomLabel()->setMinimumWidth(36);
 
     setScanButtonMode(false);
 
@@ -1006,15 +1010,13 @@ MainWindow::MainWindow(QWidget* parent)
     const int gutterFormatIdx = qBound(0, AppSettings::textGutterFormatIndex(), 6);
     const bool prefillOnMerge = AppSettings::prefillOnMergeEnabled();
     const int currentByteNumberSystemIdx = qBound(0, AppSettings::currentByteInfoNumberSystemIndex(), 2);
-    const int dataViewModeIdx =
-        qBound(0, AppSettings::dataViewModeIndex(), m_dataViewShellPanel->modeComboBox()->count() - 1);
     const bool dataViewBigEndian = AppSettings::dataViewBigEndianEnabled();
     const int dataViewTextModeIdx =
         qBound(0, AppSettings::dataViewTextModeIndex(),
-               m_dataViewShellPanel->textInterpretationComboBox()->count() - 1);
+               m_rawDataViewShellPanel->textInterpretationComboBox()->count() - 1);
     const int dataViewBitmapModeIdx =
         qBound(0, AppSettings::dataViewBitmapModeIndex(),
-               m_dataViewShellPanel->bitmapModeComboBox()->count() - 1);
+               m_rawDataViewShellPanel->bitmapModeComboBox()->count() - 1);
     const int dataViewZoom = qBound(1, AppSettings::dataViewBitmapZoom(), 32);
     const EmbeddedImageFormats supportedImageFormats = supportedEmbeddedImageFormats();
     const EmbeddedImageFormats rememberedImageFormats =
@@ -1046,11 +1048,9 @@ MainWindow::MainWindow(QWidget* parent)
     m_hexControlsPanel->monospaceCheckBox()->setChecked(monospace);
     m_hexControlsPanel->bytesPerLineComboBox()->setCurrentIndex(byteLineModeIdx);
     m_hexControlsPanel->shiftBitsSpinBox()->setValue(0);
-    m_dataViewShellPanel->modeComboBox()->setCurrentIndex(dataViewModeIdx);
-    m_dataViewShellPanel->littleEndianRadioButton()->setChecked(!dataViewBigEndian);
-    m_dataViewShellPanel->bigEndianRadioButton()->setChecked(dataViewBigEndian);
-    m_dataViewShellPanel->textInterpretationComboBox()->setCurrentIndex(dataViewTextModeIdx);
-    m_dataViewShellPanel->bitmapModeComboBox()->setCurrentIndex(dataViewBitmapModeIdx);
+    setDataViewBigEndianEnabled(dataViewBigEndian);
+    m_rawDataViewShellPanel->textInterpretationComboBox()->setCurrentIndex(dataViewTextModeIdx);
+    m_rawDataViewShellPanel->bitmapModeComboBox()->setCurrentIndex(dataViewBitmapModeIdx);
     m_dataViewImagePanel->setSupportedFormats(supportedImageFormats);
     m_dataViewImagePanel->setSelectedFormats(rememberedImageFormats);
     m_dataViewImagePanel->setSelectedScope(static_cast<EmbeddedImageScope>(dataViewImageScopeIdx));
@@ -1078,7 +1078,7 @@ MainWindow::MainWindow(QWidget* parent)
     m_bitmapView->setUtf16LittleEndian(!dataViewBigEndian);
     m_bitmapView->setResultOverlayEnabled(highlightResult);
     m_bitmapView->setZoom(dataViewZoom);
-    m_dataViewShellPanel->zoomLabel()->setText(QStringLiteral("%1x").arg(dataViewZoom));
+    m_rawDataViewShellPanel->zoomLabel()->setText(QStringLiteral("%1x").arg(dataViewZoom));
     m_currentByteInfoPanel->bigEndianCheckBox()->setChecked(dataViewBigEndian);
     m_currentByteInfoPanel->decimalModeRadioButton()->setChecked(currentByteNumberSystemIdx == 0);
     m_currentByteInfoPanel->hexModeRadioButton()->setChecked(currentByteNumberSystemIdx == 1);
@@ -1091,7 +1091,6 @@ MainWindow::MainWindow(QWidget* parent)
             [](int width) { AppSettings::setTextGutterWidth(width); });
 
     updateTextModeControlVisibility();
-    updateStructViewVisibility();
     updateHexInfoPanel();
     clearCurrentByteInfo();
 
@@ -1300,24 +1299,30 @@ bool MainWindow::tryOpenProtectedSource(const QString& path, SourceTargetKind ki
         return false;
     }
 
-    QMessageBox::StandardButton answer = QMessageBox::Cancel;
-    if (m_protectedSourceDialogAnswerForTests.has_value()) {
-        answer = static_cast<QMessageBox::StandardButton>(m_protectedSourceDialogAnswerForTests.value());
-        m_protectedSourceDialogAnswerForTests.reset();
-    } else {
-        answer = QMessageBox::question(
-            this, QStringLiteral("Access protected file"),
-            QStringLiteral("Cannot open %1\nDo you want to open it with elevated permissions ?")
-                .arg(path),
-            QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel);
-    }
-    if (answer != QMessageBox::Yes) {
-        return false;
-    }
-
     ProtectedOpenResult result = m_protectedSourceOpener->open(path, protectedKind.value());
     if (result.status != ProtectedOpenResult::Status::Opened || result.fd < 0 ||
         result.fileSize == 0) {
+        QString reason = result.errorMessage.trimmed();
+        const bool looksOpaque = reason.isEmpty() ||
+            reason.startsWith(QStringLiteral("org.freedesktop."), Qt::CaseInsensitive) ||
+            reason.startsWith(QStringLiteral("QDBusError"), Qt::CaseInsensitive) ||
+            (!reason.contains(QLatin1Char(' ')) && reason.contains(QLatin1Char('.')));
+        if (looksOpaque) {
+            if (reason.contains(QStringLiteral("cancel"), Qt::CaseInsensitive)) {
+                reason = QStringLiteral("authentication was cancelled");
+            } else if (reason.contains(QStringLiteral("authoriz"), Qt::CaseInsensitive) ||
+                       reason.contains(QStringLiteral("accessdenied"), Qt::CaseInsensitive)) {
+                reason = QStringLiteral("authorization was denied");
+            } else if (reason.contains(QStringLiteral("serviceunknown"), Qt::CaseInsensitive) ||
+                       reason.contains(QStringLiteral("noreply"), Qt::CaseInsensitive) ||
+                       reason.contains(QStringLiteral("disconnected"), Qt::CaseInsensitive)) {
+                reason = QStringLiteral("the system authorization service is unavailable");
+            } else {
+                reason = QStringLiteral("the system could not grant elevated access");
+            }
+        }
+        statusBar()->showMessage(QStringLiteral("Could not open %1 with elevated permissions: %2")
+                                     .arg(path, reason));
         return false;
     }
 
@@ -1777,17 +1782,6 @@ void MainWindow::onTextModeChanged(int idx) {
     scheduleSharedPreviewUpdate();
 }
 
-void MainWindow::onDataViewModeChanged(int idx) {
-    AppSettings::setDataViewModeIndex(idx);
-    updateStructViewVisibility();
-    if (isStructViewActive()) {
-        m_structModeLeftPanel->reparseDeclaration();
-        rebuildStructVisualization();
-    } else if (!isImageViewActive()) {
-        refreshDataViewFromNavigator();
-    }
-}
-
 void MainWindow::onBitmapModeChanged(int idx) {
     switch (idx) {
         case 0:
@@ -1859,8 +1853,8 @@ TextInterpretationMode MainWindow::selectedTextMode() const {
 }
 
 TextInterpretationMode MainWindow::selectedDataViewTextMode() const {
-    const int idx = m_dataViewShellPanel != nullptr
-                        ? m_dataViewShellPanel->textInterpretationComboBox()->currentIndex()
+    const int idx = m_rawDataViewShellPanel != nullptr
+                        ? m_rawDataViewShellPanel->textInterpretationComboBox()->currentIndex()
                         : 0;
     switch (idx) {
         case 1:
@@ -1874,36 +1868,31 @@ TextInterpretationMode MainWindow::selectedDataViewTextMode() const {
 }
 
 bool MainWindow::dataViewBigEndianEnabled() const {
-    return m_dataViewShellPanel != nullptr &&
-           m_dataViewShellPanel->bigEndianRadioButton()->isChecked();
+    return m_dataViewBigEndian;
 }
 
-bool MainWindow::isStructViewActive() const {
-    return m_dataViewShellPanel != nullptr &&
-           m_dataViewShellPanel->modeComboBox()->currentIndex() == 1;
-}
-
-bool MainWindow::isImageViewActive() const {
-    return m_dataViewShellPanel != nullptr &&
-           m_dataViewShellPanel->modeComboBox()->currentIndex() == 2;
-}
-
-void MainWindow::updateStructViewVisibility() {
-    const bool structMode = isStructViewActive();
-    const bool imageMode = isImageViewActive();
-    if (m_dataViewShellPanel != nullptr) {
-        QWidget* current = m_dataViewByteAndBitmapPanel;
-        DataViewShellPanel::ControlMode controlMode = DataViewShellPanel::ControlMode::Raw;
-        if (structMode) {
-            current = m_dataViewStructuredPanel;
-            controlMode = DataViewShellPanel::ControlMode::Struct;
-        } else if (imageMode) {
-            current = m_dataViewImagePanel;
-            controlMode = DataViewShellPanel::ControlMode::Image;
+void MainWindow::setDataViewBigEndianEnabled(bool enabled) {
+    m_dataViewBigEndian = enabled;
+    for (DataViewShellPanel* shell :
+         {m_rawDataViewShellPanel, m_structDataViewShellPanel}) {
+        if (shell == nullptr) {
+            continue;
         }
-        m_dataViewShellPanel->bodyStackedWidget()->setCurrentWidget(current);
-        m_dataViewShellPanel->setControlMode(controlMode);
+        const QSignalBlocker littleBlocker(shell->littleEndianRadioButton());
+        const QSignalBlocker bigBlocker(shell->bigEndianRadioButton());
+        shell->littleEndianRadioButton()->setChecked(!enabled);
+        shell->bigEndianRadioButton()->setChecked(enabled);
     }
+    if (m_currentByteInfoPanel != nullptr) {
+        m_currentByteInfoPanel->bigEndianCheckBox()->setChecked(enabled);
+    }
+    if (m_bitmapView != nullptr) {
+        m_bitmapView->setUtf16LittleEndian(!enabled);
+    }
+    AppSettings::setDataViewBigEndianEnabled(enabled);
+    refreshCurrentByteInfoFromLastHover();
+    refreshDataViewFromNavigator();
+    rebuildStructVisualization();
 }
 
 void MainWindow::updateTextModeControlVisibility() {
@@ -3608,7 +3597,7 @@ void MainWindow::onBitmapByteClicked(quint64 absoluteOffset) {
 
 void MainWindow::onTextByteClicked(quint64 absoluteOffset) {
     if (m_structModeLeftPanel->previewEnabled() &&
-        m_structModeLeftPanel->canPreview() && isStructViewActive()) {
+        m_structModeLeftPanel->canPreview()) {
         createStructPreview(absoluteOffset);
     }
 }
@@ -3788,7 +3777,7 @@ void MainWindow::syncStructPreviewToControls() {
                                     : structVisualizationStartOffset();
     clearStructPreview();
     if (m_structModeLeftPanel->previewEnabled() &&
-        m_structModeLeftPanel->canPreview() && isStructViewActive()) {
+        m_structModeLeftPanel->canPreview()) {
         createStructPreview(absoluteOffset);
     }
 }

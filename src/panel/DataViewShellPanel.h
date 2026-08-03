@@ -8,7 +8,6 @@ QT_BEGIN_NAMESPACE
 class QComboBox;
 class QLabel;
 class QRadioButton;
-class QStackedWidget;
 class QToolButton;
 namespace Ui {
 class DataViewShell;
@@ -24,13 +23,11 @@ public:
     enum class ControlMode {
         Raw,
         Struct,
-        Image,
     };
 
-    explicit DataViewShellPanel(QWidget* parent = nullptr);
+    explicit DataViewShellPanel(ControlMode mode, QWidget* parent = nullptr);
     ~DataViewShellPanel() override;
 
-    QComboBox* modeComboBox() const;
     QRadioButton* littleEndianRadioButton() const;
     QRadioButton* bigEndianRadioButton() const;
     QLabel* textInterpretationLabel() const;
@@ -40,13 +37,13 @@ public:
     QToolButton* zoomOutButton() const;
     QLabel* zoomLabel() const;
     QToolButton* zoomInButton() const;
-    QStackedWidget* bodyStackedWidget() const;
+    QWidget* bodyHost() const;
 
-    void setRawControlsVisible(bool visible);
-    void setControlMode(ControlMode mode);
+    ControlMode controlMode() const;
 
 private:
     std::unique_ptr<Ui::DataViewShell> m_ui;
+    ControlMode m_mode;
 };
 
 }  // namespace breco

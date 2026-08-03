@@ -1,6 +1,7 @@
 #include "io/PrivilegedFileOpener.h"
 
 #include <QCoreApplication>
+#include <QElapsedTimer>
 #include <QFileInfo>
 #include <QLocalServer>
 #include <QLocalSocket>
@@ -84,15 +85,37 @@ ProtectedOpenResult PrivilegedFileOpener::open(const QString& filePath) const {
     }
 
     QProcess helper;
+    helper.setProcessChannelMode(QProcess::MergedChannels);
     helper.start(QStandardPaths::findExecutable(QStringLiteral("pkexec")),
                  {helperPath(), socketPath, QFileInfo(filePath).absoluteFilePath()});
     if (!helper.waitForStarted()) {
         return ProtectedOpenResult::failed(helper.errorString());
     }
 
-    if (!server.waitForNewConnection(kHelperTimeoutMs)) {
+    QElapsedTimer timer;
+    timer.start();
+    while (!server.hasPendingConnections() && helper.state() != QProcess::NotRunning &&
+           timer.elapsed() < kHelperTimeoutMs) {
+        server.waitForNewConnection(100);
+        helper.waitForFinished(0);
+    }
+
+    if (!server.hasPendingConnections()) {
+        const bool finished = helper.state() == QProcess::NotRunning;
+        const int exitCode = finished ? helper.exitCode() : -1;
+        const QString helperMessage = QString::fromLocal8Bit(helper.readAll()).trimmed();
         helper.kill();
         helper.waitForFinished(5000);
+        if (!helperMessage.isEmpty()) {
+            return ProtectedOpenResult::failed(helperMessage);
+        }
+        if (finished && exitCode == 126) {
+            return ProtectedOpenResult::failed(QStringLiteral("authentication was cancelled"));
+        }
+        if (finished && exitCode == 127) {
+            return ProtectedOpenResult::failed(
+                QStringLiteral("authorization was denied or could not be obtained"));
+        }
         return ProtectedOpenResult::failed(QStringLiteral("Timed out waiting for privileged helper"));
     }
 

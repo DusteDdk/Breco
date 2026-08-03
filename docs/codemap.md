@@ -54,7 +54,7 @@ mainWindow --> appLoop["Qt event loop (app.exec)"]
 ### `src/image`
 
 - `EmbeddedImageScanner` finds plausible embedded image starts, validates cheap header fields, and decodes bounded candidates through `QImageReader`.
-- `EmbeddedImageScanController` runs asynchronous View Data image scans, streams progress/live results, and keeps source I/O on one coordinator while worker jobs scan shared immutable chunks.
+- `EmbeddedImageScanController` runs asynchronous Image-tab scans, streams progress/live results, and keeps source I/O on one coordinator while worker jobs scan shared immutable chunks.
 
 ### `src/model`
 
@@ -144,7 +144,7 @@ mainWindow --> appSettings[AppSettings]
 - UI result/preview:
   - `MainWindow::onResultsBatchReady()`, `MainWindow::onResultActivated()`
   - `MainWindow::updateSharedPreviewNow()`
-- View Data image scan:
+- Image-tab scan:
   - `MainWindow::startImageScan()`, `MainWindow::finishImageScan()`
   - `EmbeddedImageScanController::startScan()`, `scanEmbeddedImages()`
 - Cache/reload:

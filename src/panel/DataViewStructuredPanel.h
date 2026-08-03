@@ -1,19 +1,14 @@
 #pragma once
 
-#include <QWidget>
-
-#include <memory>
+#include <QMainWindow>
 
 QT_BEGIN_NAMESPACE
-class QSplitter;
-namespace Ui {
-class DataViewStructured;
-}
+class QDockWidget;
 QT_END_NAMESPACE
 
 namespace breco {
 
-class DataViewStructuredPanel : public QWidget {
+class DataViewStructuredPanel : public QMainWindow {
     Q_OBJECT
 
 public:
@@ -22,10 +17,14 @@ public:
 
     QWidget* structEditorHost() const;
     QWidget* structViewHost() const;
-    QSplitter* splitter() const;
+    QDockWidget* structEditorDock() const { return m_structEditorDock; }
+    QDockWidget* structViewDock() const { return m_structViewDock; }
 
 private:
-    std::unique_ptr<Ui::DataViewStructured> m_ui;
+    QWidget* m_structEditorHost = nullptr;
+    QWidget* m_structViewHost = nullptr;
+    QDockWidget* m_structEditorDock = nullptr;
+    QDockWidget* m_structViewDock = nullptr;
 };
 
 }  // namespace breco

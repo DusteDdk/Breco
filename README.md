@@ -144,7 +144,15 @@ Hovering text or bitmap data updates:
 - large character display, with selectable big-endian/little-endian char interpretation mode
 - caption highlighting by available byte width (8/16/32/64)
 
-## View Data Struct mode
+## Data tabs
+
+`Raw`, `Struct`, and `Image` are top-level tabs alongside `Scan`. Right-click a
+tab and choose `Detach view`, or double-click it, to move that tab into its own
+window. Closing the detached window returns the tab to its original position.
+The Struct tab's `Structure controls` and `Decoded structure` panes can also be
+floated independently.
+
+## Struct tab
 
 Struct mode parses BrecoScript declarations and previews a selected entry at
 the active file offset. Its tree shows `Name`, `Type`, `Value`, `Bytes`, and
@@ -165,9 +173,9 @@ reloads that file when it still exists; when both the declaration and the
 remembered single-file source are valid, it creates the struct preview
 automatically.
 
-## View Data Image mode
+## Image tab
 
-`View Data` includes an `Image` mode for finding embedded images in the active preview source.
+The `Image` tab finds embedded images in the active preview source.
 
 Controls:
 - format checkboxes for `TGA`, `TIFF`, `PNG`, `JPEG`, `BMP`, `ICO`, `GIF`, `XBM`, `XPM`, and `SVG`
@@ -212,7 +220,7 @@ Status bar is used for lifecycle and cache messages, for example:
 - scan block size value and unit
 - main splitter sizes
 - text gutter format and gutter width
-- View Data mode, endian/text/bitmap options, and image scan options including Jobs
+- Raw/Struct endian state, Raw text/bitmap options, and Image scan options including Jobs
 - Struct declaration text, last loaded declaration file, entry, and repeat count
 
 ## Current limits and caveats

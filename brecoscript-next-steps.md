@@ -155,3 +155,126 @@ There is no union declaration, union type in `ResolvedType`, overlay cursor, or 
 9. Define stable output: one union object containing one property per arm, with identical `sourceOffset` values and arm-specific lengths/validity. The union object's `sourceLength` should equal its storage extent, not the sum of child lengths. This is especially important because the current generic child-span calculation was designed for sequential/nested fields and must not accidentally treat overlapping children as concatenated storage.
 
 10. Test equal and unequal static arms, truncation, signed/endianness interpretations, nested structs, union inside `/repeat`, typedefs and top-level entries, isolated variables, invalid-arm containment, source offsets/lengths, cursor advancement to the following field, JSON representation, and performance limits for many/nested arms. A key invariant test should assert that decoding more arms never advances the parent cursor more than the union's single declared extent.
+
+## Further format-decoding gaps
+
+The `switch` work above already covers tagged dispatch, an explicit `default`
+arm, string/byte selectors, and coherent additions such as `!=` and logical
+operators. Several related capabilities are still needed to describe a whole
+chunked format such as PNG rather than isolated chunks.
+
+### Post-tested repetition
+
+`/repeat(EXPR)` requires a count known before the first iteration. `<until>`
+can stop a primitive array or byte/string scan, but cannot repeat a struct and
+test a field decoded by that struct. PNG consequently cannot express "decode
+chunks through IEND" without scanning raw bytes for an IEND-like sequence,
+which can produce a false match inside chunk data.
+
+Add an explicitly post-tested repetition construct that decodes one complete
+item before evaluating its termination condition, for example:
+
+```text
+repeat {
+    PNGChunk chunk;
+} until ($chunk.type = "IEND");
+```
+
+The terminating item should remain in the result and consume bytes. Define
+zero-iteration behavior separately if a pre-tested `while` form is added.
+Require every iteration to advance the cursor, retain the existing dynamic
+element limit, and specify how truncation or an unevaluable termination
+condition invalidates the loop and containing struct.
+
+### Bindable byte sequences and FourCC values
+
+`/var` currently binds only scalar integers and scalar `byte` fields. A
+decoded string or fixed byte sequence therefore cannot act as a later loop or
+switch discriminator even though `/cond` and `<until>` can compare such
+values.
+
+Generalize bindings and evaluated scalar values to include fixed strings and
+byte sequences. A dedicated `fourcc` type or well-defined four-byte literal
+syntax would make common chunk and box formats less dependent on string
+encoding details. Specify whether bindings preserve raw bytes, decoded text,
+or both, and initially allow equality only. Bound data must have a small,
+explicit size limit so an arbitrary payload is not copied into variable
+scope.
+
+### Length-bounded struct decoding
+
+A length-prefixed payload needs a child cursor limited to the declared byte
+extent. Applying `<len:EXPR>` directly to a struct is currently rejected, so
+a selected payload parser can neither be prevented from reading into the CRC
+or following record nor verify that it consumed the entire payload.
+
+Add a bounded struct/substream form, for example:
+
+```text
+PNGTextData<len:$length> data;
+```
+
+The nested decoder must see at most the bounded bytes. Define whether unused
+bytes become an explicit remainder node, are skipped, or invalidate an
+exact-length form; providing distinct exact and maximum forms may be clearer.
+Truncation must report bytes missing relative to the declared extent, and the
+parent cursor must advance by a deterministic documented amount even when the
+nested decoder fails.
+
+### Loop state and format invariants
+
+Post-tested repetition alone cannot express ordering and multiplicity rules,
+such as PNG requiring IHDR first, IEND last, at least one IDAT, consecutive
+IDAT chunks, and PLTE only in permitted positions. Ordinary struct variables
+are immutable decoded bindings and each repeated nested struct has an
+isolated scope.
+
+Design explicit loop state rather than implicitly leaking the last iteration's
+bindings. Useful minimal operations are an iteration index, previous-item
+access, and monotonic flags/counters updated by a loop body. State should be
+lexically scoped, initialized explicitly, overflow checked, and visible to
+post-loop assertions without making the decoded result depend on hidden
+global mutation.
+
+### Checksums and CRC validation
+
+BrecoScript can display stored checksum fields but cannot calculate a value
+over previously consumed bytes. PNG therefore cannot validate the CRC32 over
+the chunk type and payload.
+
+Add checked byte-span expressions and checksum functions, beginning with a
+well-specified CRC32 variant rather than a PNG-only directive. A declaration
+needs stable ways to name a member's raw span or the span between two labels,
+for example an expression equivalent to
+`crc32($chunk.type.raw + $chunk.data.raw)`. Algorithms must state polynomial,
+initial value, reflection, and final-XOR parameters, and evaluation should
+stream over backing data without concatenating large temporary arrays.
+
+### Cursor and input-boundary expressions
+
+There is no declaration-visible current offset, remaining-byte count, or
+end-of-input predicate. A root structure can consume IEND yet cannot assert
+that no trailing bytes remain, and dynamic alignment or size reconciliation
+also requires cursor information.
+
+Expose read-only, entry-relative cursor and bounded-input properties, such as
+`offset()`, `remaining()`, and `atEnd()`. Keep absolute source offsets distinct
+from entry-relative offsets, use unsigned checked arithmetic, and ensure a
+bounded struct observes its child boundary rather than the entire backing
+file. These values should be usable in assertions and loop conditions without
+themselves moving the cursor.
+
+### Payload transforms and filters
+
+Structural decoding stops at compressed or transformed payloads. PNG image
+data requires concatenating IDAT payloads, zlib/DEFLATE decompression, and
+reversing scanline filters before samples can be interpreted.
+
+Treat transforms as explicit bounded data sources rather than implicit field
+side effects. A transform should consume a declared source span, expose an
+immutable derived substream to a nested decoder, enforce input/output/work
+limits, and report malformed or truncated data without changing the parent
+cursor unpredictably. Start with reusable primitives such as zlib inflate;
+format-specific stages such as PNG scanline unfiltering need parameters from
+IHDR and should be layered on top. Multi-part inputs such as consecutive IDAT
+chunks also require an explicit, bounded concatenation facility.

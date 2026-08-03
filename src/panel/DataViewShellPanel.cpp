@@ -9,14 +9,20 @@
 
 namespace breco {
 
-DataViewShellPanel::DataViewShellPanel(QWidget* parent)
-    : QWidget(parent), m_ui(std::make_unique<Ui::DataViewShell>()) {
+DataViewShellPanel::DataViewShellPanel(ControlMode mode, QWidget* parent)
+    : QWidget(parent), m_ui(std::make_unique<Ui::DataViewShell>()), m_mode(mode) {
     m_ui->setupUi(this);
+    const bool rawMode = mode == ControlMode::Raw;
+    m_ui->textInterpretationLabel->setVisible(rawMode);
+    m_ui->textInterpretationComboBox->setVisible(rawMode);
+    m_ui->bitmapModeLabel->setVisible(rawMode);
+    m_ui->bitmapModeComboBox->setVisible(rawMode);
+    m_ui->zoomOutButton->setVisible(rawMode);
+    m_ui->zoomLabel->setVisible(rawMode);
+    m_ui->zoomInButton->setVisible(rawMode);
 }
 
 DataViewShellPanel::~DataViewShellPanel() = default;
-
-QComboBox* DataViewShellPanel::modeComboBox() const { return m_ui->modeComboBox; }
 
 QRadioButton* DataViewShellPanel::littleEndianRadioButton() const {
     return m_ui->littleEndianRadioButton;
@@ -42,25 +48,8 @@ QLabel* DataViewShellPanel::zoomLabel() const { return m_ui->zoomLabel; }
 
 QToolButton* DataViewShellPanel::zoomInButton() const { return m_ui->zoomInButton; }
 
-QStackedWidget* DataViewShellPanel::bodyStackedWidget() const { return m_ui->bodyStackedWidget; }
+QWidget* DataViewShellPanel::bodyHost() const { return m_ui->bodyHost; }
 
-void DataViewShellPanel::setRawControlsVisible(bool visible) {
-    m_ui->textInterpretationLabel->setVisible(visible);
-    m_ui->textInterpretationComboBox->setVisible(visible);
-    m_ui->bitmapModeLabel->setVisible(visible);
-    m_ui->bitmapModeComboBox->setVisible(visible);
-    m_ui->zoomOutButton->setVisible(visible);
-    m_ui->zoomLabel->setVisible(visible);
-    m_ui->zoomInButton->setVisible(visible);
-}
-
-void DataViewShellPanel::setControlMode(ControlMode mode) {
-    const bool rawMode = mode == ControlMode::Raw;
-    const bool imageMode = mode == ControlMode::Image;
-    m_ui->endianLabel->setVisible(!imageMode);
-    m_ui->littleEndianRadioButton->setVisible(!imageMode);
-    m_ui->bigEndianRadioButton->setVisible(!imageMode);
-    setRawControlsVisible(rawMode);
-}
+DataViewShellPanel::ControlMode DataViewShellPanel::controlMode() const { return m_mode; }
 
 }  // namespace breco

@@ -16,6 +16,7 @@ class QEvent;
 class QLabel;
 class QPlainTextEdit;
 class QSpinBox;
+class QSplitter;
 class QTableWidget;
 class QTreeWidget;
 class QToolButton;
@@ -123,6 +124,8 @@ private:
     QPoint m_dragStartPosition;
     QLabel* m_dragLabel = nullptr;
     QHash<QObject*, QString> m_languageSnippets;
+    QSplitter* m_sectionSplitter = nullptr;
+    QWidget* m_libraryWidget = nullptr;
     QTreeWidget* m_libraryTree = nullptr;
 };
 

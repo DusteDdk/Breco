@@ -50,7 +50,7 @@ If selection tracing is enabled, `BrecoApplication::notify()` wraps event delive
 Notable startup behavior:
 - Worker-count control is populated from `1..QThread::idealThreadCount()`.
 - Bitmap zoom initializes to `1x`.
-- Image View Data defaults to all supported formats enabled, `From start of file`, main-scan worker count for Jobs, `4096 K` max pixels, and `5` max results.
+- The Image tab defaults to all supported formats enabled, `From start of file`, main-scan worker count for Jobs, `4096 K` max pixels, and `5` max results.
 - Shift defaults to bytes mode with value `0`.
 - If file context later becomes single-file, `loadNotEmptyPreview()` can synthesize an initial row to display preview bytes before scanning.
 - The last loaded struct declaration file is re-read when its path still names a file, so external declaration edits take effect on restart.
@@ -153,7 +153,14 @@ Preview update path (`updateSharedPreviewNow()`):
 Deferred update behavior:
 - `scheduleSharedPreviewUpdate()` coalesces repeated triggers with `m_previewUpdateScheduled` and posts a queued lambda to avoid re-entrant immediate updates.
 
-## 7) View Data Struct Preview
+## 7) Data Tabs and Struct Preview
+
+`Raw`, `Struct`, and `Image` are independent top-level pages in
+`MainTabsPanel`. The existing tab context menu and double-click behavior can
+detach any page into a floating window; closing that window restores the page
+in stable `Scan`, `Raw`, `Struct`, `Image` order. Raw and Struct expose
+synchronized endian controls. The Struct page contains independently floatable
+`Structure controls` and `Decoded structure` dock widgets.
 
 `StructVisualizedTreeModel` exposes five columns: `Name`, `Type`, `Value`,
 `Bytes`, and `Valid`. `StructDataViewPanel` sizes `Name` to its contents and
@@ -212,7 +219,7 @@ file still exists. Automatic preview creation requires `Enable`, a valid
 restored declaration, and a successfully restored single-file source. The
 `Views` and `Language` section checkboxes are persisted as well.
 
-## 8) View Data Image Scans
+## 8) Image Tab Scans
 
 `MainWindow::startImageScan()` builds an `EmbeddedImageScanRequest` from the active preview target and the Image mode controls.
 

@@ -30,10 +30,18 @@ public:
     QVBoxLayout* scanTabLayout() const;
     ScanControlsPanel* scanControlsPanel() const;
     QWidget* resultsPanelHost() const;
-    QWidget* dataViewHost() const;
+    QWidget* rawDataHost() const;
+    QWidget* structDataHost() const;
+    QWidget* imageDataHost() const;
+    QWidget* rawDataTab() const;
+    QWidget* structDataTab() const;
+    QWidget* imageDataTab() const;
     QFrame* editStack() const;
     void activateScanTab();
+    void activateTab(QWidget* page);
     bool detachTab(int index);
+    bool isTabDetached(QWidget* page) const;
+    QWidget* detachedWindow(QWidget* page) const;
 
 protected:
     bool eventFilter(QObject* watched, QEvent* event) override;
@@ -43,9 +51,11 @@ private:
     struct DetachedTab {
         QWidget* window = nullptr;
         QString title;
-        int index = 0;
+        int order = 0;
     };
     QHash<QWidget*, DetachedTab> m_detachedTabs;
+    QHash<QWidget*, int> m_pageOrder;
+    void reattachTab(QWidget* page);
 };
 
 }  // namespace breco

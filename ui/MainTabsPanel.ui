@@ -93,13 +93,78 @@
        </item>
       </layout>
      </widget>
-     <widget class="QWidget" name="viewTab">
+     <widget class="QWidget" name="rawDataTab">
       <attribute name="title">
-       <string>View Data</string>
+       <string>Raw</string>
       </attribute>
-      <layout class="QGridLayout" name="gridLayout">
-       <item row="0" column="0">
-        <widget class="QWidget" name="DataViewHost" native="true"/>
+      <layout class="QVBoxLayout" name="rawDataTabLayout">
+       <property name="spacing">
+        <number>0</number>
+       </property>
+       <property name="leftMargin">
+        <number>0</number>
+       </property>
+       <property name="topMargin">
+        <number>0</number>
+       </property>
+       <property name="rightMargin">
+        <number>0</number>
+       </property>
+       <property name="bottomMargin">
+        <number>0</number>
+       </property>
+       <item>
+        <widget class="QWidget" name="rawDataHost" native="true"/>
+       </item>
+      </layout>
+     </widget>
+     <widget class="QWidget" name="structDataTab">
+      <attribute name="title">
+       <string>Struct</string>
+      </attribute>
+      <layout class="QVBoxLayout" name="structDataTabLayout">
+       <property name="spacing">
+        <number>0</number>
+       </property>
+       <property name="leftMargin">
+        <number>0</number>
+       </property>
+       <property name="topMargin">
+        <number>0</number>
+       </property>
+       <property name="rightMargin">
+        <number>0</number>
+       </property>
+       <property name="bottomMargin">
+        <number>0</number>
+       </property>
+       <item>
+        <widget class="QWidget" name="structDataHost" native="true"/>
+       </item>
+      </layout>
+     </widget>
+     <widget class="QWidget" name="imageDataTab">
+      <attribute name="title">
+       <string>Image</string>
+      </attribute>
+      <layout class="QVBoxLayout" name="imageDataTabLayout">
+       <property name="spacing">
+        <number>0</number>
+       </property>
+       <property name="leftMargin">
+        <number>0</number>
+       </property>
+       <property name="topMargin">
+        <number>0</number>
+       </property>
+       <property name="rightMargin">
+        <number>0</number>
+       </property>
+       <property name="bottomMargin">
+        <number>0</number>
+       </property>
+       <item>
+        <widget class="QWidget" name="imageDataHost" native="true"/>
        </item>
       </layout>
      </widget>

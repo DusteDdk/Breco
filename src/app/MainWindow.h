@@ -79,7 +79,6 @@ private slots:
     void onScanStarted(int fileCount, quint64 totalBytes);
     void onScanFinished(bool stoppedByUser, bool autoStoppedLimitExceeded);
     void onTextModeChanged(int idx);
-    void onDataViewModeChanged(int idx);
     void onBitmapModeChanged(int idx);
     void onTextBackingScrollRequested(int wheelSteps, int bytesPerStepHint, int visibleBytesHint);
     void onTextHoverOffsetChanged(quint64 absoluteOffset);
@@ -129,9 +128,7 @@ private:
     TextInterpretationMode selectedTextMode() const;
     TextInterpretationMode selectedDataViewTextMode() const;
     bool dataViewBigEndianEnabled() const;
-    bool isStructViewActive() const;
-    bool isImageViewActive() const;
-    void updateStructViewVisibility();
+    void setDataViewBigEndianEnabled(bool enabled);
     void updateTextModeControlVisibility();
     void updateHexControlsVisibility();
     void updateHexInfoPanel();
@@ -248,7 +245,8 @@ private:
     ResultsTablePanel* m_resultsPanel = nullptr;
     TextViewPanel* m_textPanel = nullptr;
     HexViewControlsPanel* m_hexControlsPanel = nullptr;
-    DataViewShellPanel* m_dataViewShellPanel = nullptr;
+    DataViewShellPanel* m_rawDataViewShellPanel = nullptr;
+    DataViewShellPanel* m_structDataViewShellPanel = nullptr;
     DataViewByteAndBitmapPanel* m_dataViewByteAndBitmapPanel = nullptr;
     DataViewImagePanel* m_dataViewImagePanel = nullptr;
     DataViewStructuredPanel* m_dataViewStructuredPanel = nullptr;
@@ -292,7 +290,7 @@ private:
     int m_pendingFileEdgeNavigation = 0;
     bool m_textScrollDragInProgress = false;
     bool m_pendingPreviewAfterTextScrollDrag = false;
-    std::optional<int> m_protectedSourceDialogAnswerForTests;
+    bool m_dataViewBigEndian = false;
     quint64 m_activeImageScanId = 0;
     ScanKind m_activeScanKind = ScanKind::None;
     QString m_savedStructureSearchTerm;
