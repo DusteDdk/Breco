@@ -25,6 +25,7 @@ struct Options {
     QString inputPath;
     QString outputPath;
     QString entryName;
+    QString outformName;
     quint64 offset = 0;
     int bitshift = 0;
     int repeat = 1;
@@ -37,6 +38,7 @@ void printUsage() {
         << "  brecodump [-s STRUCT_DECLARATION_FILE] -i BINARY_FILE_NAME "
            "[-e ENTRY_NAME=last] [-ofs BYTE_OFFSET=0] [-bs BITSHIFT=0] "
            "[-r REPEATNUM=1] "
+           "[-outform NAME] "
            "[-o OUTPUT_FILE=stdout] [-h|--help]\n\n"
         << "Purpose:\n"
         << "  Dump binary data through breco's Struct Declaration parser and visualizer.\n"
@@ -46,7 +48,8 @@ void printUsage() {
         << "  declaration is read from stdin so agents can pipe declarations directly.\n"
         << "  -e selects a visualizable entry by name. Without -e, the last visualizable\n"
         << "  declaration in source order is decoded. Decoding starts at the selected\n"
-        << "  byte offset and uses the requested repeat count.\n\n"
+        << "  byte offset and uses the requested repeat count. -outform renders the\n"
+        << "  decoded node with a named outform declared in the script.\n\n"
         << "Output format:\n"
         << "  Pretty JSON. metadata contains the input parameters and source info.\n"
         << "  The other top-level key is the decoded struct or field name. Each node\n"
@@ -158,6 +161,16 @@ std::optional<Options> parseOptions(const QStringList& args, QString* error) {
             if (!requireValue(&options.outputPath)) {
                 return std::nullopt;
             }
+        } else if (arg == QStringLiteral("-outform")) {
+            if (!requireValue(&options.outformName)) {
+                return std::nullopt;
+            }
+            if (options.outformName.isEmpty()) {
+                if (error != nullptr) {
+                    *error = QStringLiteral("Outform name cannot be empty");
+                }
+                return std::nullopt;
+            }
         } else {
             if (error != nullptr) {
                 *error = QStringLiteral("Unknown argument: %1").arg(arg);
@@ -201,11 +214,14 @@ QByteArray readAllStdin() {
     return QByteArray(input.data(), static_cast<qsizetype>(input.size()));
 }
 
-bool writeOutput(const QByteArray& bytes, const QString& outputPath, QString* error) {
+bool writeOutput(const QByteArray& bytes, const QString& outputPath, bool appendNewline,
+                 QString* error) {
     if (outputPath.isEmpty() || outputPath == QStringLiteral("-") ||
         outputPath == QStringLiteral("stdout")) {
         std::cout.write(bytes.constData(), bytes.size());
-        std::cout << '\n';
+        if (appendNewline) {
+            std::cout << '\n';
+        }
         return std::cout.good();
     }
 
@@ -224,7 +240,9 @@ bool writeOutput(const QByteArray& bytes, const QString& outputPath, QString* er
         }
         return false;
     }
-    output.write("\n", 1);
+    if (appendNewline) {
+        output.write("\n", 1);
+    }
     return true;
 }
 
@@ -299,8 +317,11 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    const breco::ParseResult parsed =
-        breco::parseStructDeclaration(QString::fromUtf8(*declarationBytes));
+    const breco::ParseResult parsed = options.structDeclarationPath.isEmpty()
+                                          ? breco::parseStructDeclaration(
+                                                QString::fromUtf8(*declarationBytes))
+                                          : breco::parseStructDeclarationFile(
+                                                options.structDeclarationPath);
     if (!parsed.valid) {
         std::cerr << "Invalid struct declaration";
         if (!parsed.errorMessage.isEmpty()) {
@@ -341,11 +362,39 @@ int main(int argc, char** argv) {
         breco::visualize(parsed.graph, entryName, *bytes, 0, options.repeat);
     const bool singleDecodedNode =
         visualization.children.size() == 1 && options.repeat == 1;
-    const QByteArray json =
-        serializeDump(metadata, entryName,
-                      singleDecodedNode ? visualization.children.first()
-                                        : visualization);
-    if (!writeOutput(json, options.outputPath, &error)) {
+    const breco::VisualizedNode& outputNode =
+        singleDecodedNode ? visualization.children.first() : visualization;
+    QByteArray output;
+    if (options.outformName.isEmpty()) {
+        output = serializeDump(metadata, entryName, outputNode);
+    } else {
+        const breco::OutformNode* outform =
+            parsed.graph.findOutform(options.outformName);
+        if (outform == nullptr) {
+            QStringList names;
+            for (const breco::OutformNode& candidate : parsed.graph.outforms()) {
+                names.push_back(candidate.name);
+            }
+            std::cerr << "Unknown outform '" << options.outformName.toStdString() << "'";
+            if (!names.isEmpty()) {
+                std::cerr << ". Available outforms: "
+                          << names.join(QStringLiteral(", ")).toStdString();
+            }
+            std::cerr << '\n';
+            return 2;
+        }
+        QString templateError;
+        output = breco::renderStructureTemplate(outform->templateText, outputNode,
+                                                &templateError)
+                     .toUtf8();
+        if (!templateError.isEmpty()) {
+            std::cerr << "Could not render outform '"
+                      << options.outformName.toStdString() << "': "
+                      << templateError.toStdString() << '\n';
+            return 2;
+        }
+    }
+    if (!writeOutput(output, options.outputPath, options.outformName.isEmpty(), &error)) {
         if (!error.isEmpty()) {
             std::cerr << error.toStdString() << '\n';
         }

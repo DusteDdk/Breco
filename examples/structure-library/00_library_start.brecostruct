@@ -1,0 +1,14 @@
+/*
+ * Structure-library starter.
+ *
+ * Point Breco's Structure library "Directory..." control at this directory.
+ * The manager will list this file and the LibraryMarker entry below. Files in
+ * subdirectories are discovered as well, so the directory can be organised
+ * without changing the declarations.
+ */
+
+/default LibraryMarker
+
+struct LibraryMarker {
+    /cond(=0x42) uint8 marker;
+}

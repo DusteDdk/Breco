@@ -949,13 +949,13 @@ QVector<Candidate> scanCandidatesInRange(const QByteArray& chunk, quint64 chunkS
 }
 
 void emitProgress(const EmbeddedImageProgressCallback& progressCallback,
-                  quint64 bytesScanned, quint64 bytesTotal,
+                  quint64 bytesScanned, quint64 bytesTotal, quint64 rawBytesRead,
                   const QVector<EmbeddedImageResult>& results,
                   const EmbeddedImageScanOptions& options) {
     if (!progressCallback) {
         return;
     }
-    progressCallback(bytesScanned, bytesTotal, results.size(), options.maxResults);
+    progressCallback(bytesScanned, bytesTotal, rawBytesRead, results.size(), options.maxResults);
 }
 
 }  // namespace
@@ -1084,6 +1084,16 @@ QVector<EmbeddedImageResult> scanEmbeddedImages(
     QVector<EmbeddedImageResult> results;
     QSet<QString> seen;
 
+    EmbeddedImageScanSource countedSource = source;
+    countedSource.read = [&source, &localSummary](quint64 offset,
+                                                  quint64 size) -> std::optional<QByteArray> {
+        const std::optional<QByteArray> bytes = source.read(offset, size);
+        if (bytes.has_value()) {
+            localSummary.rawBytesRead += static_cast<quint64>(bytes->size());
+        }
+        return bytes;
+    };
+
     if (!source.read || source.fileSize == 0) {
         if (summary != nullptr) {
             *summary = localSummary;
@@ -1113,16 +1123,16 @@ QVector<EmbeddedImageResult> scanEmbeddedImages(
             : 0ULL;
 
     if (enabled(options, EmbeddedImageFormat::Tga)) {
-        appendDecodedCandidate(&results, &seen, source, options,
+        appendDecodedCandidate(&results, &seen, countedSource, options,
                                Candidate{options.startOffset, EmbeddedImageFormat::Tga},
                                resultCallback);
     }
     if (enabled(options, EmbeddedImageFormat::Xbm)) {
-        appendDecodedCandidate(&results, &seen, source, options,
+        appendDecodedCandidate(&results, &seen, countedSource, options,
                                Candidate{options.startOffset, EmbeddedImageFormat::Xbm},
                                resultCallback);
     }
-    emitProgress(progressCallback, 0, bytesTotal, results, options);
+    emitProgress(progressCallback, 0, bytesTotal, localSummary.rawBytesRead, results, options);
     if (acceptedLimitReached(results, options) || shouldStop(shouldCancel)) {
         localSummary.cancelled = shouldStop(shouldCancel);
         localSummary.message =
@@ -1148,7 +1158,7 @@ QVector<EmbeddedImageResult> scanEmbeddedImages(
             qMin(options.chunkSize, options.endOffsetExclusive - chunkStart);
         const quint64 readSize =
             qMin(primarySize + kMaxPatternBytes - 1ULL, options.endOffsetExclusive - chunkStart);
-        const std::optional<QByteArray> chunk = source.read(chunkStart, readSize);
+        const std::optional<QByteArray> chunk = countedSource.read(chunkStart, readSize);
         if (!chunk.has_value() || chunk->isEmpty()) {
             break;
         }
@@ -1197,13 +1207,14 @@ QVector<EmbeddedImageResult> scanEmbeddedImages(
             if (candidate.offset >= primaryEnd) {
                 continue;
             }
-            appendDecodedCandidate(&results, &seen, source, options, candidate, resultCallback);
+            appendDecodedCandidate(&results, &seen, countedSource, options, candidate, resultCallback);
             if (acceptedLimitReached(results, options)) {
                 break;
             }
         }
         localSummary.bytesScanned += actualPrimarySize;
-        emitProgress(progressCallback, localSummary.bytesScanned, bytesTotal, results, options);
+        emitProgress(progressCallback, localSummary.bytesScanned, bytesTotal,
+                     localSummary.rawBytesRead, results, options);
         if (localSummary.cancelled) {
             break;
         }
@@ -1250,16 +1261,50 @@ quint64 EmbeddedImageScanController::startScan(const EmbeddedImageScanRequest& r
     emit scanStarted(scanId);
     m_worker = std::jthread([this, request, scanId](std::stop_token token) {
         EmbeddedImageScanSummary summary;
+        ScanProgressTracker progressTracker;
+        progressTracker.reset();
+        auto lastProgress = ScanProgressTracker::Clock::time_point{};
+        quint64 latestTotal = 0;
+        int latestResultsFound = 0;
+        int latestResultsLimit = request.options.maxResults;
         QVector<EmbeddedImageResult> results =
             scanEmbeddedImages(request.source, request.options, &summary,
                                [&token]() { return token.stop_requested(); },
-                               [this, scanId](quint64 bytesScanned, quint64 bytesTotal,
-                                              int resultsFound, int resultsLimit) {
+                               [this, scanId, &progressTracker, &lastProgress, &latestTotal,
+                                &latestResultsFound,
+                                &latestResultsLimit](quint64 bytesScanned, quint64 bytesTotal,
+                                                     quint64 rawBytesRead, int resultsFound,
+                                                     int resultsLimit) mutable {
+                                   const auto now = ScanProgressTracker::Clock::now();
+                                   latestTotal = bytesTotal;
+                                   latestResultsFound = resultsFound;
+                                   latestResultsLimit = resultsLimit;
+                                   if (lastProgress == ScanProgressTracker::Clock::time_point{}) {
+                                       progressTracker.reset(bytesScanned, rawBytesRead, now);
+                                       lastProgress = now;
+                                       const ScanProgressSnapshot progress{
+                                           bytesScanned, bytesTotal, rawBytesRead, 0.0, 0.0};
+                                       QMetaObject::invokeMethod(
+                                           this,
+                                           [this, scanId, progress, resultsFound, resultsLimit]() {
+                                               emit progressUpdated(scanId, progress, resultsFound,
+                                                                    resultsLimit);
+                                           },
+                                           Qt::QueuedConnection);
+                                       return;
+                                   }
+                                   if (bytesScanned != 0 && bytesScanned < bytesTotal &&
+                                       now - lastProgress < std::chrono::seconds(2)) {
+                                       return;
+                                   }
+                                   const ScanProgressSnapshot progress = progressTracker.sample(
+                                       bytesScanned, bytesTotal, rawBytesRead, now);
+                                   lastProgress = now;
                                    QMetaObject::invokeMethod(
                                        this,
-                                       [this, scanId, bytesScanned, bytesTotal,
+                                       [this, scanId, progress,
                                         resultsFound, resultsLimit]() {
-                                           emit progressUpdated(scanId, bytesScanned, bytesTotal,
+                                           emit progressUpdated(scanId, progress,
                                                                 resultsFound, resultsLimit);
                                        },
                                        Qt::QueuedConnection);
@@ -1273,6 +1318,15 @@ quint64 EmbeddedImageScanController::startScan(const EmbeddedImageScanRequest& r
         if (token.stop_requested()) {
             summary.cancelled = true;
         }
+        const ScanProgressSnapshot finalProgress = progressTracker.sample(
+            summary.bytesScanned, latestTotal, summary.rawBytesRead);
+        QMetaObject::invokeMethod(
+            this,
+            [this, scanId, finalProgress, latestResultsFound, latestResultsLimit]() {
+                emit progressUpdated(scanId, finalProgress, latestResultsFound,
+                                     latestResultsLimit);
+            },
+            Qt::QueuedConnection);
         m_running.store(false, std::memory_order_release);
         QMetaObject::invokeMethod(this, [this, scanId, summary, results]() {
             emit scanFinished(scanId, summary, results);

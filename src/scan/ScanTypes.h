@@ -4,6 +4,8 @@
 #include <QtGlobal>
 #include <memory>
 
+#include "model/ResultTypes.h"
+
 namespace breco {
 
 struct ReadBuffer {
@@ -22,6 +24,14 @@ struct ScanJob {
     quint64 offset = 0;
     quint32 size = 0;
     quint32 reportLimit = 0;
+    quint64 sequence = 0;
+};
+
+struct ScanJobResult {
+    quint64 sequence = 0;
+    quint64 bufferToken = 0;
+    quint64 bytesScanned = 0;
+    QVector<MatchRecord> matches;
 };
 
 }  // namespace breco

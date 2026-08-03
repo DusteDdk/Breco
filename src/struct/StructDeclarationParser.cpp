@@ -1,9 +1,14 @@
 #include "struct/StructDeclarationParser.h"
 
 #include <QChar>
+#include <QDir>
+#include <QFile>
+#include <QFileInfo>
+#include <QRegularExpression>
 #include <QSet>
 
 #include <limits>
+#include <utility>
 
 namespace breco {
 
@@ -11,7 +16,8 @@ namespace {
 
 class Parser {
 public:
-    explicit Parser(const QString& text) : m_text(text) {}
+    explicit Parser(const QString& text, QString sourceFilePath = {})
+        : m_text(text), m_currentSourceFilePath(std::move(sourceFilePath)) {}
 
     ParseResult parse() {
         ParseResult result;
@@ -42,6 +48,30 @@ public:
                          .arg(defaultEntryName),
                      m_defaultEntryRange.start, m_defaultEntryRange.end);
             return result;
+        }
+        for (const StructNode& node : result.graph.structs()) {
+            for (const StructMember& member : node.members) {
+                if (!member.attributes.sourceRole.isEmpty() &&
+                    !result.graph.externalRoles().contains(member.attributes.sourceRole)) {
+                    result.valid = false;
+                    setError(result,
+                             QStringLiteral("External source role '%1' is not declared")
+                                 .arg(member.attributes.sourceRole),
+                             member.nameRange.start, member.nameRange.end);
+                    return result;
+                }
+            }
+        }
+        for (const StandaloneMemberNode& member : result.graph.standaloneMembers()) {
+            if (!member.attributes.sourceRole.isEmpty() &&
+                !result.graph.externalRoles().contains(member.attributes.sourceRole)) {
+                result.valid = false;
+                setError(result,
+                         QStringLiteral("External source role '%1' is not declared")
+                             .arg(member.attributes.sourceRole),
+                         member.nameRange.start, member.nameRange.end);
+                return result;
+            }
         }
         result.valid = true;
         return result;
@@ -740,6 +770,19 @@ private:
                     return false;
                 }
                 attributes->whenExpression = comparison;
+            } else if (directive == QStringLiteral("source")) {
+                if (!attributes->sourceRole.isEmpty()) {
+                    setError(result, QStringLiteral("Duplicate /source directive"),
+                             directiveStart, m_pos);
+                    return false;
+                }
+                QString role;
+                if (!parseIdentifier(&role)) {
+                    setError(result, QStringLiteral("Expected external role in /source"),
+                             m_pos, m_pos);
+                    return false;
+                }
+                attributes->sourceRole = role;
             } else {
                 setError(result, QStringLiteral("Unknown directive '/%1'").arg(directive),
                          directiveRange.start, directiveRange.end);
@@ -1420,17 +1463,189 @@ private:
         return true;
     }
 
+    bool parseExternalDirective(ParseResult& result, bool* recognized) {
+        *recognized = false;
+        skipWhitespaceAndComments();
+        const int start = m_pos;
+        if (peek() != QLatin1Char('/')) {
+            return false;
+        }
+        ++m_pos;
+        QString directive;
+        TextRange range;
+        if (!parseIdentifier(&directive, &range) || directive != QStringLiteral("external")) {
+            m_pos = start;
+            return false;
+        }
+        *recognized = true;
+        if (!consumeExpected(QLatin1Char('('))) {
+            setError(result, QStringLiteral("Expected '(' after /external"), m_pos, m_pos);
+            return false;
+        }
+        QString role;
+        TextRange roleRange;
+        if (!parseIdentifier(&role, &roleRange) || !consumeExpected(QLatin1Char(')'))) {
+            setError(result, QStringLiteral("Expected role name in /external(role)"), m_pos, m_pos);
+            return false;
+        }
+        if (!result.graph.addExternalRole(role)) {
+            setError(result, QStringLiteral("Duplicate external role '%1'").arg(role),
+                     roleRange.start, roleRange.end);
+            return false;
+        }
+        skipWhitespaceAndComments();
+        if (peek() == QLatin1Char(';')) {
+            consumeSemicolon();
+        }
+        return true;
+    }
+
+    bool parseOutform(ParseResult& result) {
+        if (!consumeKeyword(QStringLiteral("outform"))) {
+            return false;
+        }
+        QString name;
+        TextRange nameRange;
+        if (!parseIdentifier(&name, &nameRange)) {
+            setError(result, QStringLiteral("Expected outform name"), m_pos, m_pos);
+            return false;
+        }
+        QString modeName;
+        TextRange modeRange;
+        if (!parseIdentifier(&modeName, &modeRange)) {
+            setError(result, QStringLiteral("Expected outform mode 'text' or 'binary'"),
+                     m_pos, m_pos);
+            return false;
+        }
+        OutformMode mode;
+        if (modeName == QStringLiteral("text")) {
+            mode = OutformMode::Text;
+        } else if (modeName == QStringLiteral("binary")) {
+            mode = OutformMode::Binary;
+        } else {
+            setError(result,
+                     QStringLiteral("Unknown outform mode '%1'; expected 'text' or 'binary'")
+                         .arg(modeName),
+                     modeRange.start, modeRange.end);
+            return false;
+        }
+        skipWhitespaceAndComments();
+        if (peek() != QLatin1Char('{')) {
+            setError(result, QStringLiteral("Expected '{' before outform template body"),
+                     m_pos, m_pos);
+            return false;
+        }
+        ++m_pos;
+        QString templateText;
+        int braceDepth = 0;
+        bool closed = false;
+        while (!atEnd()) {
+            if (peekAhead(QStringLiteral("{{"))) {
+                const int placeholderEnd = m_text.indexOf(QStringLiteral("}}"), m_pos + 2);
+                if (placeholderEnd < 0) {
+                    setError(result, QStringLiteral("Unclosed template placeholder"),
+                             m_pos, m_text.size());
+                    return false;
+                }
+                templateText += m_text.mid(m_pos, placeholderEnd + 2 - m_pos);
+                m_pos = placeholderEnd + 2;
+                continue;
+            }
+            const QChar ch = consume();
+            if (ch == QLatin1Char('\\') && !atEnd() &&
+                (peek() == QLatin1Char('{') || peek() == QLatin1Char('}'))) {
+                templateText += consume();
+                continue;
+            }
+            if (ch == QLatin1Char('{')) {
+                ++braceDepth;
+                templateText += ch;
+            } else if (ch == QLatin1Char('}') && braceDepth > 0) {
+                --braceDepth;
+                templateText += ch;
+            } else if (ch == QLatin1Char('}')) {
+                closed = true;
+                break;
+            } else {
+                templateText += ch;
+            }
+        }
+        if (!closed) {
+            setError(result, QStringLiteral("Unclosed outform template body"),
+                     nameRange.start, m_text.size());
+            return false;
+        }
+        skipWhitespaceAndComments();
+        if (peek() == QLatin1Char(';')) {
+            consumeSemicolon();
+        }
+        const OutformNode node{name, mode, templateText, nameRange,
+                               m_currentSourceFilePath};
+        if (!result.graph.addOutform(node)) {
+            setError(result, QStringLiteral("Duplicate outform name '%1'").arg(name),
+                     nameRange.start, nameRange.end);
+            return false;
+        }
+        return true;
+    }
+
+    bool parseSourceFileMarker(ParseResult& result, bool* recognized) {
+        *recognized = false;
+        skipWhitespaceAndComments();
+        const int start = m_pos;
+        if (peek() != QLatin1Char('/')) {
+            return false;
+        }
+        ++m_pos;
+        QString directive;
+        if (!parseIdentifier(&directive) ||
+            directive != QStringLiteral("__breco_source_file")) {
+            m_pos = start;
+            return false;
+        }
+        *recognized = true;
+        if (!consumeExpected(QLatin1Char('('))) {
+            setError(result, QStringLiteral("Invalid internal source marker"), m_pos, m_pos);
+            return false;
+        }
+        QString encoded;
+        if (!parseIdentifier(&encoded) || !encoded.startsWith(QLatin1Char('p')) ||
+            !consumeExpected(QLatin1Char(')')) || !consumeSemicolon()) {
+            setError(result, QStringLiteral("Invalid internal source marker"), m_pos, m_pos);
+            return false;
+        }
+        m_currentSourceFilePath =
+            QString::fromUtf8(QByteArray::fromHex(encoded.mid(1).toLatin1()));
+        return true;
+    }
+
     bool parseTopLevelDeclaration(ParseResult& result) {
         skipWhitespaceAndComments();
         if (atEnd()) {
             return true;
         }
         const int saved = m_pos;
+        bool recognizedSourceMarker = false;
+        if (parseSourceFileMarker(result, &recognizedSourceMarker)) {
+            return true;
+        }
+        if (recognizedSourceMarker) {
+            return false;
+        }
+        m_pos = saved;
         bool recognizedDefault = false;
         if (parseDefaultDirective(result, &recognizedDefault)) {
             return true;
         }
         if (recognizedDefault) {
+            return false;
+        }
+        m_pos = saved;
+        bool recognizedExternal = false;
+        if (parseExternalDirective(result, &recognizedExternal)) {
+            return true;
+        }
+        if (recognizedExternal) {
             return false;
         }
         m_pos = saved;
@@ -1443,6 +1658,11 @@ private:
                 bestErrorRange = result.errorRange;
             }
         };
+        if (parseOutform(result)) {
+            return true;
+        }
+        rememberBestError();
+        m_pos = saved;
         if (parseTypedef(result)) {
             return true;
         }
@@ -1478,12 +1698,86 @@ private:
     const QString& m_text;
     int m_pos = 0;
     TextRange m_defaultEntryRange;
+    QString m_currentSourceFilePath;
 };
 
 }  // namespace
 
 ParseResult parseStructDeclaration(const QString& text) {
     Parser parser(text);
+    return parser.parse();
+}
+
+namespace {
+
+QString sourceFileMarker(const QString& filePath) {
+    return QStringLiteral("/__breco_source_file(p%1);\n")
+        .arg(QString::fromLatin1(filePath.toUtf8().toHex()));
+}
+
+bool expandIncludes(const QString& filePath, QString* output, QString* error,
+                    QSet<QString>* active, QSet<QString>* loaded) {
+    const QString canonical = QFileInfo(filePath).canonicalFilePath();
+    const QString resolved = canonical.isEmpty() ? QFileInfo(filePath).absoluteFilePath() : canonical;
+    if (active->contains(resolved)) {
+        *error = QStringLiteral("Cyclic structure include involving '%1'").arg(resolved);
+        return false;
+    }
+    if (loaded->contains(resolved)) {
+        return true;
+    }
+    QFile file(resolved);
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        *error = QStringLiteral("Could not read structure definition '%1': %2")
+                     .arg(resolved, file.errorString());
+        return false;
+    }
+    active->insert(resolved);
+    QString text = QString::fromUtf8(file.readAll());
+    const QRegularExpression includePattern(
+        QStringLiteral(R"breco((?:^|\n)\s*(?:#include|include|/include)\s*[\(]?\s*"([^"]+)"\s*[\)]?\s*;?)breco"));
+    qsizetype searchFrom = 0;
+    QString expanded;
+    auto match = includePattern.match(text, searchFrom);
+    while (match.hasMatch()) {
+        expanded += text.mid(searchFrom, match.capturedStart() - searchFrom);
+        const QString included = QDir(QFileInfo(resolved).absolutePath())
+                                     .absoluteFilePath(match.captured(1));
+        QString includedText;
+        if (!expandIncludes(included, &includedText, error, active, loaded)) {
+            return false;
+        }
+        expanded += sourceFileMarker(QFileInfo(included).absoluteFilePath());
+        expanded += includedText;
+        expanded += QLatin1Char('\n');
+        expanded += sourceFileMarker(resolved);
+        searchFrom = match.capturedEnd();
+        match = includePattern.match(text, searchFrom);
+    }
+    expanded += text.mid(searchFrom);
+    active->remove(resolved);
+    loaded->insert(resolved);
+    *output += expanded;
+    return true;
+}
+
+}  // namespace
+
+ParseResult parseStructDeclarationFile(const QString& filePath) {
+    QString text;
+    QString error;
+    QSet<QString> active;
+    QSet<QString> loaded;
+    if (!expandIncludes(filePath, &text, &error, &active, &loaded)) {
+        ParseResult result;
+        result.errorMessage = error;
+        return result;
+    }
+    const QString canonical = QFileInfo(filePath).canonicalFilePath();
+    const QString resolved = canonical.isEmpty()
+                                 ? QFileInfo(filePath).absoluteFilePath()
+                                 : canonical;
+    Parser parser(text, resolved);
     return parser.parse();
 }
 

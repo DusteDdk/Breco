@@ -23,6 +23,9 @@ namespace breco {
 namespace {
 constexpr int kTextTokenHorizontalPadding = 1;
 bool isPrintableAscii(unsigned char byte) { return byte >= 0x20 && byte <= 0x7E; }
+bool isByteDisplay(TextDisplayMode mode) {
+    return mode == TextDisplayMode::ByteMode || mode == TextDisplayMode::ClassicMode;
+}
 
 bool decodeUtf8At(const QByteArray& bytes, int index, quint32* codepointOut, int* lengthOut) {
     if (index < 0 || index >= bytes.size()) {
@@ -206,7 +209,7 @@ void TextViewWidget::setDisplayMode(TextDisplayMode mode) {
         return;
     }
     m_displayMode = mode;
-    if (m_displayMode == TextDisplayMode::ByteMode) {
+    if (isByteDisplay(m_displayMode)) {
         m_wrapMode = true;
     }
     rebuildLines();
@@ -256,18 +259,29 @@ void TextViewWidget::setData(const QByteArray& bytes, quint64 baseOffset,
 
 int TextViewWidget::viewportByteCapacity() const {
     const int visibleLines = qMax(1, visibleLineCount());
-    const QFontMetrics fm(font());
+    const QFont displayFont = m_displayMode == TextDisplayMode::ClassicMode
+                                  ? QFontDatabase::systemFont(QFontDatabase::FixedFont)
+                                  : font();
+    const QFontMetrics fm(displayFont);
     const int contentWidth = qMax(32, m_contentWidget->width() - 16);
 
     int bytesPerLine = 0;
-    if (m_displayMode == TextDisplayMode::ByteMode) {
+    if (isByteDisplay(m_displayMode)) {
         bytesPerLine = fixedBytesPerLine();
         if (bytesPerLine <= 0) {
             const int byteCellWidth = qMax(
                                           fm.horizontalAdvance(QStringLiteral("00")),
                                           fm.horizontalAdvance(QStringLiteral("FF"))) +
                                       12;
-            bytesPerLine = qMax(1, contentWidth / qMax(1, byteCellWidth));
+            if (m_displayMode == TextDisplayMode::ClassicMode) {
+                const int asciiCellWidth = qMax(1, fm.horizontalAdvance(QLatin1Char('M')));
+                const int separators = fm.horizontalAdvance(QStringLiteral("  |")) +
+                                       fm.horizontalAdvance(QLatin1Char('|'));
+                bytesPerLine = qMax(1, (contentWidth - separators) /
+                                           qMax(1, byteCellWidth + asciiCellWidth));
+            } else {
+                bytesPerLine = qMax(1, contentWidth / qMax(1, byteCellWidth));
+            }
         }
     } else {
         const int avgCharWidth = qMax(1, fm.horizontalAdvance(QStringLiteral("M")));
@@ -439,6 +453,7 @@ void TextViewWidget::setSelectedOffset(quint64 absoluteOffset, bool centerInView
         m_vScrollBar->setValue(firstLineTarget);
 
         const bool allowHScroll =
+            m_displayMode == TextDisplayMode::ClassicMode ||
             !(m_displayMode == TextDisplayMode::ByteMode || m_wrapMode);
         if (allowHScroll) {
             const int x = xOffsetForAbsoluteOffset(m_lines.at(lineIdx), absoluteOffset);
@@ -527,7 +542,7 @@ void TextViewWidget::setNewlineMode(TextNewlineMode mode) {
 }
 
 void TextViewWidget::setWrapMode(bool enabled) {
-    const bool effective = (m_displayMode == TextDisplayMode::ByteMode) ? true : enabled;
+    const bool effective = isByteDisplay(m_displayMode) ? true : enabled;
     if (m_wrapMode == effective) {
         return;
     }
@@ -551,7 +566,7 @@ void TextViewWidget::setCollapseRunsEnabled(bool enabled) {
 
 void TextViewWidget::setByteLineMode(ByteLineMode mode) {
     m_byteLineMode = mode;
-    if (m_displayMode == TextDisplayMode::ByteMode) {
+    if (isByteDisplay(m_displayMode)) {
         rebuildLines();
         m_contentWidget->update();
         m_gutterWidget->update();
@@ -901,7 +916,10 @@ QVector<TextViewWidget::Token> TextViewWidget::decodeTokens(const QByteArray& ra
         return tokens;
     }
 
-    const QFontMetrics fm(font());
+    const QFont displayFont = m_displayMode == TextDisplayMode::ClassicMode
+                                  ? QFontDatabase::systemFont(QFontDatabase::FixedFont)
+                                  : font();
+    const QFontMetrics fm(displayFont);
     const int byteCellWidth =
         qMax(fm.horizontalAdvance(QStringLiteral("00")), fm.horizontalAdvance(QStringLiteral("FF"))) +
         10;
@@ -925,7 +943,7 @@ QVector<TextViewWidget::Token> TextViewWidget::decodeTokens(const QByteArray& ra
         token.cls = cls;
         token.byteValue = byte;
 
-        if (m_displayMode == TextDisplayMode::ByteMode) {
+        if (isByteDisplay(m_displayMode)) {
             token.kind = TokenKind::ByteBox;
             token.text = QStringLiteral("%1").arg(static_cast<int>(byte), 2, 16, QChar('0')).toUpper();
             token.pixelWidth = byteCellWidth;
@@ -1144,7 +1162,7 @@ void TextViewWidget::rebuildLines() {
 
     auto finalizeWithWrap = [&](quint64 absoluteOffset, const QByteArray& rawLine) {
         const bool wrapEnabled =
-            (m_displayMode == TextDisplayMode::ByteMode) ? true : m_wrapMode;
+            isByteDisplay(m_displayMode) ? true : m_wrapMode;
         if (!wrapEnabled) {
             finalizeLine(absoluteOffset, rawLine);
             return;
@@ -1192,7 +1210,7 @@ void TextViewWidget::rebuildLines() {
         }
     };
 
-    if (m_displayMode == TextDisplayMode::ByteMode) {
+    if (isByteDisplay(m_displayMode)) {
         finalizeWithWrap(m_baseOffset, m_bytes);
         finalizeRebuildState();
         if (debug::selectionTraceEnabled()) {
@@ -1250,7 +1268,8 @@ void TextViewWidget::updateScrollRange() {
     m_vScrollBar->setSingleStep(1);
     m_vScrollBar->setRange(0, qMax(0, m_lines.size() - visible));
 
-    const bool disableH = (m_displayMode == TextDisplayMode::ByteMode) || m_wrapMode;
+    const bool disableH = m_displayMode == TextDisplayMode::ByteMode ||
+                          (m_displayMode == TextDisplayMode::StringMode && m_wrapMode);
     if (disableH) {
         m_hScrollBar->setPageStep(qMax(1, m_contentWidget->width()));
         m_hScrollBar->setSingleStep(0);
@@ -1260,7 +1279,9 @@ void TextViewWidget::updateScrollRange() {
 
     int maxWidth = 0;
     for (const DisplayLine& line : m_lines) {
-        maxWidth = qMax(maxWidth, line.pixelWidth + 16);
+        maxWidth = qMax(maxWidth, (m_displayMode == TextDisplayMode::ClassicMode
+                                      ? classicLineWidth(line)
+                                      : line.pixelWidth) + 16);
     }
     m_hScrollBar->setPageStep(qMax(1, m_contentWidget->width()));
     m_hScrollBar->setSingleStep(12);
@@ -1340,6 +1361,17 @@ std::optional<int> TextViewWidget::visibleIndexForPoint(const QPoint& point) con
     }
     const int xTarget = point.x() + m_hScrollBar->value();
     const QFontMetrics fm(font());
+
+    if (m_displayMode == TextDisplayMode::ClassicMode) {
+        const int asciiStart = classicAsciiStartX(line);
+        const QFontMetrics fixedMetrics(QFontDatabase::systemFont(QFontDatabase::FixedFont));
+        const int charWidth = qMax(1, fixedMetrics.horizontalAdvance(QLatin1Char('M')));
+        if (xTarget >= asciiStart && xTarget < asciiStart + line.tokens.size() * charWidth) {
+            const int tokenIndex = qBound(0, (xTarget - asciiStart) / charWidth,
+                                          line.tokens.size() - 1);
+            return line.tokens.at(tokenIndex).visibleIndex;
+        }
+    }
 
     int x = 8;
     for (const Token& token : line.tokens) {
@@ -1836,7 +1868,7 @@ void TextViewWidget::copyOffsetToClipboard(quint64 offset, OffsetCopyFormat form
 }
 
 int TextViewWidget::fixedBytesPerLine() const {
-    if (m_displayMode != TextDisplayMode::ByteMode) {
+    if (!isByteDisplay(m_displayMode)) {
         return 0;
     }
     switch (m_byteLineMode) {
@@ -1991,6 +2023,28 @@ int TextViewWidget::tokenVisualWidth(const Token& token) const {
     return token.pixelWidth + (horizontalPadding * 2);
 }
 
+int TextViewWidget::classicAsciiStartX(const DisplayLine& line) const {
+    int bytesPerLine = fixedBytesPerLine();
+    if (bytesPerLine <= 0) {
+        bytesPerLine = line.tokens.size();
+        for (const DisplayLine& candidate : m_lines) {
+            bytesPerLine = qMax(bytesPerLine, candidate.tokens.size());
+        }
+    }
+    const int cellWidth = line.tokens.isEmpty()
+                              ? 0
+                              : tokenVisualWidth(line.tokens.first());
+    const QFontMetrics fm(QFontDatabase::systemFont(QFontDatabase::FixedFont));
+    return 8 + bytesPerLine * cellWidth + fm.horizontalAdvance(QStringLiteral("  |"));
+}
+
+int TextViewWidget::classicLineWidth(const DisplayLine& line) const {
+    const QFontMetrics fm(QFontDatabase::systemFont(QFontDatabase::FixedFont));
+    return classicAsciiStartX(line) + line.tokens.size() *
+                                          qMax(1, fm.horizontalAdvance(QLatin1Char('M'))) +
+           fm.horizontalAdvance(QLatin1Char('|'));
+}
+
 QColor TextViewWidget::colorForClass(TextByteClass cls) const {
     switch (cls) {
         case TextByteClass::Printable:
@@ -2031,6 +2085,9 @@ void TextViewWidget::layoutChildren() {
 
 void TextViewWidget::paintContent() {
     QPainter painter(m_contentWidget);
+    if (m_displayMode == TextDisplayMode::ClassicMode) {
+        painter.setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
+    }
     painter.fillRect(m_contentWidget->rect(), palette().base());
 
     if (m_lines.isEmpty()) {
@@ -2054,8 +2111,9 @@ void TextViewWidget::paintContent() {
             painter.fillRect(rowRect, palette().alternateBase());
         }
 
+        const DisplayLine& line = m_lines.at(lineIdx);
         int x = 8 - xShift;
-        for (const Token& token : m_lines.at(lineIdx).tokens) {
+        for (const Token& token : line.tokens) {
             const quint64 tokenStartOffset = token.absoluteOffset;
             const quint64 tokenEndOffset =
                 token.absoluteOffset + static_cast<quint64>(qMax(1, token.byteLen));
@@ -2106,7 +2164,12 @@ void TextViewWidget::paintContent() {
                 }
             }
 
-            if (token.kind == TokenKind::Text) {
+            if (m_displayMode == TextDisplayMode::ClassicMode) {
+                const QRect tokenRect(x, rowRect.top() + 2, token.pixelWidth, lineH - 4);
+                painter.setPen(palette().text().color());
+                painter.drawText(tokenRect, Qt::AlignCenter, token.text);
+                x += tokenVisualWidth(token);
+            } else if (token.kind == TokenKind::Text) {
                 painter.setPen(colorForClass(token.cls));
                 const int textCellWidth = tokenVisualWidth(token);
                 const int horizontalPadding = m_breatheEnabled ? kTextTokenHorizontalPadding : 0;
@@ -2136,6 +2199,51 @@ void TextViewWidget::paintContent() {
                 painter.drawText(tokenRect, Qt::AlignCenter, token.text);
                 x += token.pixelWidth + 2;
             }
+        }
+
+        if (m_displayMode == TextDisplayMode::ClassicMode) {
+            const QFontMetrics fm(painter.font());
+            const int charWidth = qMax(1, fm.horizontalAdvance(QLatin1Char('M')));
+            const int asciiStart = classicAsciiStartX(line) - xShift;
+            painter.setPen(palette().text().color());
+            painter.drawText(QRect(asciiStart - fm.horizontalAdvance(QLatin1Char('|')),
+                                   rowRect.top() + 2, fm.horizontalAdvance(QLatin1Char('|')),
+                                   lineH - 4),
+                             Qt::AlignCenter, QStringLiteral("|"));
+            for (int tokenIndex = 0; tokenIndex < line.tokens.size(); ++tokenIndex) {
+                const Token& token = line.tokens.at(tokenIndex);
+                const QRect asciiRect(asciiStart + tokenIndex * charWidth, rowRect.top() + 1,
+                                      charWidth, lineH - 2);
+                const quint64 tokenEnd = token.absoluteOffset + 1ULL;
+                if (hasSelection && token.visibleIndex >= selection.first &&
+                    token.visibleIndex < selection.second) {
+                    painter.fillRect(asciiRect, palette().highlight().color().lighter(120));
+                }
+                if (m_resultHighlightEnabled && m_matchLength > 0 &&
+                    tokenEnd > m_matchStartOffset &&
+                    token.absoluteOffset < m_matchStartOffset + static_cast<quint64>(m_matchLength)) {
+                    painter.fillRect(asciiRect, QColor(180, 255, 180));
+                }
+                if (m_externalSelectionRange.has_value() &&
+                    tokenEnd > m_externalSelectionRange->first &&
+                    token.absoluteOffset < m_externalSelectionRange->second) {
+                    painter.fillRect(asciiRect, palette().highlight().color().lighter(135));
+                }
+                if (m_hoverAnchorOffset.has_value() &&
+                    tokenEnd > m_hoverAnchorOffset.value() &&
+                    token.absoluteOffset < m_hoverAnchorOffset.value() + 8ULL) {
+                    painter.fillRect(asciiRect, QColor(173, 216, 230));
+                }
+                painter.setPen(palette().text().color());
+                const QChar glyph = isPrintableAscii(token.byteValue)
+                                        ? QChar::fromLatin1(static_cast<char>(token.byteValue))
+                                        : QLatin1Char('.');
+                painter.drawText(asciiRect, Qt::AlignCenter, QString(glyph));
+            }
+            const int endX = asciiStart + line.tokens.size() * charWidth;
+            painter.drawText(QRect(endX, rowRect.top() + 2,
+                                   fm.horizontalAdvance(QLatin1Char('|')), lineH - 4),
+                             Qt::AlignCenter, QStringLiteral("|"));
         }
     }
 }
@@ -2219,7 +2327,7 @@ quint64 TextViewWidget::currentCenterAnchorOffset() const {
         const quint64 start = m_baseOffset;
         const quint64 size = static_cast<quint64>(qMax(0, m_bytes.size()));
         if (size > 0 && m_selectedOffset >= start && m_selectedOffset < start + size) {
-            if (m_displayMode == TextDisplayMode::ByteMode) {
+            if (isByteDisplay(m_displayMode)) {
                 return m_selectedOffset;
             }
             const qint64 relSigned =

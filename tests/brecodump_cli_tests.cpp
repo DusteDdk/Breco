@@ -17,6 +17,7 @@ private slots:
     void helpStdinAndFileStructDumpWork();
     void serializedFieldOrderAndMetadataAreStable();
     void nestedStructsSerializeInsideValue();
+    void namedOutformRendersAndValidatesName();
 };
 
 QByteArray runBrecodump(const QStringList& args, const QByteArray& stdinBytes = {},
@@ -358,6 +359,47 @@ void BrecodumpCliTests::nestedStructsSerializeInsideValue() {
     QVERIFY(payloadPosition > markerPosition);
     QVERIFY(innerValidPosition > payloadPosition);
     QVERIFY(innerTypePosition > innerValidPosition);
+}
+
+void BrecodumpCliTests::namedOutformRendersAndValidatesName() {
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    const QString binaryPath = tempDir.filePath(QStringLiteral("sample.bin"));
+    QFile binary(binaryPath);
+    QVERIFY(binary.open(QIODevice::WriteOnly));
+    QCOMPARE(binary.write(QByteArray::fromHex("2A")), 1);
+    binary.close();
+
+    const QString includedPath = tempDir.filePath(QStringLiteral("formats.brecostruct"));
+    QFile included(includedPath);
+    QVERIFY(included.open(QIODevice::WriteOnly));
+    included.write("outform line binary {name={{name}};{{#children}}{{name}}={{value}}{{/children}}}");
+    included.close();
+    const QString declarationPath = tempDir.filePath(QStringLiteral("main.brecostruct"));
+    QFile declaration(declarationPath);
+    QVERIFY(declaration.open(QIODevice::WriteOnly));
+    declaration.write("include \"formats.brecostruct\"; struct S { uint8 answer; }");
+    declaration.close();
+
+    const QByteArray rendered = runBrecodump({
+        QStringLiteral("-s"), declarationPath,
+        QStringLiteral("-i"), binaryPath,
+        QStringLiteral("-e"), QStringLiteral("S"),
+        QStringLiteral("-outform"), QStringLiteral("line"),
+    });
+    QCOMPARE(rendered, QByteArray("name=S[0];answer=42 (0X2A)"));
+
+    QProcess invalid;
+    invalid.start(QStringLiteral(BRECODUMP_PATH),
+                  {QStringLiteral("-s"), declarationPath,
+                   QStringLiteral("-i"), binaryPath,
+                   QStringLiteral("-outform"), QStringLiteral("missing")});
+    invalid.closeWriteChannel();
+    QVERIFY(invalid.waitForFinished(10000));
+    QCOMPARE(invalid.exitStatus(), QProcess::NormalExit);
+    QCOMPARE(invalid.exitCode(), 2);
+    QVERIFY(invalid.readAllStandardError().contains(
+        "Unknown outform 'missing'. Available outforms: line"));
 }
 
 }  // namespace

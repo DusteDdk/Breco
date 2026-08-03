@@ -9,6 +9,7 @@
 #include <QtGlobal>
 
 #include "model/ResultTypes.h"
+#include "scan/ScanProgress.h"
 
 #include <atomic>
 #include <chrono>
@@ -72,6 +73,7 @@ struct EmbeddedImageResult {
 
 struct EmbeddedImageScanSummary {
     quint64 bytesScanned = 0;
+    quint64 rawBytesRead = 0;
     bool cancelled = false;
     QString message;
 };
@@ -90,7 +92,8 @@ EmbeddedImageFormats supportedEmbeddedImageFormats();
 
 using EmbeddedImageCancelCallback = std::function<bool()>;
 using EmbeddedImageProgressCallback =
-    std::function<void(quint64 bytesScanned, quint64 bytesTotal, int resultsFound, int resultsLimit)>;
+    std::function<void(quint64 bytesScanned, quint64 bytesTotal, quint64 rawBytesRead,
+                       int resultsFound, int resultsLimit)>;
 using EmbeddedImageResultCallback = std::function<void(const EmbeddedImageResult& result)>;
 
 QVector<EmbeddedImageResult> scanEmbeddedImages(
@@ -113,7 +116,7 @@ public:
 
 signals:
     void scanStarted(quint64 scanId);
-    void progressUpdated(quint64 scanId, quint64 bytesScanned, quint64 bytesTotal,
+    void progressUpdated(quint64 scanId, const breco::ScanProgressSnapshot& progress,
                          int resultsFound, int resultsLimit);
     void resultReady(quint64 scanId, const breco::EmbeddedImageResult& result);
     void scanFinished(quint64 scanId, const breco::EmbeddedImageScanSummary& summary,

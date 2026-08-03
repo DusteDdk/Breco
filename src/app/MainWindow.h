@@ -14,6 +14,7 @@
 #include "model/ResultModel.h"
 #include "scan/ScanController.h"
 #include "struct/VisualizedNode.h"
+#include "struct/StructVisualizer.h"
 
 QT_BEGIN_NAMESPACE
 class QComboBox;
@@ -70,10 +71,11 @@ private slots:
     void onOpenFile();
     void onOpenDirectory();
     void onStartScan();
+    void onStartStructureScan();
     void onStopScan();
     void onResultActivated(const QModelIndex& index);
     void onResultsBatchReady(const QVector<MatchRecord>& matches, int mergedTotal);
-    void onProgressUpdated(quint64 scanned, quint64 total);
+    void onProgressUpdated(const breco::ScanProgressSnapshot& progress);
     void onScanStarted(int fileCount, quint64 totalBytes);
     void onScanFinished(bool stoppedByUser, bool autoStoppedLimitExceeded);
     void onTextModeChanged(int idx);
@@ -92,6 +94,7 @@ private:
     enum class SourceTargetKind { None, File, BlockDevice, Directory };
     enum class SourcePathFeedback { None, NotFound, Found, PermissionDenied, Open };
     enum class HoverSource { None, Text, Bitmap };
+    enum class ScanKind { None, Text, Structure };
 
     struct HoverBuffer {
         QString filePath;
@@ -142,6 +145,7 @@ private:
                                  quint64 offset);
     void rebuildStructVisualization();
     bool decodeStructView(StructViewState& view, bool allowSourceReload);
+    bool loadExternalStructSources(QHash<QString, VisualizationSource>* sources);
     quint64 structVisualizationStartOffset() const;
     void navigateToStructSource(const QString& filePath,
                                 quint64 absoluteOffset, quint64 byteLength);
@@ -149,6 +153,8 @@ private:
                                   quint64 byteLength);
     void clearStructSourceHighlight();
     void setScanButtonMode(bool running);
+    void startScan(ScanKind kind);
+    void restoreTransientScanUi();
     void updateBlockSizeLabel();
     int selectedWorkerCount() const;
     QString humanBytes(quint64 bytes) const;
@@ -267,6 +273,7 @@ private:
     std::optional<QPair<quint64, quint64>> m_activeTextSelectionRange;
     std::optional<StructViewState> m_structPreview;
     QVector<StructViewState> m_currentStructViews;
+    QHash<QString, QString> m_externalStructSourcePaths;
     bool m_structNavigationInProgress = false;
     std::optional<QPair<quint64, quint64>> m_structSourceHighlightRange;
     quint64 m_nextStructViewId = 1;
@@ -287,6 +294,10 @@ private:
     bool m_pendingPreviewAfterTextScrollDrag = false;
     std::optional<int> m_protectedSourceDialogAnswerForTests;
     quint64 m_activeImageScanId = 0;
+    ScanKind m_activeScanKind = ScanKind::None;
+    QString m_savedStructureSearchTerm;
+    bool m_savedStructureTermEnabled = true;
+    bool m_savedIgnoreCaseEnabled = true;
 };
 
 }  // namespace breco

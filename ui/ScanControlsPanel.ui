@@ -43,7 +43,7 @@
            </sizepolicy>
           </property>
           <property name="text">
-           <string>Open:</string>
+           <string>Open</string>
           </property>
          </widget>
         </item>

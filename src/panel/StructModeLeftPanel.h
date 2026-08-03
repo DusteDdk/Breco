@@ -17,6 +17,7 @@ class QLabel;
 class QPlainTextEdit;
 class QSpinBox;
 class QTableWidget;
+class QTreeWidget;
 class QToolButton;
 class QVBoxLayout;
 namespace Ui {
@@ -50,6 +51,8 @@ public:
     QTableWidget* currentViewsTableWidget() const;
     QToolButton* addViewButton() const;
     QToolButton* removeViewButton() const;
+    QToolButton* scanStructureButton() const;
+    QTreeWidget* structureLibraryTreeWidget() const { return m_libraryTree; }
     QVBoxLayout* structDeclarationLayout() const;
 
     const StructureGraph& structureGraph() const { return m_graph; }
@@ -64,6 +67,7 @@ public:
     void highlightSelectedEntry();
     void focusDeclarationRange(int start, int end);
     void setPreviewActive(bool active);
+    void setScanState(bool running, bool structureScan);
     void addCurrentView(const CurrentStructView& view);
     void setCurrentViewByteLength(quint64 id, quint64 byteLength);
     void clearCurrentViews();
@@ -84,6 +88,8 @@ signals:
                                  quint64 absoluteOffset, quint64 byteLength);
     void parseStateChanged();
     void declarationFileLoaded(const QString& filePath);
+    void structureScanRequested();
+    void structureScanStopRequested();
 
 protected:
     bool eventFilter(QObject* watched, QEvent* event) override;
@@ -94,6 +100,9 @@ private:
     void updateStatusAndErrorHighlight();
     void updateRemoveEnabled();
     void setupLanguageReference();
+    void setupStructureLibrary();
+    void refreshStructureLibrary();
+    void chooseStructureLibraryDirectory();
     void handleLoadRequested();
     void handleSaveRequested();
     void removeSelectedViews();
@@ -107,11 +116,14 @@ private:
     bool m_isEmpty = true;
     bool m_previewActive = false;
     bool m_updatingTable = false;
+    bool m_scanRunning = false;
+    bool m_structureScanRunning = false;
     QString m_parseError;
     TextRange m_parseErrorRange;
     QPoint m_dragStartPosition;
     QLabel* m_dragLabel = nullptr;
     QHash<QObject*, QString> m_languageSnippets;
+    QTreeWidget* m_libraryTree = nullptr;
 };
 
 }  // namespace breco

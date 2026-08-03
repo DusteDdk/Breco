@@ -7,6 +7,7 @@
 #include <QAbstractItemView>
 #include <QBrush>
 #include <QFileDialog>
+#include <QFileInfo>
 #include <QGuiApplication>
 #include <QColor>
 #include <QClipboard>
@@ -137,6 +138,10 @@ void StructDataViewPanel::setSourceEndianness(Endianness endianness) {
     m_sourceEndianness = endianness;
 }
 
+void StructDataViewPanel::setOutforms(const QVector<OutformNode>& outforms) {
+    m_outforms = outforms;
+}
+
 bool StructDataViewPanel::saveBytesToFile(const QString& filePath,
                                           const QByteArray& bytes) {
     QSaveFile file(filePath);
@@ -259,6 +264,7 @@ void StructDataViewPanel::addScopeMenu(
                          [this, nodes, writeSingleJsonObject]() {
                              saveJson(nodes, writeSingleJsonObject);
                          });
+    addOutformMenu(scopeMenu, nodes);
     scopeMenu->addAction(
         QStringLiteral("Save as binary struct (source endianness)"), this,
         [this, nodes]() {
@@ -269,6 +275,53 @@ void StructDataViewPanel::addScopeMenu(
         [this, nodes]() {
             saveBinary(nodes, StructBinaryExportMode::DeclaredEndianness);
         });
+}
+
+void StructDataViewPanel::addOutformMenu(
+    QMenu* parent, const QVector<const VisualizedNode*>& nodes) {
+    QMenu* outformMenu = parent->addMenu(QStringLiteral("outform..."));
+    if (m_outforms.isEmpty()) {
+        QAction* emptyAction =
+            outformMenu->addAction(QStringLiteral("no outforms declared"));
+        emptyAction->setEnabled(false);
+        return;
+    }
+    for (const OutformNode& outform : m_outforms) {
+        const QString fileName = outform.sourceFilePath.isEmpty()
+                                     ? QStringLiteral("inline script")
+                                     : QFileInfo(outform.sourceFilePath).fileName();
+        outformMenu->addAction(
+            QStringLiteral("%1: %2").arg(fileName, outform.name), this,
+            [this, outform, nodes]() { saveUsingOutform(outform, nodes); });
+    }
+}
+
+void StructDataViewPanel::saveUsingOutform(
+    const OutformNode& outform, const QVector<const VisualizedNode*>& nodes) {
+    QString rendered;
+    for (const VisualizedNode* node : nodes) {
+        if (node == nullptr) {
+            continue;
+        }
+        QString error;
+        rendered += renderStructureTemplate(outform.templateText, *node, &error);
+        if (!error.isEmpty()) {
+            QMessageBox::warning(this, QStringLiteral("Template error"), error);
+            return;
+        }
+    }
+    const QString outputPath = m_outformSavePathForTests.isEmpty()
+                                   ? QFileDialog::getSaveFileName(
+                                         this,
+                                         QStringLiteral("Save using outform '%1'")
+                                             .arg(outform.name),
+                                         QString(),
+                                         QStringLiteral("Text files (*.txt);;All files (*)"))
+                                   : m_outformSavePathForTests;
+    if (!outputPath.isEmpty() && !saveBytesToFile(outputPath, rendered.toUtf8())) {
+        QMessageBox::warning(this, QStringLiteral("Save failed"),
+                             QStringLiteral("Could not write '%1'.").arg(outputPath));
+    }
 }
 
 QVector<const VisualizedNode*> StructDataViewPanel::selectedTreeNodes() const {

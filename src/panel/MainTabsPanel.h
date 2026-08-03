@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QWidget>
+#include <QHash>
 
 #include <memory>
 
@@ -31,9 +32,20 @@ public:
     QWidget* resultsPanelHost() const;
     QWidget* dataViewHost() const;
     QFrame* editStack() const;
+    void activateScanTab();
+    bool detachTab(int index);
+
+protected:
+    bool eventFilter(QObject* watched, QEvent* event) override;
 
 private:
     std::unique_ptr<Ui::MainTabsPanel> m_ui;
+    struct DetachedTab {
+        QWidget* window = nullptr;
+        QString title;
+        int index = 0;
+    };
+    QHash<QWidget*, DetachedTab> m_detachedTabs;
 };
 
 }  // namespace breco

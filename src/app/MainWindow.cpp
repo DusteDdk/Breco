@@ -522,6 +522,10 @@ MainWindow::MainWindow(QWidget* parent)
             &MainWindow::onStartScan);
     connect(m_scanControlsPanel->searchTermLineEdit(), &QLineEdit::returnPressed, this,
             &MainWindow::onStartScan);
+    connect(m_structModeLeftPanel, &StructModeLeftPanel::structureScanRequested,
+            this, &MainWindow::onStartStructureScan);
+    connect(m_structModeLeftPanel, &StructModeLeftPanel::structureScanStopRequested,
+            this, &MainWindow::onStopScan);
     connect(resultsTable->selectionModel(), &QItemSelectionModel::currentRowChanged, this,
             [this](const QModelIndex& current, const QModelIndex&) { onResultActivated(current); });
     connect(m_hexControlsPanel->showAsComboBox(), qOverload<int>(&QComboBox::currentIndexChanged), this,
@@ -631,11 +635,10 @@ MainWindow::MainWindow(QWidget* parent)
     connect(m_dataViewImagePanel, &DataViewImagePanel::resultActivated, this,
             &MainWindow::jumpToAbsoluteOffset);
     connect(m_imageScanController.get(), &EmbeddedImageScanController::progressUpdated, this,
-            [this](quint64 scanId, quint64 bytesScanned, quint64 bytesTotal,
+            [this](quint64 scanId, const ScanProgressSnapshot& progress,
                    int resultsFound, int resultsLimit) {
                 if (scanId == m_activeImageScanId && m_dataViewImagePanel != nullptr) {
-                    m_dataViewImagePanel->updateProgress(bytesScanned, bytesTotal, resultsFound,
-                                                         resultsLimit);
+                    m_dataViewImagePanel->updateProgress(progress, resultsFound, resultsLimit);
                 }
             });
     connect(m_imageScanController.get(), &EmbeddedImageScanController::resultReady, this,
@@ -782,7 +785,8 @@ MainWindow::MainWindow(QWidget* parent)
         syncStructPreviewToControls();
     });
     connect(m_structModeLeftPanel, &StructModeLeftPanel::declarationFileLoaded,
-            this, [](const QString& filePath) {
+            this, [this](const QString& filePath) {
+                m_externalStructSourcePaths.clear();
                 AppSettings::setLastStructDefinitionFilePath(filePath);
             });
     connect(m_structModeLeftPanel->entryComboBox(), &QComboBox::currentTextChanged, this,
@@ -881,12 +885,19 @@ MainWindow::MainWindow(QWidget* parent)
     connect(&m_scanController, &ScanController::scanStarted, this, &MainWindow::onScanStarted);
     connect(&m_scanController, &ScanController::progressUpdated, this,
             &MainWindow::onProgressUpdated);
+    connect(&m_scanController, &ScanController::lifecycleMessage, this,
+            [this](const QString& message) {
+                m_scanControlsPanel->appendLifecycleMessage(message);
+            });
     connect(&m_scanController, &ScanController::resultsBatchReady, this,
             &MainWindow::onResultsBatchReady);
     connect(&m_scanController, &ScanController::scanFinished, this,
             &MainWindow::onScanFinished);
     connect(&m_scanController, &ScanController::scanError, this,
-            [this](const QString& message) { QMessageBox::warning(this, "Breco", message); });
+            [this](const QString& message) {
+                restoreTransientScanUi();
+                QMessageBox::warning(this, "Breco", message);
+            });
 
     const QList<int> savedMainSplitterSizes = AppSettings::mainSplitterSizes();
     if (savedMainSplitterSizes.size() == 2) {
@@ -1047,7 +1058,10 @@ MainWindow::MainWindow(QWidget* parent)
     m_dataViewImagePanel->maxResultsSpinBox()->setValue(dataViewImageMaxResults);
     m_dataViewImagePanel->jobsSpinBox()->setValue(dataViewImageJobs);
     m_scanControlsPanel->prefillOnMergeCheckBox()->setChecked(prefillOnMerge);
-    m_textView->setDisplayMode(hexShowAsIdx == 0 ? TextDisplayMode::ByteMode : TextDisplayMode::StringMode);
+    m_textView->setDisplayMode(
+        hexShowAsIdx == 0 ? TextDisplayMode::ByteMode
+                          : (hexShowAsIdx == 4 ? TextDisplayMode::ClassicMode
+                                               : TextDisplayMode::StringMode));
     m_textView->setMode(selectedTextMode());
     m_textView->setUtf16LittleEndian(!hexBigEndian);
     m_textView->setNewlineMode(static_cast<TextNewlineMode>(newlineModeIdx));
@@ -1533,16 +1547,39 @@ void MainWindow::onStartScan() {
         onStopScan();
         return;
     }
+    startScan(ScanKind::Text);
+}
+
+void MainWindow::onStartStructureScan() {
+    m_mainTabsPanel->activateScanTab();
+    if (m_scanController.isRunning()) {
+        if (m_activeScanKind == ScanKind::Structure) {
+            onStopScan();
+        }
+        return;
+    }
+    startScan(ScanKind::Structure);
+}
+
+void MainWindow::startScan(ScanKind kind) {
     if (m_scanTargets.isEmpty()) {
         QMessageBox::information(this, QStringLiteral("Breco"),
                                  QStringLiteral("Select file or directory first."));
         return;
     }
 
-    const QByteArray term = m_scanControlsPanel->searchTermLineEdit()->text().toUtf8();
-    if (term.isEmpty()) {
+    const bool structureScan = kind == ScanKind::Structure;
+    const QByteArray term = structureScan
+                                ? QByteArray()
+                                : m_scanControlsPanel->searchTermLineEdit()->text().toUtf8();
+    if (!structureScan && term.isEmpty()) {
         QMessageBox::information(this, QStringLiteral("Breco"),
                                  QStringLiteral("Enter a search term."));
+        return;
+    }
+    if (structureScan && !m_structModeLeftPanel->canPreview()) {
+        QMessageBox::information(this, QStringLiteral("Breco"),
+                                 QStringLiteral("Select a valid structure entry first."));
         return;
     }
     const auto scanButtonPressedAt = std::chrono::steady_clock::now();
@@ -1556,11 +1593,38 @@ void MainWindow::onStartScan() {
     updateBufferStatusLine();
 
     m_scanControlsPanel->scanProgressBar()->setValue(0);
+    std::shared_ptr<const StructureGraph> scanGraph;
+    std::shared_ptr<const QHash<QString, VisualizationSource>> scanExternalSources;
+    QString scanEntry;
+    if (structureScan) {
+        scanGraph = std::make_shared<StructureGraph>(
+            m_structModeLeftPanel->structureGraph());
+        scanEntry = m_structModeLeftPanel->entryComboBox()->currentText();
+        auto externalSources = std::make_shared<QHash<QString, VisualizationSource>>();
+        if (!loadExternalStructSources(externalSources.get())) {
+            return;
+        }
+        scanExternalSources = std::move(externalSources);
+    }
+    m_activeScanKind = kind;
+    m_savedIgnoreCaseEnabled =
+        m_scanControlsPanel->ignoreCaseCheckBox()->isEnabled();
+    m_scanControlsPanel->ignoreCaseCheckBox()->setEnabled(false);
+    if (structureScan) {
+        m_savedStructureSearchTerm =
+            m_scanControlsPanel->searchTermLineEdit()->text();
+        m_savedStructureTermEnabled =
+            m_scanControlsPanel->searchTermLineEdit()->isEnabled();
+        m_scanControlsPanel->searchTermLineEdit()->setText(
+            QStringLiteral("Structure: %1").arg(scanEntry));
+        m_scanControlsPanel->searchTermLineEdit()->setEnabled(false);
+    }
     m_scanController.startScan(m_scanTargets, term, effectiveBlockSizeBytes(), selectedWorkerCount(),
                                selectedTextMode(),
                                m_scanControlsPanel->ignoreCaseCheckBox()->isChecked(),
                                m_scanControlsPanel->prefillOnMergeCheckBox()->isChecked(),
-                               scanButtonPressedAt);
+                               scanButtonPressedAt, scanGraph, scanEntry,
+                               scanExternalSources);
 }
 
 void MainWindow::onStopScan() { m_scanController.requestStop(); }
@@ -1636,18 +1700,20 @@ void MainWindow::onResultsBatchReady(const QVector<MatchRecord>& matches, int me
     BRECO_SELTRACE("onResultsBatchReady: enforceBufferCacheBudget end");
     rebuildTargetMatchIntervals();
     m_activeOverlapTargetIdx = -1;
-    m_scanControlsPanel->appendLifecycleMessage(QStringLiteral("Merged results: %1").arg(mergedTotal));
     updateBufferStatusLine();
     BRECO_SELTRACE("onResultsBatchReady: done");
 }
 
-void MainWindow::onProgressUpdated(quint64 scanned, quint64 total) {
+void MainWindow::onProgressUpdated(const ScanProgressSnapshot& progressSnapshot) {
+    const quint64 scanned = progressSnapshot.scannedBytes;
+    const quint64 total = progressSnapshot.totalBytes;
     if (total > 0) {
         const int progress = static_cast<int>((static_cast<long double>(scanned) /
                                                static_cast<long double>(total)) *
                                               1000.0L);
         m_scanControlsPanel->scanProgressBar()->setValue(qBound(0, progress, 1000));
     }
+    m_scanControlsPanel->scanProgressBar()->setFormat(formatScanProgress(progressSnapshot));
     if (QLabel* scannedLabel = m_scanControlsPanel->scannedValueLabel(); scannedLabel != nullptr) {
         scannedLabel->setText(humanBytes(scanned));
     }
@@ -1662,7 +1728,6 @@ void MainWindow::onScanStarted(int fileCount, quint64 totalBytes) {
     m_scanControlsPanel->showLifecycleCard();
     AppSettings::setViewScanLogVisible(true);
     m_ui->actionViewScanLog->setChecked(true);
-    m_scanControlsPanel->appendLifecycleMessage(QStringLiteral("Scanning..."));
     updateBufferStatusLine();
 }
 
@@ -1672,12 +1737,7 @@ void MainWindow::onScanFinished(bool stoppedByUser, bool) {
                            .arg(stoppedByUser ? QStringLiteral("true") : QStringLiteral("false"))
                            .arg(m_resultModel.rowCount()));
     }
-    setScanButtonMode(false);
-    QString msg = QStringLiteral("Scan finished");
-    if (stoppedByUser) {
-        msg = QStringLiteral("Scan stopped by user");
-    }
-    m_scanControlsPanel->appendLifecycleMessage(msg);
+    restoreTransientScanUi();
     if (isSingleFileModeActive()) {
         insertSyntheticPreviewResultAtTop();
     }
@@ -1689,7 +1749,9 @@ void MainWindow::onScanFinished(bool stoppedByUser, bool) {
 }
 
 void MainWindow::onTextModeChanged(int idx) {
-    m_textView->setDisplayMode(idx == 0 ? TextDisplayMode::ByteMode : TextDisplayMode::StringMode);
+    m_textView->setDisplayMode(
+        idx == 0 ? TextDisplayMode::ByteMode
+                 : (idx == 4 ? TextDisplayMode::ClassicMode : TextDisplayMode::StringMode));
     switch (idx) {
         case 1:
             m_lastTextInterpretationMode = TextInterpretationMode::Ascii;
@@ -1705,6 +1767,7 @@ void MainWindow::onTextModeChanged(int idx) {
             m_textView->setUtf16LittleEndian(m_hexControlsPanel->littleEndianRadioButton()->isChecked());
             break;
         case 0:
+        case 4:
         default:
             m_textView->setMode(TextInterpretationMode::Ascii);
             break;
@@ -1851,8 +1914,9 @@ void MainWindow::updateHexControlsVisibility() {
     if (m_hexControlsPanel == nullptr) {
         return;
     }
-    const bool byteMode = m_hexControlsPanel->showAsComboBox()->currentIndex() == 0;
-    const bool textMode = !byteMode;
+    const int showAsIndex = m_hexControlsPanel->showAsComboBox()->currentIndex();
+    const bool byteMode = showAsIndex == 0 || showAsIndex == 4;
+    const bool textMode = showAsIndex >= 1 && showAsIndex <= 3;
     m_hexControlsPanel->newlineModeComboBox()->setVisible(textMode);
     m_hexControlsPanel->stringsOnlyCheckBox()->setVisible(textMode);
     m_hexControlsPanel->wrapCheckBox()->setVisible(textMode);
@@ -1932,6 +1996,23 @@ void MainWindow::refreshDataViewFromNavigator() {
 void MainWindow::setScanButtonMode(bool running) {
     m_scanControlsPanel->startScanButton()->setText(running ? QStringLiteral("Stop")
                                                             : QStringLiteral("Scan"));
+    m_structModeLeftPanel->setScanState(
+        running, running && m_activeScanKind == ScanKind::Structure);
+}
+
+void MainWindow::restoreTransientScanUi() {
+    if (m_activeScanKind == ScanKind::Structure) {
+        m_scanControlsPanel->searchTermLineEdit()->setText(
+            m_savedStructureSearchTerm);
+        m_scanControlsPanel->searchTermLineEdit()->setEnabled(
+            m_savedStructureTermEnabled);
+    }
+    if (m_activeScanKind != ScanKind::None) {
+        m_scanControlsPanel->ignoreCaseCheckBox()->setEnabled(
+            m_savedIgnoreCaseEnabled);
+    }
+    m_activeScanKind = ScanKind::None;
+    setScanButtonMode(false);
 }
 
 void MainWindow::updateBlockSizeLabel() {
@@ -3599,6 +3680,39 @@ quint64 MainWindow::structVisualizationStartOffset() const {
     return m_textHoverBuffer.baseOffset;
 }
 
+bool MainWindow::loadExternalStructSources(
+    QHash<QString, VisualizationSource>* sources) {
+    if (sources == nullptr) {
+        return false;
+    }
+    sources->clear();
+    for (const QString& role : m_structModeLeftPanel->structureGraph().externalRoles()) {
+        QString path = m_externalStructSourcePaths.value(role);
+        if (path.isEmpty() || !QFileInfo::exists(path)) {
+            path = QFileDialog::getOpenFileName(
+                this, QStringLiteral("Select external structure source: %1").arg(role),
+                AppSettings::lastBrowseDialogDirectory(),
+                QStringLiteral("All files (*)"));
+            if (path.isEmpty()) {
+                return false;
+            }
+            m_externalStructSourcePaths.insert(role, path);
+        }
+        QFile file(path);
+        if (!file.open(QIODevice::ReadOnly)) {
+            QMessageBox::warning(this, QStringLiteral("External source error"),
+                                 QStringLiteral("Could not read '%1': %2")
+                                     .arg(path, file.errorString()));
+            return false;
+        }
+        VisualizationSource source;
+        source.bytes = file.readAll();
+        source.filePath = QFileInfo(path).absoluteFilePath();
+        sources->insert(role, std::move(source));
+    }
+    return true;
+}
+
 bool MainWindow::decodeStructView(StructViewState& view, bool allowSourceReload) {
     if (!m_structModeLeftPanel->isParseValid() ||
         !m_structModeLeftPanel->structureGraph().isVisualizableEntryName(view.type)) {
@@ -3654,12 +3768,16 @@ bool MainWindow::decodeStructView(StructViewState& view, bool allowSourceReload)
         return false;
     }
 
-    view.decodedRoot =
-        visualize(m_structModeLeftPanel->structureGraph(), view.type, data,
-                  dataStartOffset, view.repeat,
-                  dataViewBigEndianEnabled() ? Endianness::Big
-                                             : Endianness::Little);
-    assignVisualizedSource(view.decodedRoot, view.filePath, dataBaseOffset);
+    QHash<QString, VisualizationSource> externalSources;
+    if (!loadExternalStructSources(&externalSources)) {
+        view.reloadError = QStringLiteral("External source selection was cancelled");
+        return false;
+    }
+    VisualizationSource primary{data, view.filePath, dataBaseOffset};
+    view.decodedRoot = visualize(
+        m_structModeLeftPanel->structureGraph(), view.type, primary,
+        dataStartOffset, view.repeat, externalSources,
+        dataViewBigEndianEnabled() ? Endianness::Big : Endianness::Little);
     view.reloadError.clear();
     return true;
 }
@@ -3821,8 +3939,12 @@ void MainWindow::rebuildStructVisualization() {
         appendView(view, view.name);
     }
     if (root.children.isEmpty()) {
+        m_structDataViewPanel->setOutforms(
+            m_structModeLeftPanel->structureGraph().outforms());
         m_structDataViewPanel->clearVisualization();
     } else {
+        m_structDataViewPanel->setOutforms(
+            m_structModeLeftPanel->structureGraph().outforms());
         m_structDataViewPanel->setVisualization(root);
     }
 }

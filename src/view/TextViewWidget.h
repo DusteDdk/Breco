@@ -18,6 +18,7 @@ namespace breco {
 enum class TextDisplayMode {
     StringMode = 0,
     ByteMode,
+    ClassicMode,
 };
 
 enum class TextNewlineMode {
@@ -175,6 +176,8 @@ private:
     void showSelectionContextMenu(const QPoint& localPos);
     void showGutterContextMenu(const QPoint& localPos);
     int tokenVisualWidth(const Token& token) const;
+    int classicAsciiStartX(const DisplayLine& line) const;
+    int classicLineWidth(const DisplayLine& line) const;
     QColor colorForClass(TextByteClass cls) const;
     void layoutChildren();
     void paintContent();

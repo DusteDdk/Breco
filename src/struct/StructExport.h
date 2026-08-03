@@ -41,4 +41,10 @@ QString formatScalarValue(const VisualizedNode& node, StructScalarFormat format)
 QString formatPrefixedScalarValue(const VisualizedNode& node,
                                   StructScalarFormat format);
 
+// Renders {{name}}, {{type}}, {{value}}, {{offset}}, {{length}}, {{bytes}},
+// {{path}} and {{#children}}...{{/children}} placeholders.
+QString renderStructureTemplate(const QString& templateText,
+                                const VisualizedNode& node,
+                                QString* errorMessage = nullptr);
+
 }  // namespace breco

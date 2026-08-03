@@ -1,0 +1,14 @@
+outform xml text {
+<structure name="{{name}}" type="{{type}}">{{#children}}
+  <field name="{{name}}" type="{{type}}" offset="{{offset}}" length="{{length}}" valid="{{valid}}">{{value}}</field>{{/children}}
+</structure>
+}
+
+outform compact binary {
+{{name}}={{value}} [{{bytes}}]
+}
+
+struct OutformExample {
+    uint8 version;
+    uint16<be> payloadLength;
+};

@@ -12,17 +12,22 @@
 
 #include "model/ResultTypes.h"
 #include "scan/ScanTypes.h"
+#include "struct/StructureGraph.h"
+#include "struct/StructVisualizer.h"
 
 namespace breco {
 
 class ScanWorker {
 public:
-    using JobCompleteCallback = std::function<void(int workerId, quint64 bufferToken)>;
+    using JobCompleteCallback = std::function<void(int workerId, ScanJobResult result)>;
 
     ScanWorker(int workerId, QByteArray searchTerm, TextInterpretationMode mode, bool ignoreCase,
                std::atomic<quint64>* totalBytesScanned,
                std::chrono::steady_clock::time_point scanStartTime,
-               JobCompleteCallback onJobComplete);
+               JobCompleteCallback onJobComplete,
+               std::shared_ptr<const StructureGraph> structureGraph = {},
+               QString structureEntry = {},
+               std::shared_ptr<const QHash<QString, VisualizationSource>> externalSources = {});
 
     ~ScanWorker();
 
@@ -32,11 +37,10 @@ public:
     void requestStop();
     void wakeForStop();
     bool isBusy() const;
-    const QVector<MatchRecord>& matches() const;
 
 private:
     void runLoop();
-    void processJob(const ScanJob& job);
+    ScanJobResult processJob(const ScanJob& job);
 
     int m_workerId = 0;
     std::atomic<bool> m_stopRequested{false};
@@ -52,7 +56,9 @@ private:
     mutable std::mutex m_jobMutex;
     ScanJob m_pendingJob;
     bool m_hasPendingJob = false;
-    QVector<MatchRecord> m_matches;
+    std::shared_ptr<const StructureGraph> m_structureGraph;
+    QString m_structureEntry;
+    std::shared_ptr<const QHash<QString, VisualizationSource>> m_externalSources;
     std::thread m_thread;
 };
 

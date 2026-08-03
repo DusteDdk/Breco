@@ -62,7 +62,40 @@ void StructureGraph::clear() {
     m_typedefs.clear();
     m_structs.clear();
     m_standaloneMembers.clear();
+    m_outforms.clear();
     m_defaultEntryName.clear();
+    m_externalRoles.clear();
+}
+
+bool StructureGraph::addOutform(const OutformNode& node) {
+    if (node.name.isEmpty()) {
+        return false;
+    }
+    for (const OutformNode& existing : m_outforms) {
+        if (existing.name == node.name &&
+            existing.sourceFilePath == node.sourceFilePath) {
+            return false;
+        }
+    }
+    m_outforms.push_back(node);
+    return true;
+}
+
+const OutformNode* StructureGraph::findOutform(const QString& name) const {
+    for (const OutformNode& node : m_outforms) {
+        if (node.name == name) {
+            return &node;
+        }
+    }
+    return nullptr;
+}
+
+bool StructureGraph::addExternalRole(const QString& role) {
+    if (role.isEmpty() || m_externalRoles.contains(role)) {
+        return false;
+    }
+    m_externalRoles.push_back(role);
+    return true;
 }
 
 bool StructureGraph::hasName(const QString& name) const {
@@ -217,6 +250,43 @@ bool StructureGraph::isVisualizableEntryName(const QString& name) const {
         return false;
     }
     return !resolved.valueless_by_exception();
+}
+
+bool StructureGraph::entryHasEffectiveScanConstraint(const QString& name) const {
+    const auto structHasConstraint = [](const StructNode& node) {
+        if (!node.assertions.isEmpty()) {
+            return true;
+        }
+        for (const StructMember& member : node.members) {
+            if (member.attributes.conditionExpression.has_value()) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    if (const StandaloneMemberNode* member = findStandaloneMember(name)) {
+        if (member->attributes.conditionExpression.has_value()) {
+            return true;
+        }
+        if (const auto* ref = std::get_if<StructRefType>(&member->type)) {
+            const StructNode* node = findStruct(ref->structName);
+            return node != nullptr && structHasConstraint(*node);
+        }
+        return false;
+    }
+    if (const StructNode* node = findStruct(name)) {
+        return structHasConstraint(*node);
+    }
+    ResolvedType resolved;
+    if (!resolveTypeName(name, &resolved, nullptr)) {
+        return false;
+    }
+    if (const auto* ref = std::get_if<StructRefType>(&resolved)) {
+        const StructNode* node = findStruct(ref->structName);
+        return node != nullptr && structHasConstraint(*node);
+    }
+    return false;
 }
 
 TextRange StructureGraph::nameRangeForEntry(const QString& name) const {

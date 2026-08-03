@@ -4,6 +4,7 @@
 
 #include <QAbstractItemView>
 #include <QCompleter>
+#include <QComboBox>
 #include <QDir>
 #include <QFileInfo>
 #include <QIcon>
@@ -15,6 +16,7 @@
 #include <QSize>
 #include <QStringListModel>
 #include <QToolButton>
+#include <QSpinBox>
 
 #include "ui_ScanControlsPanel.h"
 

@@ -13,9 +13,12 @@
 #include <memory>
 #include <thread>
 #include <unordered_map>
+#include <map>
 
 #include "model/ResultTypes.h"
 #include "scan/ScanWorker.h"
+#include "scan/ScanProgress.h"
+#include "struct/StructureGraph.h"
 
 namespace breco {
 
@@ -33,7 +36,10 @@ public:
                    int workerCount, TextInterpretationMode mode, bool ignoreCase,
                    bool prefillOnMerge,
                    std::chrono::steady_clock::time_point scanButtonPressTime =
-                       std::chrono::steady_clock::time_point{});
+                       std::chrono::steady_clock::time_point{},
+                   std::shared_ptr<const StructureGraph> structureGraph = {},
+                   QString structureEntry = {},
+                   std::shared_ptr<const QHash<QString, VisualizationSource>> externalSources = {});
     void requestStop();
     bool isRunning() const;
     quint64 totalPlannedBytes() const;
@@ -45,8 +51,9 @@ public:
 
 signals:
     void scanStarted(int fileCount, quint64 totalBytes);
-    void progressUpdated(quint64 scannedBytes, quint64 totalBytes);
+    void progressUpdated(const breco::ScanProgressSnapshot& progress);
     void resultsBatchReady(const QVector<MatchRecord>& matches, int mergedTotal);
+    void lifecycleMessage(const QString& message);
     void scanFinished(bool stoppedByUser, bool autoStoppedLimitExceeded);
     void scanError(const QString& message);
 
@@ -65,6 +72,10 @@ private:
     quint64 fileSizeForTarget(int scanTargetIdx) const;
     void stopInternal(bool userStop);
     void emitProgress();
+    void finalizeScan();
+    void publishCompletedResults(bool force);
+    void cancelQueuedJobs();
+    void logLifecycle(const QString& message);
 
     QVector<ScanTarget> m_targets;
     QByteArray m_searchTerm;
@@ -72,9 +83,14 @@ private:
     TextInterpretationMode m_textMode = TextInterpretationMode::Ascii;
     bool m_ignoreCase = false;
     bool m_prefillOnMerge = true;
+    std::shared_ptr<const StructureGraph> m_structureGraph;
+    QString m_structureEntry;
+    quint32 m_matchLength = 1;
+    std::shared_ptr<const QHash<QString, VisualizationSource>> m_externalSources;
     std::chrono::steady_clock::time_point m_scanStartTime{};
     std::atomic<quint64> m_chunkCounter{0};
     std::atomic<quint64> m_totalScanned{0};
+    std::atomic<quint64> m_totalRawBytesRead{0};
     std::atomic<bool> m_stopRequested{false};
     std::atomic<bool> m_readerDone{false};
     std::atomic<int> m_idleWorkerCount{0};
@@ -91,11 +107,18 @@ private:
     mutable std::mutex m_trackerMutex;
     std::unordered_map<quint64, int> m_bufferJobsRemaining;
     std::atomic<quint64> m_nextBufferToken{1};
+    std::atomic<quint64> m_nextJobSequence{0};
+
+    mutable std::mutex m_completedJobsMutex;
+    std::map<quint64, ScanJobResult> m_completedJobs;
+    quint64 m_nextPublishSequence = 0;
 
     std::vector<std::unique_ptr<ScanWorker>> m_workers;
     std::thread m_readerThread;
 
     QTimer m_tickTimer;
+    ScanProgressTracker m_progressTracker;
+    std::chrono::steady_clock::time_point m_lastUiPublish{};
     bool m_running = false;
     bool m_userStopped = false;
     quint64 m_totalBytes = 0;

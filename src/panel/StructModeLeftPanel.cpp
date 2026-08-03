@@ -2,6 +2,7 @@
 
 #include "settings/AppSettings.h"
 #include "struct/StructDeclarationParser.h"
+#include "struct/StructureLibrary.h"
 #include "ui_StructModeLeftPanel.h"
 
 #include <QAbstractItemView>
@@ -28,6 +29,9 @@
 #include <QTextCursor>
 #include <QTextFormat>
 #include <QToolButton>
+#include <QTreeWidget>
+#include <QTreeWidgetItem>
+#include <QHBoxLayout>
 
 #include <algorithm>
 
@@ -62,6 +66,7 @@ QString structDeclarationDialogStartPath() {
 StructModeLeftPanel::StructModeLeftPanel(QWidget* parent)
     : QWidget(parent), m_ui(std::make_unique<Ui::StructModeLeftPanel>()) {
     m_ui->setupUi(this);
+    setupStructureLibrary();
 
     m_ui->previewEnabledCheckBox->setChecked(
         AppSettings::structPreviewEnabled());
@@ -97,6 +102,13 @@ StructModeLeftPanel::StructModeLeftPanel(QWidget* parent)
                 highlightSelectedEntry();
                 updatePreviewControls();
             });
+    connect(m_ui->scanStructureButton, &QToolButton::clicked, this, [this]() {
+        if (m_structureScanRunning) {
+            emit structureScanStopRequested();
+        } else if (!m_scanRunning && m_ui->scanStructureButton->isEnabled()) {
+            emit structureScanRequested();
+        }
+    });
     connect(m_ui->previewEnabledCheckBox, &QCheckBox::toggled, this,
             [this](bool checked) {
                 AppSettings::setStructPreviewEnabled(checked);
@@ -182,6 +194,10 @@ QToolButton* StructModeLeftPanel::removeViewButton() const {
     return m_ui->removeViewButton;
 }
 
+QToolButton* StructModeLeftPanel::scanStructureButton() const {
+    return m_ui->scanStructureButton;
+}
+
 QVBoxLayout* StructModeLeftPanel::structDeclarationLayout() const {
     return m_ui->structDeclarationLayout;
 }
@@ -257,6 +273,19 @@ void StructModeLeftPanel::setPreviewActive(bool active) {
 void StructModeLeftPanel::updatePreviewControls() {
     m_ui->previewEnabledCheckBox->setEnabled(canPreview());
     m_ui->addViewButton->setEnabled(previewEnabled() && canPreview());
+    m_ui->scanStructureButton->setEnabled(
+        m_structureScanRunning ||
+        (!m_scanRunning && m_parseValid &&
+         m_graph.entryHasEffectiveScanConstraint(
+             m_ui->entryComboBox->currentText())));
+}
+
+void StructModeLeftPanel::setScanState(bool running, bool structureScan) {
+    m_scanRunning = running;
+    m_structureScanRunning = running && structureScan;
+    m_ui->scanStructureButton->setText(
+        m_structureScanRunning ? QStringLiteral("Stop") : QStringLiteral("Scan"));
+    updatePreviewControls();
 }
 
 void StructModeLeftPanel::updateRemoveEnabled() {
@@ -403,8 +432,91 @@ bool StructModeLeftPanel::loadDeclarationFromFile(const QString& filePath) {
         return false;
     }
     m_ui->structDeclarationEdit->setPlainText(QString::fromUtf8(bytes));
+    const ParseResult parsed = parseStructDeclarationFile(filePath);
+    if (parsed.valid) {
+        m_graph = parsed.graph;
+        m_parseValid = true;
+        m_parseError.clear();
+        updateEntryCombo();
+        updateStatusAndErrorHighlight();
+        highlightSelectedEntry();
+        updatePreviewControls();
+        emit parseStateChanged();
+    }
     emit declarationFileLoaded(QFileInfo(filePath).absoluteFilePath());
     return true;
+}
+
+void StructModeLeftPanel::setupStructureLibrary() {
+    auto* container = new QWidget(this);
+    auto* layout = new QVBoxLayout(container);
+    layout->setContentsMargins(0, 0, 0, 0);
+    auto* controls = new QHBoxLayout();
+    auto* label = new QLabel(QStringLiteral("Structure library"), container);
+    auto* directoryButton = new QToolButton(container);
+    directoryButton->setText(QStringLiteral("Directory..."));
+    auto* refreshButton = new QToolButton(container);
+    refreshButton->setText(QStringLiteral("Refresh"));
+    controls->addWidget(label);
+    controls->addStretch();
+    controls->addWidget(directoryButton);
+    controls->addWidget(refreshButton);
+    m_libraryTree = new QTreeWidget(container);
+    m_libraryTree->setHeaderLabels({QStringLiteral("File / structure")});
+    m_libraryTree->setRootIsDecorated(true);
+    m_libraryTree->setMaximumHeight(150);
+    layout->addLayout(controls);
+    layout->addWidget(m_libraryTree);
+    m_ui->structModeLeftPanelLayout->insertWidget(1, container);
+    connect(directoryButton, &QToolButton::clicked, this,
+            &StructModeLeftPanel::chooseStructureLibraryDirectory);
+    connect(refreshButton, &QToolButton::clicked, this,
+            &StructModeLeftPanel::refreshStructureLibrary);
+    connect(m_libraryTree, &QTreeWidget::itemDoubleClicked, this,
+            [this](QTreeWidgetItem* item, int) {
+                if (item == nullptr) {
+                    return;
+                }
+                const QString path = item->data(0, Qt::UserRole).toString();
+                if (!path.isEmpty()) {
+                    loadDeclarationFromFile(path);
+                }
+            });
+    refreshStructureLibrary();
+}
+
+void StructModeLeftPanel::refreshStructureLibrary() {
+    QString directory = AppSettings::structureLibraryDirectory();
+    if (directory.isEmpty()) {
+        directory = StructureLibrary::defaultDirectory();
+    }
+    StructureLibrary::ensureDirectory(directory);
+    StructureLibrary library(directory);
+    m_libraryTree->clear();
+    for (const StructureLibraryFile& file : library.scan()) {
+        auto* fileItem = new QTreeWidgetItem(m_libraryTree, {file.relativePath});
+        fileItem->setData(0, Qt::UserRole, file.filePath);
+        if (!file.errorMessage.isEmpty()) {
+            fileItem->setToolTip(0, file.errorMessage);
+        }
+        for (const QString& entry : file.entries) {
+            auto* entryItem = new QTreeWidgetItem(fileItem, {entry});
+            entryItem->setData(0, Qt::UserRole, file.filePath);
+        }
+    }
+}
+
+void StructModeLeftPanel::chooseStructureLibraryDirectory() {
+    const QString current = AppSettings::structureLibraryDirectory().isEmpty()
+                                ? StructureLibrary::defaultDirectory()
+                                : AppSettings::structureLibraryDirectory();
+    const QString selected = QFileDialog::getExistingDirectory(
+        this, QStringLiteral("Select structure library directory"), current);
+    if (selected.isEmpty()) {
+        return;
+    }
+    AppSettings::setStructureLibraryDirectory(QFileInfo(selected).absoluteFilePath());
+    refreshStructureLibrary();
 }
 
 bool StructModeLeftPanel::saveDeclarationToFile(const QString& filePath) const {

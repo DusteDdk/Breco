@@ -81,6 +81,16 @@
          </widget>
         </item>
         <item>
+         <widget class="QToolButton" name="scanStructureButton">
+          <property name="enabled">
+           <bool>false</bool>
+          </property>
+          <property name="text">
+           <string>Scan</string>
+          </property>
+         </widget>
+        </item>
+        <item>
          <widget class="QSpinBox" name="entryCountSpinBox">
           <property name="minimum">
            <number>1</number>

@@ -852,6 +852,34 @@ has a Boolean `/cond`.
 The decoded tree reports names, types, decorations, byte order, raw bytes,
 values, missing-byte counts, child nodes, and validity/error information.
 
+## Named output formats
+
+Top-level `outform` declarations define reusable structure-export templates:
+
+```text
+outform xml text {
+<structure name="{{name}}">{{#children}}
+  <field name="{{name}}">{{value}}</field>{{/children}}
+</structure>
+}
+```
+
+The name identifies the format. The required mode is `text` or `binary`; both
+modes currently render UTF-8 text, with `binary` reserved for future binary
+template behavior. Outforms in transitively included files are available to
+the including script.
+
+Bodies support `{{name}}`, `{{type}}`, `{{value}}`, `{{offset}}`,
+`{{length}}`, `{{bytes}}`, `{{path}}`, and `{{valid}}`, plus
+`{{#children}}...{{/children}}`. Ordinary balanced braces may appear in the
+body. Use `\{` or `\}` when an unmatched literal brace is needed; the escape
+slash is not included in the stored template.
+
+In each Struct data-tree export scope, the **outform...** submenu lists every
+declared format as `filename: outformname`. The declaring filename makes
+same-named outforms from different included files distinguishable. With no
+declarations, the submenu contains a disabled `no outforms declared` entry.
+
 ## Command-line use
 
 The current command shape is:
@@ -860,7 +888,8 @@ The current command shape is:
 brecodump [-s STRUCT_DECLARATION_FILE] -i BINARY_FILE_NAME
           [-e ENTRY_NAME=last]
           [-ofs BYTE_OFFSET=0] [-bs BITSHIFT=0]
-          [-r REPEATNUM=1] [-o OUTPUT_FILE=stdout] [-h|--help]
+          [-r REPEATNUM=1] [-outform NAME]
+          [-o OUTPUT_FILE=stdout] [-h|--help]
 ```
 
 With `-s`, the declaration is read from the named UTF-8 file. Without `-s`,
@@ -878,6 +907,10 @@ the byte offset before decoding, `-bs` applies the requested bit shift to the
 selected input window, and `-r` chooses the consecutive entry count. JSON is
 written to standard output unless `-o` is supplied. Its `metadata.entrypoint`
 property records the effective entry name.
+
+`-outform NAME` renders the decoded node with that declared outform instead of
+producing the default JSON envelope. An unknown name is an error listing the
+available outforms. Omitting it preserves the JSON output behavior.
 
 Within each decoded object, fields are serialized in declaration order, which
 is also their order in the binary stream. A scalar field object starts with
@@ -930,8 +963,10 @@ than a parser-generator grammar:
 
 ```text
 file              := file-item+
-file-item         := default-directive | declaration
+file-item         := default-directive | outform-declaration | declaration
 default-directive := "/default" IDENT ";"?
+outform-declaration := "outform" IDENT ("text" | "binary")
+                       "{" template-body "}" ";"?
 declaration       := struct-declaration
                    | typedef-declaration
                    | standalone-field
@@ -983,7 +1018,6 @@ BrecoScript intentionally does not implement:
 - enums or named constants;
 - unions or variant selection;
 - pointers;
-- includes or modules;
 - absolute or relative seek operations;
 - alignment or automatic padding;
 - general Boolean expressions;

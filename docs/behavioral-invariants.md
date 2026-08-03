@@ -73,6 +73,10 @@ prevPrinted -->|No| visibleFalseNonPrinted["Hidden"]
 - Worker count is always at least `1`.
 - Block size is always at least `1`.
 - Stop requests are cooperative (atomic flag + CV wake); no forced thread termination.
+- Stop cancels never-started queued jobs, drains active jobs, publishes their partial matches,
+  and always completes through the normal finalization signal path.
+- Result rows are published in scan-job order while scanning; every published row has a
+  placeholder or resident buffer mapping before the UI receives it.
 
 Evidence:
 - `src/scan/ScanController.cpp`

@@ -54,6 +54,7 @@ constexpr const char* kViewScanLogVisibleKey = "ui/viewScanLogVisible";
 constexpr const char* kViewEditsVisibleKey = "ui/viewEditsVisible";
 constexpr const char* kLastStructDefinitionFilePathKey =
     "ui/lastStructDefinitionFilePath";
+constexpr const char* kStructureLibraryDirectoryKey = "ui/structureLibraryDirectory";
 constexpr const char* kStructDeclarationTextKey = "ui/structDeclarationText";
 constexpr const char* kStructEntryNameKey = "ui/structEntryName";
 constexpr const char* kStructEntryCountKey = "ui/structEntryCount";
@@ -351,6 +352,11 @@ QString AppSettings::lastStructDefinitionFilePath() {
     return settings.value(kLastStructDefinitionFilePathKey, QString()).toString();
 }
 
+QString AppSettings::structureLibraryDirectory() {
+    QSettings settings(kOrg, kApp);
+    return settings.value(kStructureLibraryDirectoryKey, QString()).toString();
+}
+
 QString AppSettings::structDeclarationText() {
     QSettings settings(kOrg, kApp);
     return settings.value(kStructDeclarationTextKey, QString()).toString();
@@ -550,6 +556,11 @@ void AppSettings::setViewEditsVisible(bool visible) {
 void AppSettings::setLastStructDefinitionFilePath(const QString& path) {
     QSettings settings(kOrg, kApp);
     settings.setValue(kLastStructDefinitionFilePathKey, path);
+}
+
+void AppSettings::setStructureLibraryDirectory(const QString& path) {
+    QSettings settings(kOrg, kApp);
+    settings.setValue(kStructureLibraryDirectoryKey, path);
 }
 
 void AppSettings::setStructDeclarationText(const QString& text) {

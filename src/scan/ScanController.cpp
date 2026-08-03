@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <iostream>
 #include <limits>
-#include <queue>
 #include <utility>
 
 #include <QThread>
@@ -17,6 +16,7 @@ namespace {
 constexpr quint64 kMergeGapBytes = 16ULL * 1024ULL * 1024ULL;
 constexpr quint64 kResultPaddingBytes = 8ULL * 1024ULL * 1024ULL;
 constexpr quint64 kMaxResultBufferBytes = 128ULL * 1024ULL * 1024ULL;
+constexpr auto kUiPublishInterval = std::chrono::seconds(2);
 }
 
 ScanController::ScanController(OpenFilePool* filePool, QObject* parent) : QObject(parent) {
@@ -39,12 +39,15 @@ ScanController::~ScanController() {
 void ScanController::startScan(const QVector<ScanTarget>& targets, const QByteArray& searchTerm,
                                quint32 blockSize, int workerCount, TextInterpretationMode mode,
                                bool ignoreCase, bool prefillOnMerge,
-                               std::chrono::steady_clock::time_point scanButtonPressTime) {
+                               std::chrono::steady_clock::time_point scanButtonPressTime,
+                               std::shared_ptr<const StructureGraph> structureGraph,
+                               QString structureEntry,
+                               std::shared_ptr<const QHash<QString, VisualizationSource>> externalSources) {
     if (m_running) {
         emit scanError(QStringLiteral("Scan already running"));
         return;
     }
-    if (searchTerm.isEmpty()) {
+    if (searchTerm.isEmpty() && structureGraph == nullptr) {
         emit scanError(QStringLiteral("Search term must not be empty"));
         return;
     }
@@ -67,11 +70,20 @@ void ScanController::startScan(const QVector<ScanTarget>& targets, const QByteAr
     }
 
     m_searchTerm = searchTerm;
+    m_structureGraph = std::move(structureGraph);
+    m_structureEntry = std::move(structureEntry);
+    m_externalSources = std::move(externalSources);
+    m_matchLength = 1;
+    if (m_structureGraph != nullptr) {
+        m_matchLength = static_cast<quint32>(qMax(
+            1, m_structureGraph->staticStructLayoutSizeBytes(m_structureEntry).value_or(1)));
+    }
     m_blockSize = qMax<quint32>(1, blockSize);
     m_textMode = mode;
     m_ignoreCase = ignoreCase;
     m_prefillOnMerge = prefillOnMerge;
     m_totalScanned.store(0, std::memory_order_release);
+    m_totalRawBytesRead.store(0, std::memory_order_release);
     m_stopRequested.store(false, std::memory_order_release);
     m_readerDone.store(false, std::memory_order_release);
     m_userStopped = false;
@@ -92,7 +104,12 @@ void ScanController::startScan(const QVector<ScanTarget>& targets, const QByteAr
     }
     m_idleWorkerCount.store(m_workerCount, std::memory_order_release);
 
-    auto onJobComplete = [this](int workerId, quint64 bufferToken) {
+    auto onJobComplete = [this](int workerId, ScanJobResult result) {
+        const quint64 bufferToken = result.bufferToken;
+        {
+            std::lock_guard<std::mutex> completedLock(m_completedJobsMutex);
+            m_completedJobs.emplace(result.sequence, std::move(result));
+        }
         markJobTokenCompleted(bufferToken);
         m_pendingCv.notify_all();
 
@@ -100,7 +117,7 @@ void ScanController::startScan(const QVector<ScanTarget>& targets, const QByteAr
         bool hasQueuedJob = false;
         {
             std::lock_guard<std::mutex> queuedLock(m_queuedJobsMutex);
-            if (!m_queuedJobs.empty()) {
+            if (!m_stopRequested.load(std::memory_order_acquire) && !m_queuedJobs.empty()) {
                 queuedJob = m_queuedJobs.front();
                 m_queuedJobs.pop_front();
                 hasQueuedJob = true;
@@ -135,7 +152,9 @@ void ScanController::startScan(const QVector<ScanTarget>& targets, const QByteAr
         m_workers.push_back(std::make_unique<ScanWorker>(i, m_searchTerm, m_textMode, m_ignoreCase,
                                                          &m_totalScanned,
                                                          m_scanStartTime,
-                                                         onJobComplete));
+                                                         onJobComplete, m_structureGraph,
+                                                         m_structureEntry,
+                                                         m_externalSources));
     }
     for (const auto& worker : m_workers) {
         worker->start();
@@ -144,11 +163,19 @@ void ScanController::startScan(const QVector<ScanTarget>& targets, const QByteAr
     m_readerThread = std::thread([this]() { readerLoop(); });
 
     m_running = true;
+    const auto now = std::chrono::steady_clock::now();
+    m_progressTracker.reset(0, 0, now);
+    m_lastUiPublish = now;
     m_tickTimer.start();
-    std::cout << "[scan] started: files=" << m_fileCount << " totalBytes=" << m_totalBytes
-              << " workers=" << m_workerCount << " blockSize=" << m_blockSize
-              << " prefillOnMerge=" << (m_prefillOnMerge ? "true" : "false") << std::endl;
     emit scanStarted(m_fileCount, m_totalBytes);
+    logLifecycle(QStringLiteral("[scan] started: files=%1 totalBytes=%2 workers=%3 blockSize=%4 "
+                                "prefillOnMerge=%5")
+                     .arg(m_fileCount)
+                     .arg(m_totalBytes)
+                     .arg(m_workerCount)
+                     .arg(m_blockSize)
+                     .arg(m_prefillOnMerge ? QStringLiteral("true") : QStringLiteral("false")));
+    emit progressUpdated(ScanProgressSnapshot{0, m_totalBytes, 0, 0.0, 0.0});
 }
 
 void ScanController::requestStop() {
@@ -171,7 +198,8 @@ const QVector<ResultBuffer>& ScanController::resultBuffers() const { return m_re
 const QVector<int>& ScanController::matchBufferIndices() const { return m_matchBufferIndices; }
 
 quint32 ScanController::searchTermLength() const {
-    return static_cast<quint32>(qMax(1, m_searchTerm.size()));
+    return m_structureGraph != nullptr ? m_matchLength
+                                       : static_cast<quint32>(qMax(1, m_searchTerm.size()));
 }
 
 void ScanController::onTick() {
@@ -179,7 +207,12 @@ void ScanController::onTick() {
         return;
     }
 
-    emitProgress();
+    const auto now = std::chrono::steady_clock::now();
+    if (now - m_lastUiPublish >= kUiPublishInterval) {
+        publishCompletedResults(false);
+        emitProgress();
+        m_lastUiPublish = now;
+    }
 
     if (!m_readerDone.load(std::memory_order_acquire)) {
         return;
@@ -187,17 +220,27 @@ void ScanController::onTick() {
 
     m_tickTimer.stop();
     joinReaderAndWorkers();
-    std::cout << "[scan] merging started" << std::endl;
+    publishCompletedResults(true);
+    emitProgress();
+    logLifecycle(QStringLiteral("[scan] merging started: results=%1").arg(m_finalMatches.size()));
+    QTimer::singleShot(1, this, &ScanController::finalizeScan);
+}
+
+void ScanController::finalizeScan() {
+    if (!m_running) {
+        return;
+    }
     buildFinalResults();
-    std::cout << "[scan] merging finished: matches=" << m_finalMatches.size()
-              << " buffers=" << m_resultBuffers.size() << std::endl;
+    logLifecycle(QStringLiteral("[scan] merging finished: matches=%1 buffers=%2")
+                     .arg(m_finalMatches.size())
+                     .arg(m_resultBuffers.size()));
 
     m_running = false;
-    emitProgress();
-    emit resultsBatchReady(m_finalMatches, m_finalMatches.size());
-    std::cout << "[scan] finished: stoppedByUser=" << (m_userStopped ? "true" : "false")
-              << " scannedBytes=" << m_totalScanned.load(std::memory_order_relaxed)
-              << " totalBytes=" << m_totalBytes << std::endl;
+    emit resultsBatchReady({}, m_finalMatches.size());
+    logLifecycle(QStringLiteral("[scan] finished: stoppedByUser=%1 scannedBytes=%2 totalBytes=%3")
+                     .arg(m_userStopped ? QStringLiteral("true") : QStringLiteral("false"))
+                     .arg(m_totalScanned.load(std::memory_order_relaxed))
+                     .arg(m_totalBytes));
     emit scanFinished(m_userStopped, false);
 }
 
@@ -235,7 +278,14 @@ void ScanController::clearRuntimeState() {
     m_stopRequested.store(false, std::memory_order_release);
     m_readerDone.store(false, std::memory_order_release);
     m_totalScanned.store(0, std::memory_order_release);
+    m_totalRawBytesRead.store(0, std::memory_order_release);
     m_nextBufferToken.store(1, std::memory_order_release);
+    m_nextJobSequence.store(0, std::memory_order_release);
+    {
+        std::lock_guard<std::mutex> lock(m_completedJobsMutex);
+        m_completedJobs.clear();
+    }
+    m_nextPublishSequence = 0;
     m_chunkCounter.store(0, std::memory_order_release);
     m_scanStartTime = std::chrono::steady_clock::time_point{};
     if (m_filePool != nullptr) {
@@ -260,8 +310,13 @@ void ScanController::joinReaderAndWorkers() {
 }
 
 void ScanController::readerLoop() {
-    const quint32 overlap =
-        static_cast<quint32>(m_searchTerm.size() > 0 ? m_searchTerm.size() - 1 : 0);
+    const quint32 overlap = m_structureGraph != nullptr
+                                ? (m_structureGraph->staticStructLayoutSizeBytes(m_structureEntry)
+                                           .has_value()
+                                       ? m_matchLength - 1
+                                       : 64U * 1024U)
+                                : static_cast<quint32>(m_searchTerm.size() > 0
+                                                          ? m_searchTerm.size() - 1 : 0);
     const int maxPendingBuffers = qMax(1, m_workerCount * 2);
 
     for (int targetIdx = 0; targetIdx < m_targets.size(); ++targetIdx) {
@@ -304,6 +359,11 @@ void ScanController::readerLoop() {
                           << " outputSize=" << outputSize << std::endl;
                 break;
             }
+            m_totalRawBytesRead.fetch_add(static_cast<quint64>(rawWindow->bytes.size()),
+                                         std::memory_order_relaxed);
+            if (m_stopRequested.load(std::memory_order_acquire)) {
+                break;
+            }
 
             auto buffer = std::make_shared<ReadBuffer>();
             buffer->scanTargetIdx = targetIdx;
@@ -344,6 +404,7 @@ void ScanController::readerLoop() {
                     qMin<quint64>(jobSize64, std::numeric_limits<quint32>::max()));
                 job.reportLimit = static_cast<quint32>(
                     qMin<quint64>(jobPrimary, std::numeric_limits<quint32>::max()));
+                job.sequence = m_nextJobSequence.fetch_add(1, std::memory_order_acq_rel);
                 if (job.size > 0 && job.reportLimit > 0) {
                     jobs.push_back(job);
                 }
@@ -378,6 +439,17 @@ void ScanController::readerLoop() {
                 std::cerr << "[scan][warn] invalid job partitioning for chunk " << chunkId
                           << " primarySize=" << primarySize << " jobs=" << jobs.size()
                           << " overlap=" << overlap << std::endl;
+            }
+
+            if (m_stopRequested.load(std::memory_order_acquire)) {
+                for (const ScanJob& job : jobs) {
+                    ScanJobResult result;
+                    result.sequence = job.sequence;
+                    result.bufferToken = job.bufferToken;
+                    std::lock_guard<std::mutex> lock(m_completedJobsMutex);
+                    m_completedJobs.emplace(result.sequence, std::move(result));
+                }
+                break;
             }
 
             if (!jobs.isEmpty()) {
@@ -471,89 +543,6 @@ void ScanController::markJobTokenCompleted(quint64 bufferToken) {
 }
 
 void ScanController::buildFinalResults() {
-    m_finalMatches.clear();
-    auto matchLess = [](const MatchRecord& lhs, const MatchRecord& rhs) {
-        if (lhs.scanTargetIdx != rhs.scanTargetIdx) {
-            return lhs.scanTargetIdx < rhs.scanTargetIdx;
-        }
-        if (lhs.offset != rhs.offset) {
-            return lhs.offset < rhs.offset;
-        }
-        return lhs.threadId < rhs.threadId;
-    };
-
-    struct MergeCursor {
-        int workerIdx = 0;
-        int matchIdx = 0;
-    };
-
-    quint64 totalMatches = 0;
-    bool workerStreamsSorted = true;
-    for (int workerIdx = 0; workerIdx < static_cast<int>(m_workers.size()); ++workerIdx) {
-        const QVector<MatchRecord>& workerMatches = m_workers[workerIdx]->matches();
-        totalMatches += static_cast<quint64>(workerMatches.size());
-        for (int i = 1; i < workerMatches.size(); ++i) {
-            if (matchLess(workerMatches.at(i), workerMatches.at(i - 1))) {
-                workerStreamsSorted = false;
-                break;
-            }
-        }
-        if (!workerStreamsSorted) {
-            break;
-        }
-    }
-
-    m_finalMatches.reserve(static_cast<int>(qMin<quint64>(
-        totalMatches, static_cast<quint64>(std::numeric_limits<int>::max()))));
-    if (!workerStreamsSorted) {
-        std::cerr << "[scan][warn] worker match stream order invalid, falling back to global sort"
-                  << std::endl;
-        for (int workerIdx = 0; workerIdx < static_cast<int>(m_workers.size()); ++workerIdx) {
-            const QVector<MatchRecord>& workerMatches = m_workers[workerIdx]->matches();
-            for (const MatchRecord& match : workerMatches) {
-                m_finalMatches.push_back(match);
-            }
-        }
-        std::sort(m_finalMatches.begin(), m_finalMatches.end(), matchLess);
-        buildResultBuffers();
-        return;
-    }
-
-    auto cursorIsLowerPriority = [this](const MergeCursor& lhs, const MergeCursor& rhs) {
-        const MatchRecord& left = m_workers[lhs.workerIdx]->matches().at(lhs.matchIdx);
-        const MatchRecord& right = m_workers[rhs.workerIdx]->matches().at(rhs.matchIdx);
-        if (left.scanTargetIdx != right.scanTargetIdx) {
-            return left.scanTargetIdx > right.scanTargetIdx;
-        }
-        if (left.offset != right.offset) {
-            return left.offset > right.offset;
-        }
-        return lhs.workerIdx > rhs.workerIdx;
-    };
-
-    std::priority_queue<MergeCursor, std::vector<MergeCursor>,
-                        decltype(cursorIsLowerPriority)>
-        mergeHeap(cursorIsLowerPriority);
-
-    for (int workerIdx = 0; workerIdx < static_cast<int>(m_workers.size()); ++workerIdx) {
-        if (!m_workers[workerIdx]->matches().isEmpty()) {
-            mergeHeap.push(MergeCursor{workerIdx, 0});
-        }
-    }
-
-    while (!mergeHeap.empty()) {
-        const MergeCursor cursor = mergeHeap.top();
-        mergeHeap.pop();
-
-        const QVector<MatchRecord>& matches = m_workers[cursor.workerIdx]->matches();
-        m_finalMatches.push_back(matches.at(cursor.matchIdx));
-
-        const int nextMatchIdx = cursor.matchIdx + 1;
-        if (nextMatchIdx < matches.size()) {
-            mergeHeap.push(MergeCursor{cursor.workerIdx, nextMatchIdx});
-        }
-    }
-
     buildResultBuffers();
 }
 
@@ -682,11 +671,71 @@ quint64 ScanController::fileSizeForTarget(int scanTargetIdx) const {
 void ScanController::stopInternal(bool userStop) {
     m_stopRequested.store(true, std::memory_order_release);
     m_userStopped = m_userStopped || userStop;
+    cancelQueuedJobs();
+    for (const auto& worker : m_workers) {
+        worker->requestStop();
+        worker->wakeForStop();
+    }
     m_pendingCv.notify_all();
 }
 
 void ScanController::emitProgress() {
-    emit progressUpdated(m_totalScanned.load(std::memory_order_relaxed), m_totalBytes);
+    emit progressUpdated(m_progressTracker.sample(
+        m_totalScanned.load(std::memory_order_relaxed), m_totalBytes,
+        m_totalRawBytesRead.load(std::memory_order_relaxed)));
+}
+
+void ScanController::publishCompletedResults(bool) {
+    QVector<MatchRecord> batch;
+    {
+        std::lock_guard<std::mutex> lock(m_completedJobsMutex);
+        for (;;) {
+            auto it = m_completedJobs.find(m_nextPublishSequence);
+            if (it == m_completedJobs.end()) {
+                break;
+            }
+            batch += it->second.matches;
+            m_completedJobs.erase(it);
+            ++m_nextPublishSequence;
+        }
+    }
+    if (batch.isEmpty()) {
+        return;
+    }
+    for (const MatchRecord& match : batch) {
+        m_finalMatches.push_back(match);
+        ResultBuffer buffer;
+        buffer.scanTargetIdx = match.scanTargetIdx;
+        buffer.fileOffset = match.offset;
+        m_matchBufferIndices.push_back(m_resultBuffers.size());
+        m_resultBuffers.push_back(std::move(buffer));
+    }
+    emit resultsBatchReady(batch, m_finalMatches.size());
+    logLifecycle(QStringLiteral("[scan] results found: %1").arg(m_finalMatches.size()));
+}
+
+void ScanController::cancelQueuedJobs() {
+    std::deque<ScanJob> cancelled;
+    {
+        std::lock_guard<std::mutex> lock(m_queuedJobsMutex);
+        cancelled.swap(m_queuedJobs);
+    }
+    for (const ScanJob& job : cancelled) {
+        ScanJobResult result;
+        result.sequence = job.sequence;
+        result.bufferToken = job.bufferToken;
+        {
+            std::lock_guard<std::mutex> lock(m_completedJobsMutex);
+            m_completedJobs.emplace(result.sequence, std::move(result));
+        }
+        markJobTokenCompleted(job.bufferToken);
+    }
+    m_pendingCv.notify_all();
+}
+
+void ScanController::logLifecycle(const QString& message) {
+    std::cout << message.toStdString() << std::endl;
+    emit lifecycleMessage(message);
 }
 
 }  // namespace breco

@@ -84,6 +84,8 @@ QString combineDecoration(const QString& typeDecoration, const QString& fieldDec
 struct ReadCursor {
     const QByteArray* data = nullptr;
     size_t offset = 0;
+    quint64 baseOffset = 0;
+    QString filePath;
 
     size_t remaining() const {
         if (data == nullptr) {
@@ -103,8 +105,9 @@ struct ReadCursor {
 };
 
 void setSourceOffset(VisualizedNode& node, const ReadCursor& cursor) {
-    node.sourceOffset = static_cast<quint64>(cursor.offset);
+    node.sourceOffset = cursor.baseOffset + static_cast<quint64>(cursor.offset);
     node.hasSourceOffset = true;
+    node.sourceFilePath = cursor.filePath;
 }
 
 void updateSourceLengths(VisualizedNode& node) {
@@ -138,6 +141,7 @@ using EvaluatedValue = std::variant<qint64, quint64, QString, QByteArray, bool>;
 struct DecodeContext {
     Endianness defaultEndianness = Endianness::Little;
     QVector<QHash<QString, EvaluatedValue>> scopes;
+    QHash<QString, ReadCursor> externalCursors;
 
     void enterScope() { scopes.push_back({}); }
 
@@ -1094,6 +1098,23 @@ std::optional<int> staticFieldSize(const StructureGraph& graph,
 
 DecodeResult decodeMember(const StructureGraph& graph, const StructMember& member,
                           ReadCursor& cursor, DecodeContext& context) {
+    if (!member.attributes.sourceRole.isEmpty()) {
+        auto found = context.externalCursors.find(member.attributes.sourceRole);
+        if (found == context.externalCursors.end()) {
+            DecodeResult missing;
+            missing.node.name = member.name;
+            missing.node.typeName = member.typeDisplayName;
+            missing.node.declarationRange = member.nameRange;
+            missing.node.decoration = member.attributes.decoration;
+            invalidate(missing, QStringLiteral("External source role '%1' is not bound")
+                                    .arg(member.attributes.sourceRole));
+            missing.invalidatesContainer = true;
+            return missing;
+        }
+        StructMember externalMember = member;
+        externalMember.attributes.sourceRole.clear();
+        return decodeMember(graph, externalMember, found.value(), context);
+    }
     DecodeResult result;
     setSourceOffset(result.node, cursor);
     result.node.declarationRange = member.nameRange;
@@ -1395,20 +1416,37 @@ DecodeResult decodeEntry(const StructureGraph& graph, const QString& entryName,
 VisualizedNode visualize(const StructureGraph& graph, const QString& entryName,
                          const QByteArray& dataBuffer, size_t dataStartOffset,
                          int entryCount, Endianness defaultEndianness) {
+    VisualizationSource primary;
+    primary.bytes = dataBuffer;
+    return visualize(graph, entryName, primary, dataStartOffset, entryCount, {},
+                     defaultEndianness);
+}
+
+VisualizedNode visualize(const StructureGraph& graph, const QString& entryName,
+                         const VisualizationSource& primarySource,
+                         size_t dataStartOffset, int entryCount,
+                         const QHash<QString, VisualizationSource>& externalSources,
+                         Endianness defaultEndianness) {
     VisualizedNode root;
     root.name = QStringLiteral("root");
     root.valueKind = VisualizedValueKind::Array;
     if (entryCount < 1) {
         entryCount = 1;
     }
-    if (dataStartOffset > static_cast<size_t>(dataBuffer.size())) {
+    if (dataStartOffset > static_cast<size_t>(primarySource.bytes.size())) {
         return root;
     }
 
-    ReadCursor cursor{&dataBuffer, dataStartOffset};
+    ReadCursor cursor{&primarySource.bytes, dataStartOffset,
+                      primarySource.baseOffset, primarySource.filePath};
+    DecodeContext sharedContext;
+    sharedContext.defaultEndianness = defaultEndianness;
+    for (auto it = externalSources.constBegin(); it != externalSources.constEnd(); ++it) {
+        sharedContext.externalCursors.insert(
+            it.key(), ReadCursor{&it->bytes, 0, it->baseOffset, it->filePath});
+    }
     for (int i = 0; i < entryCount && cursor.remaining() > 0; ++i) {
-        DecodeContext context;
-        context.defaultEndianness = defaultEndianness;
+        DecodeContext& context = sharedContext;
         context.enterScope();
         const size_t before = cursor.offset;
         const QString chunkLabel =

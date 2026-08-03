@@ -24,8 +24,6 @@
 
 #include "ui_DataViewImage.h"
 
-#include <array>
-
 namespace breco {
 
 namespace {
@@ -117,19 +115,6 @@ void saveEncodedImage(QWidget* parent, const EmbeddedImageResult& result, int im
         QMessageBox::warning(parent, QStringLiteral("Save File"),
                              QStringLiteral("Could not save the image to %1.").arg(path));
     }
-}
-
-QString progressBytesText(quint64 bytes) {
-    static constexpr std::array<const char*, 4> kUnits = {"KiB", "MiB", "GiB", "TiB"};
-    double value = static_cast<double>(bytes) / 1024.0;
-    int unitIndex = 0;
-    while (value >= 1024.0 && unitIndex < static_cast<int>(kUnits.size()) - 1) {
-        value /= 1024.0;
-        ++unitIndex;
-    }
-    return QStringLiteral("%1 %2")
-        .arg(value, 0, 'f', 2)
-        .arg(QString::fromLatin1(kUnits.at(unitIndex)));
 }
 
 }  // namespace
@@ -252,30 +237,23 @@ void DataViewImagePanel::resetProgress() {
     m_ui->fileProgressBar->setMaximum(1000);
     m_ui->fileProgressBar->setValue(0);
     m_ui->fileProgressBar->setTextVisible(true);
-    m_ui->fileProgressBar->setFormat(
-        QStringLiteral("%1 / %2").arg(progressBytesText(0)).arg(progressBytesText(0)));
-    m_fileProgressTextTimer.invalidate();
+    m_ui->fileProgressBar->setFormat(formatScanProgress({}));
     m_ui->resultsProgressBar->setMaximum(1000);
     m_ui->resultsProgressBar->setValue(0);
     m_ui->resultsProgressBar->setFormat(QStringLiteral("0 / %1").arg(m_ui->maxResultsSpinBox->value()));
     updateResultsProgressVisibility(m_ui->maxResultsSpinBox->value());
 }
 
-void DataViewImagePanel::updateProgress(quint64 bytesScanned, quint64 bytesTotal,
+void DataViewImagePanel::updateProgress(const ScanProgressSnapshot& progress,
                                         int resultsFound, int resultsLimit) {
+    const quint64 bytesScanned = progress.scannedBytes;
+    const quint64 bytesTotal = progress.totalBytes;
     const int fileValue =
         bytesTotal == 0
             ? 0
             : static_cast<int>(qMin<quint64>(1000ULL, (bytesScanned * 1000ULL) / bytesTotal));
     m_ui->fileProgressBar->setValue(fileValue);
-    const bool forceTextUpdate = bytesScanned == 0 || bytesScanned >= bytesTotal;
-    if (forceTextUpdate || !m_fileProgressTextTimer.isValid() ||
-        m_fileProgressTextTimer.elapsed() >= 1000) {
-        m_ui->fileProgressBar->setFormat(QStringLiteral("%1 / %2")
-                                             .arg(progressBytesText(bytesScanned))
-                                             .arg(progressBytesText(bytesTotal)));
-        m_fileProgressTextTimer.restart();
-    }
+    m_ui->fileProgressBar->setFormat(formatScanProgress(progress));
     if (resultsLimit > 0) {
         m_ui->resultsProgressBar->setVisible(true);
         if (m_ui->resultsProgressLabel != nullptr) {

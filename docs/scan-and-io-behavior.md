@@ -8,7 +8,7 @@ This document captures scanning and file I/O behavior as currently implemented.
 
 - one reader thread (`readerLoop()`)
 - `N` worker threads (`ScanWorker`)
-- Qt timer (`m_tickTimer`, 100ms) on main thread for progress + completion checks
+- Qt timer (`m_tickTimer`, 100ms) on main thread for completion checks; progress and result UI publication is throttled to two seconds
 - several synchronization structures:
   - idle worker deque (`m_idleWorkers`)
   - queued jobs deque (`m_queuedJobs`)
@@ -16,8 +16,9 @@ This document captures scanning and file I/O behavior as currently implemented.
 
 The controller emits Qt signals to `MainWindow`:
 - `scanStarted(fileCount, totalBytes)`
-- `progressUpdated(scannedBytes, totalBytes)`
-- `resultsBatchReady(matches, mergedTotal)`
+- `progressUpdated(ScanProgressSnapshot)`
+- `resultsBatchReady(matches, mergedTotal)` for ordered incremental batches and a final buffer-map refresh
+- `lifecycleMessage(message)` for identical stdout/UI lifecycle reporting
 - `scanFinished(stoppedByUser, autoStoppedLimitExceeded)`
 - `scanError(message)`
 
@@ -93,7 +94,8 @@ Backpressure is handled at two levels:
 1. stop timer
 2. join reader + workers
 3. run `buildFinalResults()`
-4. emit final `resultsBatchReady(...)` (single merged batch)
+4. flush the final incremental result batch and rebuild result buffers
+5. emit a final empty `resultsBatchReady(...)` to refresh buffer mappings without duplicating rows
 5. emit `scanFinished(...)`
 
 ### `buildFinalResults()` merge behavior

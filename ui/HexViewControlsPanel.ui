@@ -132,6 +132,11 @@
           <string>UTF-16</string>
          </property>
         </item>
+        <item>
+         <property name="text">
+          <string>Classic</string>
+         </property>
+        </item>
        </widget>
       </item>
       <item row="2" column="0">

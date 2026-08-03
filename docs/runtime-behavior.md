@@ -122,8 +122,9 @@ Notable startup behavior:
 1. `ScanController::startScan()` validates run preconditions (not already running, non-empty term, non-empty readable target list), spawns workers, starts reader thread, starts tick timer, emits `scanStarted`.
 2. Reader thread (`ScanController::readerLoop()`) reads target data in blocks with overlap and dispatches jobs.
 3. Worker completions update pending-buffer tracking and either take queued jobs or return to idle pool.
-4. Timer tick (`ScanController::onTick()`) emits periodic progress and checks reader completion.
-5. After reader done, controller joins threads, merges matches, builds buffers, emits one `resultsBatchReady` and then `scanFinished`.
+4. Timer ticks check completion continuously and publish progress plus ordered result batches every two seconds.
+5. Stop cancels queued jobs, drains active jobs, and preserves their partial matches.
+6. After the reader is done, the controller flushes remaining results, reports the merging lifecycle state, rebuilds buffers, refreshes mappings, and emits `scanFinished`.
 6. `MainWindow::onResultsBatchReady()` imports result buffers/mapping, appends matches to model, enforces cache budget, rebuilds overlap intervals, prints merged count status.
 7. `MainWindow::onScanFinished()` sets button back to `Scan`, writes completion status, and auto-selects first row if any results exist.
 
@@ -246,7 +247,8 @@ Hovering an image highlights its result card. Left-clicking calls `MainWindow::j
   - little-endian and big-endian reads where enough bytes are available
   - large char display with big-endian/little-endian char toggle
   - caption highlighting based on available width (1/2/4/8 bytes)
-- Status bar output is lifecycle/capacity oriented (`Scanning...`, `Merged results: ...`, `Scan finished`, buffer residency line).
+- Status output is lifecycle/capacity oriented (structured `[scan] started`, live result-count,
+  merging, and finished messages, plus the buffer residency line).
 - Duplicate status lines are suppressed by `writeStatusLineToStdout()` using last-line memoization.
 
 ## Signal/Slot Flow Map

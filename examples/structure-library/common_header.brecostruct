@@ -1,0 +1,9 @@
+/*
+ * Reusable declaration included by packet_with_include.brecostruct.
+ * Included paths are resolved relative to the file containing the include.
+ */
+
+struct CommonHeader {
+    /cond(="BR") asciistr<len:2> magic;
+    uint8 version;
+}

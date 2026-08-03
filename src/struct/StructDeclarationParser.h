@@ -14,5 +14,6 @@ struct ParseResult {
 };
 
 ParseResult parseStructDeclaration(const QString& text);
+ParseResult parseStructDeclarationFile(const QString& filePath);
 
 }  // namespace breco

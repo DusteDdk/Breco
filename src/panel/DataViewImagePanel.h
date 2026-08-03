@@ -1,9 +1,9 @@
 #pragma once
 
-#include <QElapsedTimer>
 #include <QWidget>
 
 #include "image/EmbeddedImageScanner.h"
+#include "scan/ScanProgress.h"
 
 #include <memory>
 
@@ -48,7 +48,7 @@ public:
 
     void setScanRunning(bool running);
     void resetProgress();
-    void updateProgress(quint64 bytesScanned, quint64 bytesTotal, int resultsFound,
+    void updateProgress(const ScanProgressSnapshot& progress, int resultsFound,
                         int resultsLimit);
     void setStatusText(const QString& text);
     void clearResults();
@@ -79,7 +79,6 @@ private:
     std::unique_ptr<Ui::DataViewImage> m_ui;
     QVector<ResultItem> m_results;
     EmbeddedImageFormats m_supportedFormats = allEmbeddedImageFormats();
-    QElapsedTimer m_fileProgressTextTimer;
     bool m_scanRunning = false;
 };
 

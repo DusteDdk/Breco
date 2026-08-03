@@ -1,0 +1,17 @@
+/*
+ * External data-file roles.
+ *
+ * Applying this declaration prompts for the file bound to the "index" role.
+ * Fields without /source read sequentially from the primary file. Fields with
+ * /source(index) read from the index file's independent sequential cursor.
+ */
+
+/external(index);
+/default SplitRecord
+
+struct SplitRecord {
+    /cond(=0x52) uint8 recordType;
+    uint8 flags;
+    /source(index) uint32<le> externalOffset;
+    /source(index) uint16<le> externalLength;
+}

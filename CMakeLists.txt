@@ -41,6 +41,7 @@ set(BRECO_SOURCES
     src/panel/StructModeLeftPanel.cpp
     src/panel/TextViewPanel.cpp
     src/scan/ScanController.cpp
+    src/scan/ScanProgress.cpp
     src/scan/ScanWorker.cpp
     src/scan/ShiftTransform.cpp
     src/scan/MatchUtils.cpp
@@ -57,6 +58,8 @@ set(BRECO_SOURCES
     src/text/TextSequenceAnalyzer.cpp
     src/text/StringModeRules.cpp
     src/struct/StructureGraph.cpp
+    src/struct/StructureLibrary.cpp
+    src/struct/StructureScanner.cpp
     src/struct/StructDeclarationParser.cpp
     src/struct/StructExport.cpp
     src/struct/StructVisualizer.cpp
@@ -87,6 +90,7 @@ set(BRECO_HEADERS
     src/panel/StructModeLeftPanel.h
     src/panel/TextViewPanel.h
     src/scan/ScanController.h
+    src/scan/ScanProgress.h
     src/scan/ScanWorker.h
     src/scan/ShiftTransform.h
     src/scan/MatchUtils.h
@@ -106,6 +110,8 @@ set(BRECO_HEADERS
     src/text/StringModeRules.h
     src/struct/StructTypes.h
     src/struct/StructureGraph.h
+    src/struct/StructureLibrary.h
+    src/struct/StructureScanner.h
     src/struct/VisualizedNode.h
     src/struct/StructDeclarationParser.h
     src/struct/StructExport.h
@@ -175,6 +181,8 @@ add_executable(brecodump
     src/io/ShiftedWindowLoader.cpp
     src/scan/ShiftTransform.cpp
     src/struct/StructureGraph.cpp
+    src/struct/StructureLibrary.cpp
+    src/struct/StructureScanner.cpp
     src/struct/StructDeclarationParser.cpp
     src/struct/StructExport.cpp
     src/struct/StructVisualizer.cpp
@@ -249,10 +257,12 @@ target_link_libraries(
     breco_ui_integration_tests PRIVATE ${BRECO_QT_LIBS} Qt6::Test)
 
 add_test(NAME breco_ui_integration_tests COMMAND breco_ui_integration_tests)
+set_tests_properties(breco_ui_integration_tests PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
 qt_add_executable(breco_unit_tests
     tests/unit_tests.cpp
     src/scan/MatchUtils.cpp
+    src/scan/ScanProgress.cpp
     src/scan/ShiftTransform.cpp
     src/model/ResultModel.cpp
     src/io/FileEnumerator.cpp
@@ -263,6 +273,8 @@ qt_add_executable(breco_unit_tests
     src/text/TextSequenceAnalyzer.cpp
     src/text/StringModeRules.cpp
     src/struct/StructureGraph.cpp
+    src/struct/StructureLibrary.cpp
+    src/struct/StructureScanner.cpp
     src/struct/StructDeclarationParser.cpp
     src/struct/StructExport.cpp
     src/struct/StructVisualizer.cpp

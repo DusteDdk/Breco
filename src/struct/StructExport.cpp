@@ -3,6 +3,7 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonValue>
+#include <QHash>
 #include <QStringList>
 
 #include <algorithm>
@@ -361,6 +362,59 @@ QString formatPrefixedScalarValue(const VisualizedNode& node,
              node.name,
              node.typeName,
              formatScalarValue(node, format));
+}
+
+namespace {
+
+QString renderTemplateNode(const QString& input, const VisualizedNode& node,
+                           QString* error) {
+    QString output = input;
+    const QString open = QStringLiteral("{{#children}}");
+    const QString close = QStringLiteral("{{/children}}");
+    while (output.contains(open)) {
+        const qsizetype start = output.indexOf(open);
+        const qsizetype end = output.indexOf(close, start + open.size());
+        if (end < 0) {
+            if (error != nullptr) {
+                *error = QStringLiteral("Unclosed {{#children}} section");
+            }
+            return {};
+        }
+        const QString body = output.mid(start + open.size(), end - start - open.size());
+        QString rendered;
+        for (const VisualizedNode& child : node.children) {
+            rendered += renderTemplateNode(body, child, error);
+            if (error != nullptr && !error->isEmpty()) {
+                return {};
+            }
+        }
+        output.replace(start, end + close.size() - start, rendered);
+    }
+    const QHash<QString, QString> values{
+        {QStringLiteral("name"), node.name},
+        {QStringLiteral("type"), node.typeName},
+        {QStringLiteral("value"), node.valueText},
+        {QStringLiteral("offset"), QString::number(node.sourceOffset)},
+        {QStringLiteral("length"), QString::number(node.sourceLength)},
+        {QStringLiteral("bytes"), hexBytes(node.rawBytes)},
+        {QStringLiteral("path"), node.sourceFilePath},
+        {QStringLiteral("valid"), node.valid ? QStringLiteral("true") : QStringLiteral("false")},
+    };
+    for (auto it = values.constBegin(); it != values.constEnd(); ++it) {
+        output.replace(QStringLiteral("{{%1}}").arg(it.key()), it.value());
+    }
+    return output;
+}
+
+}  // namespace
+
+QString renderStructureTemplate(const QString& templateText,
+                                const VisualizedNode& node,
+                                QString* errorMessage) {
+    if (errorMessage != nullptr) {
+        errorMessage->clear();
+    }
+    return renderTemplateNode(templateText, node, errorMessage);
 }
 
 }  // namespace breco

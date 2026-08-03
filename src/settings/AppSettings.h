@@ -55,6 +55,7 @@ public:
     static bool viewScanLogVisible();
     static bool viewEditsVisible();
     static QString lastStructDefinitionFilePath();
+    static QString structureLibraryDirectory();
     static QString structDeclarationText();
     static QString structEntryName();
     static int structEntryCount();
@@ -62,6 +63,7 @@ public:
     static bool structViewsVisible();
     static bool structLanguageVisible();
     static void setLastStructDefinitionFilePath(const QString& path);
+    static void setStructureLibraryDirectory(const QString& path);
     static void setStructDeclarationText(const QString& text);
     static void setTextByteModeEnabled(bool enabled);
     static void setTextWrapModeEnabled(bool enabled);

@@ -1,4 +1,4 @@
-/default PNGHeader
+/default PNG
 
 struct PNGSignature {
   /cond(=0x89) byte marker;
@@ -79,6 +79,21 @@ struct PNGIENDChunk {
   /cond(=0) uint32<be> length;
   /cond(="IEND") asciistr<len:4> type;
   uint32<be> crc;
+}
+
+// Best-effort whole-file view. BrecoScript cannot yet repeat PNGChunk until a
+// chunk whose type is IEND, so retain the intervening chunks as one raw byte
+// span. <until> leaves the sentinel unconsumed, allowing PNGIENDChunk to
+// validate and consume it.
+//
+// Caveat: <until> searches raw bytes rather than PNG chunk boundaries. The
+// eight-byte sequence 00 00 00 00 49 45 4E 44 can legally occur inside chunk
+// data, in which case this view will stop early. It also retains all chunk
+// bytes in one node instead of decoding individual chunks.
+struct PNG {
+  /cond(true) PNGHeader header;
+  byte<until:="\0\0\0\0IEND"> chunks;
+  /cond(true) PNGIENDChunk end;
 }
 
 // IHDR plus sRGB, gAMA, and pHYs when they immediately follow IHDR.

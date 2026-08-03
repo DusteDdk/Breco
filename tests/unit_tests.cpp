@@ -31,10 +31,13 @@
 #include "model/ResultModel.h"
 #include "panel/StructModeLeftPanel.h"
 #include "scan/MatchUtils.h"
+#include "scan/ScanProgress.h"
 #include "scan/SpscQueue.h"
 #include "scan/ShiftTransform.h"
 #include "struct/StructDeclarationParser.h"
 #include "struct/StructExport.h"
+#include "struct/StructureLibrary.h"
+#include "struct/StructureScanner.h"
 #include "struct/StructVisualizedTreeModel.h"
 #include "struct/StructVisualizer.h"
 #include "text/StringModeRules.h"
@@ -2025,11 +2028,14 @@ void testEmbeddedImageScanner() {
         breco::scanEmbeddedImages(sourceForBytes(threePngs), options, &summary);
     options.workerCount = 4;
     QVector<quint64> byteProgress;
+    QVector<quint64> rawProgress;
     QVector<int> resultProgress;
     results = breco::scanEmbeddedImages(
         sourceForBytes(threePngs), options, &summary, {},
-        [&byteProgress, &resultProgress](quint64 scanned, quint64, int found, int) {
+        [&byteProgress, &rawProgress, &resultProgress](quint64 scanned, quint64, quint64 raw,
+                                                       int found, int) {
             byteProgress.push_back(scanned);
+            rawProgress.push_back(raw);
             resultProgress.push_back(found);
         });
     expectEqInt(results.size(), oneJobResults.size(),
@@ -2048,6 +2054,12 @@ void testEmbeddedImageScanner() {
         expectTrue(resultProgress.at(i) >= resultProgress.at(i - 1),
                    QStringLiteral("image result progress should be monotonic"));
     }
+    for (int i = 1; i < rawProgress.size(); ++i) {
+        expectTrue(rawProgress.at(i) >= rawProgress.at(i - 1),
+                   QStringLiteral("image raw-read progress should be monotonic"));
+    }
+    expectTrue(summary.rawBytesRead >= summary.bytesScanned,
+               QStringLiteral("image summary retains raw source bytes read"));
 
     std::atomic_bool cancelAfterFirstResult = false;
     options.maxResults = 0;
@@ -2165,7 +2177,157 @@ void testEmbeddedImageScanner() {
     }
 }
 
+void testStructureFeatureServices() {
+    QTemporaryDir dir;
+    expectTrue(dir.isValid(), QStringLiteral("Structure feature temp directory"));
+    QFile formats(dir.filePath(QStringLiteral("formats.brecoscript")));
+    expectTrue(formats.open(QIODevice::WriteOnly), QStringLiteral("Open included outforms"));
+    formats.write(
+        "outform summary binary {\\{\\{literal\\}\\} {{name}}:{{#children}}{{name}}={{value}}{{/children}}}\n");
+    formats.close();
+    QFile alternateFormats(dir.filePath(QStringLiteral("alternate.brecoscript")));
+    expectTrue(alternateFormats.open(QIODevice::WriteOnly),
+               QStringLiteral("Open alternate included outforms"));
+    alternateFormats.write("outform summary text {alternate {{name}}}\n");
+    alternateFormats.close();
+    QFile common(dir.filePath(QStringLiteral("common.brecostruct")));
+    expectTrue(common.open(QIODevice::WriteOnly), QStringLiteral("Open included definition"));
+    common.write(
+        "include \"formats.brecoscript\";\n"
+        "struct Header { /cond(=0x42) uint8 magic; };\n");
+    common.close();
+    QFile mainFile(dir.filePath(QStringLiteral("main.brecostruct")));
+    expectTrue(mainFile.open(QIODevice::WriteOnly), QStringLiteral("Open including definition"));
+    mainFile.write(
+        "include \"common.brecostruct\";\n"
+        "include \"alternate.brecoscript\";\n"
+        "struct Packet { Header header; uint8 tail; };\n");
+    mainFile.close();
+
+    const breco::ParseResult parsed = breco::parseStructDeclarationFile(mainFile.fileName());
+    expectTrue(parsed.valid, QStringLiteral("File parser resolves relative includes"));
+    expectTrue(parsed.graph.entryNames().contains(QStringLiteral("Packet")),
+               QStringLiteral("Included graph exposes local entries"));
+    expectEqInt(parsed.graph.outforms().size(), 2,
+                QStringLiteral("Included graph exposes direct and transitive outforms"));
+    if (const breco::OutformNode* outform = parsed.graph.findOutform(
+            QStringLiteral("summary"))) {
+        expectTrue(outform->mode == breco::OutformMode::Binary,
+                   QStringLiteral("Parser stores binary outform mode"));
+        expectTrue(outform->templateText.contains(QStringLiteral("{{literal}}")),
+                   QStringLiteral("Escaped template braces are retained literally"));
+        expectEqQString(QFileInfo(outform->sourceFilePath).fileName(),
+                        QStringLiteral("formats.brecoscript"),
+                        QStringLiteral("Outform retains its declaring source file"));
+    } else {
+        expectTrue(false, QStringLiteral("Named included outform is discoverable"));
+    }
+    if (parsed.graph.outforms().size() == 2) {
+        expectEqQString(parsed.graph.outforms().at(1).name,
+                        QStringLiteral("summary"),
+                        QStringLiteral("Same outform name is allowed from another file"));
+        expectEqQString(QFileInfo(parsed.graph.outforms().at(1).sourceFilePath).fileName(),
+                        QStringLiteral("alternate.brecoscript"),
+                        QStringLiteral("Second outform retains distinct source provenance"));
+    }
+    const breco::ParseResult balancedOutform = breco::parseStructDeclaration(
+        QStringLiteral("outform json text { {\"name\": \"{{name}}\"} } uint8 item;"));
+    expectTrue(balancedOutform.valid,
+               QStringLiteral("Outform parser accepts balanced literal braces"));
+    const breco::ParseResult invalidOutform = breco::parseStructDeclaration(
+        QStringLiteral("outform bad html {x} uint8 item;"));
+    expectTrue(!invalidOutform.valid &&
+                   invalidOutform.errorMessage.contains(QStringLiteral("mode")),
+               QStringLiteral("Outform parser rejects unknown modes"));
+    const breco::ParseResult scanConstraints = breco::parseStructDeclaration(
+        QStringLiteral("uint8 unconstrained; "
+                       "/cond(=0x42) uint8 marker; "
+                       "struct Asserted { /var(v) uint8 value; /assert($v = 1); } "
+                       "typedef Asserted AssertedAlias; "
+                       "struct Nested { Asserted child; } "
+                       "struct Propagated { /cond(true) Asserted child; }"));
+    expectTrue(scanConstraints.valid,
+               QStringLiteral("Scan constraint declarations parse"));
+    expectTrue(!scanConstraints.graph.entryHasEffectiveScanConstraint(
+                   QStringLiteral("unconstrained")),
+               QStringLiteral("Unconstrained standalone entry cannot scan"));
+    expectTrue(scanConstraints.graph.entryHasEffectiveScanConstraint(
+                   QStringLiteral("marker")),
+               QStringLiteral("Standalone /cond entry can scan"));
+    expectTrue(scanConstraints.graph.entryHasEffectiveScanConstraint(
+                   QStringLiteral("Asserted")) &&
+                   scanConstraints.graph.entryHasEffectiveScanConstraint(
+                       QStringLiteral("AssertedAlias")),
+               QStringLiteral("Struct /assert and typedef target can scan"));
+    expectTrue(!scanConstraints.graph.entryHasEffectiveScanConstraint(
+                   QStringLiteral("Nested")) &&
+                   scanConstraints.graph.entryHasEffectiveScanConstraint(
+                       QStringLiteral("Propagated")),
+               QStringLiteral("Nested constraints require normal propagation"));
+    const QVector<breco::StructureScanMatch> matches = breco::scanForStructure(
+        parsed.graph, QStringLiteral("Header"), QByteArray::fromHex("00420042"), 100);
+    expectEqInt(matches.size(), 2, QStringLiteral("Structure scan finds condition matches"));
+    if (matches.size() == 2) {
+        expectTrue(matches.at(0).offset == 101 && matches.at(1).offset == 103,
+                   QStringLiteral("Structure scan reports absolute offsets"));
+    }
+
+    const QVector<breco::StructureLibraryFile> files = breco::StructureLibrary(dir.path()).scan();
+    expectEqInt(files.size(), 4, QStringLiteral("Library discovers definition files"));
+
+
+    breco::VisualizedNode parent;
+    parent.name = QStringLiteral("packet");
+    breco::VisualizedNode child;
+    child.name = QStringLiteral("magic");
+    child.valueText = QStringLiteral("66");
+    parent.children.push_back(child);
+    QString error;
+    const QString rendered = breco::renderStructureTemplate(
+        QStringLiteral("{{name}}:{{#children}}{{name}}={{value}}{{/children}}"), parent, &error);
+    expectEqQString(rendered, QStringLiteral("packet:magic=66"),
+                    QStringLiteral("Structure export template renders children"));
+    expectTrue(error.isEmpty(), QStringLiteral("Valid export template has no error"));
+
+    const breco::ParseResult externalParsed = breco::parseStructDeclaration(
+        QStringLiteral("/external(index); struct Split { "
+                       "uint8 primary; /source(index) uint16 externalValue; };"));
+    expectTrue(externalParsed.valid,
+               QStringLiteral("Parser accepts external source roles"));
+    expectTrue(externalParsed.graph.externalRoles() == QStringList{QStringLiteral("index")},
+               QStringLiteral("Graph retains external roles"));
+    if (externalParsed.valid) {
+        breco::VisualizationSource primary{QByteArray::fromHex("AA"),
+                                           QStringLiteral("primary.bin"), 10};
+        QHash<QString, breco::VisualizationSource> externalSources;
+        externalSources.insert(QStringLiteral("index"),
+                               {QByteArray::fromHex("3412"),
+                                QStringLiteral("index.bin"), 20});
+        const breco::VisualizedNode externalRoot = breco::visualize(
+            externalParsed.graph, QStringLiteral("Split"), primary, 0, 1,
+            externalSources);
+        expectTrue(externalRoot.children.size() == 1 &&
+                       externalRoot.children.first().valid,
+                   QStringLiteral("Visualizer decodes bound external fields"));
+        if (!externalRoot.children.isEmpty() &&
+            externalRoot.children.first().children.size() == 2) {
+            const breco::VisualizedNode& external =
+                externalRoot.children.first().children.at(1);
+            expectEqQString(external.sourceFilePath, QStringLiteral("index.bin"),
+                            QStringLiteral("External node retains source path"));
+            expectTrue(external.sourceOffset == 20,
+                       QStringLiteral("External node retains absolute source offset"));
+        }
+        const breco::VisualizedNode unbound = breco::visualize(
+            externalParsed.graph, QStringLiteral("Split"), primary, 0, 1, {});
+        expectTrue(!unbound.children.isEmpty() && !unbound.children.first().valid,
+                   QStringLiteral("Missing external role invalidates visualization"));
+    }
+}
+
 }  // namespace
+
+void testScanProgressFormatting();
 
 int main(int argc, char** argv) {
     qputenv("QT_QPA_PLATFORM", QByteArray("offscreen"));
@@ -2184,6 +2346,7 @@ int main(int argc, char** argv) {
     testSpscQueueMechanics();
     testFileEnumerator();
     testWindowLoader();
+    testScanProgressFormatting();
 #ifdef Q_OS_UNIX
     testOpenFilePoolExternalReadFd();
 #endif
@@ -2192,6 +2355,7 @@ int main(int argc, char** argv) {
     testStructVisualizer();
     testStructModePanelUtilities();
     testDynamicStructLanguage();
+    testStructureFeatureServices();
 
     if (g_failures == 0) {
         qInfo() << "All unit tests passed";
@@ -2200,4 +2364,28 @@ int main(int argc, char** argv) {
 
     qCritical() << g_failures << "unit test(s) failed";
     return 1;
+}
+void testScanProgressFormatting() {
+    using namespace std::chrono_literals;
+    breco::ScanProgressTracker tracker;
+    const auto start = breco::ScanProgressTracker::Clock::time_point{} + 1s;
+    tracker.reset(0, 0, start);
+    const breco::ScanProgressSnapshot first = tracker.sample(1024, 2048, 2048, start + 2s);
+    expectEqQString(
+        breco::formatScanProgress(first),
+        QStringLiteral("1.00 KiB / 2.00 KiB @ 0.50 KiB/s ( Disk: 1.00 KiB/s )  - 50.00 %"),
+        QStringLiteral("Scan progress formatter includes bytes, rates, and percentage"));
+
+    tracker.sample(3072, 8192, 4096, start + 4s);
+    tracker.sample(6144, 8192, 6144, start + 6s);
+    tracker.sample(10240, 12288, 8192, start + 8s);
+    const breco::ScanProgressSnapshot rolled =
+        tracker.sample(15360, 16384, 10240, start + 10s);
+    expectTrue(rolled.scanBytesPerSecond == 1792.0,
+               QStringLiteral("Scan speed averages only the latest four update intervals"));
+    expectTrue(rolled.rawBytesPerSecond == 1024.0,
+               QStringLiteral("Raw speed averages the latest four update intervals"));
+    expectTrue(breco::formatScanProgress({2048, 1024, 0, 0.0, 0.0})
+                   .endsWith(QStringLiteral("100.00 %")),
+               QStringLiteral("Progress formatting clamps scanned bytes and percentage"));
 }

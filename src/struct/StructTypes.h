@@ -139,6 +139,7 @@ struct FieldAttributes {
     std::optional<ComparisonExpression> conditionExpression;
     std::optional<ComparisonExpression> whenExpression;
     QString decoration;
+    QString sourceRole;
     QVector<BitfieldMember> bitfields;
 
     bool hasDynamicExtent() const {

@@ -3,20 +3,27 @@
 #include <chrono>
 
 #include "scan/MatchUtils.h"
+#include "struct/StructVisualizer.h"
 
 namespace breco {
 
 ScanWorker::ScanWorker(int workerId, QByteArray searchTerm, TextInterpretationMode mode,
                        bool ignoreCase, std::atomic<quint64>* totalBytesScanned,
                        std::chrono::steady_clock::time_point scanStartTime,
-                       JobCompleteCallback onJobComplete)
+                       JobCompleteCallback onJobComplete,
+                       std::shared_ptr<const StructureGraph> structureGraph,
+                       QString structureEntry,
+                       std::shared_ptr<const QHash<QString, VisualizationSource>> externalSources)
     : m_workerId(workerId),
       m_totalBytesScanned(totalBytesScanned),
       m_searchTerm(std::move(searchTerm)),
       m_mode(mode),
       m_ignoreCase(ignoreCase),
       m_scanStartTime(scanStartTime),
-      m_onJobComplete(std::move(onJobComplete)) {}
+      m_onJobComplete(std::move(onJobComplete)),
+      m_structureGraph(std::move(structureGraph)),
+      m_structureEntry(std::move(structureEntry)),
+      m_externalSources(std::move(externalSources)) {}
 
 ScanWorker::~ScanWorker() {
     requestStop();
@@ -48,8 +55,6 @@ void ScanWorker::wakeForStop() { m_workProvided.release(); }
 
 bool ScanWorker::isBusy() const { return m_busy.load(std::memory_order_acquire); }
 
-const QVector<MatchRecord>& ScanWorker::matches() const { return m_matches; }
-
 void ScanWorker::runLoop() {
     for (;;) {
         m_workProvided.acquire();
@@ -72,22 +77,23 @@ void ScanWorker::runLoop() {
             continue;
         }
 
-        processJob(job);
+        ScanJobResult result = processJob(job);
 
         m_busy.store(false, std::memory_order_release);
         if (m_onJobComplete != nullptr) {
-            m_onJobComplete(m_workerId, job.bufferToken);
+            m_onJobComplete(m_workerId, std::move(result));
         }
     }
 }
 
-void ScanWorker::processJob(const ScanJob& job) {
+ScanJobResult ScanWorker::processJob(const ScanJob& job) {
+    ScanJobResult result;
+    result.sequence = job.sequence;
+    result.bufferToken = job.bufferToken;
     const std::shared_ptr<ReadBuffer>& buffer = job.buffer;
-    if (buffer == nullptr || job.size == 0 || job.reportLimit == 0 || m_searchTerm.isEmpty()) {
-        if (m_totalBytesScanned != nullptr) {
-            m_totalBytesScanned->fetch_add(job.reportLimit, std::memory_order_relaxed);
-        }
-        return;
+    if (buffer == nullptr || job.size == 0 || job.reportLimit == 0 ||
+        (m_searchTerm.isEmpty() && m_structureGraph == nullptr)) {
+        return result;
     }
 
     QByteArray transformed;
@@ -99,18 +105,57 @@ void ScanWorker::processJob(const ScanJob& job) {
             buffer->rawBytes.constData() + static_cast<int>(localStart),
             static_cast<int>(job.size));
     } else {
-        if (m_totalBytesScanned != nullptr) {
-            m_totalBytesScanned->fetch_add(job.reportLimit, std::memory_order_relaxed);
+        return result;
+    }
+
+    if (m_structureGraph != nullptr) {
+        for (quint64 pos = 0; pos < job.reportLimit; ++pos) {
+            if (m_stopRequested.load(std::memory_order_acquire)) {
+                break;
+            }
+            ++result.bytesScanned;
+            const quint64 absolute = job.fileOffset + pos;
+            VisualizationSource primary{transformed, QString(), job.fileOffset};
+            const VisualizedNode root = visualize(
+                *m_structureGraph, m_structureEntry, primary,
+                static_cast<size_t>(pos), 1,
+                m_externalSources != nullptr
+                    ? *m_externalSources
+                    : QHash<QString, VisualizationSource>{});
+            if (root.children.isEmpty()) {
+                continue;
+            }
+            const VisualizedNode& candidate = root.children.first();
+            if (!candidate.valid || candidate.bytesMissing != 0 ||
+                !candidate.errorMessage.isEmpty() || candidate.sourceLength == 0) {
+                continue;
+            }
+            MatchRecord match;
+            match.scanTargetIdx = buffer->scanTargetIdx;
+            match.threadId = m_workerId;
+            match.offset = absolute;
+            match.searchTimeNs = static_cast<quint64>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now() - m_scanStartTime).count());
+            result.matches.push_back(match);
         }
-        return;
+        if (m_totalBytesScanned != nullptr) {
+            m_totalBytesScanned->fetch_add(result.bytesScanned, std::memory_order_relaxed);
+        }
+        return result;
     }
 
     int pos = 0;
     while (true) {
-        pos = MatchUtils::indexOf(transformed, m_searchTerm, pos, m_mode, m_ignoreCase);
-        if (pos < 0) {
+        if (m_stopRequested.load(std::memory_order_acquire)) {
             break;
         }
+        pos = MatchUtils::indexOf(transformed, m_searchTerm, pos, m_mode, m_ignoreCase);
+        if (pos < 0) {
+            result.bytesScanned = job.reportLimit;
+            break;
+        }
+        result.bytesScanned = qMin<quint64>(job.reportLimit, static_cast<quint64>(pos + 1));
         if (static_cast<quint32>(pos) < job.reportLimit) {
             MatchRecord match;
             match.scanTargetIdx = buffer->scanTargetIdx;
@@ -120,14 +165,15 @@ void ScanWorker::processJob(const ScanJob& job) {
                 std::chrono::duration_cast<std::chrono::nanoseconds>(
                     std::chrono::steady_clock::now() - m_scanStartTime)
                     .count());
-            m_matches.push_back(match);
+            result.matches.push_back(match);
         }
         ++pos;
     }
 
     if (m_totalBytesScanned != nullptr) {
-        m_totalBytesScanned->fetch_add(job.reportLimit, std::memory_order_relaxed);
+        m_totalBytesScanned->fetch_add(result.bytesScanned, std::memory_order_relaxed);
     }
+    return result;
 }
 
 }  // namespace breco

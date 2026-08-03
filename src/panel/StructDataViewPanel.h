@@ -5,6 +5,7 @@
 #include <memory>
 
 #include "struct/StructExport.h"
+#include "struct/StructureGraph.h"
 #include "struct/VisualizedNode.h"
 
 QT_BEGIN_NAMESPACE
@@ -21,6 +22,7 @@ QT_END_NAMESPACE
 namespace breco {
 
 class StructVisualizedTreeModel;
+class StructDataViewPanelTestAccess;
 
 class StructDataViewPanel : public QWidget {
     Q_OBJECT
@@ -36,6 +38,7 @@ public:
     void setVisualization(const VisualizedNode& root);
     void clearVisualization();
     void setSourceEndianness(Endianness endianness);
+    void setOutforms(const QVector<OutformNode>& outforms);
     void copySelectedScalarValuesToClipboard() const;
 
     static bool saveBytesToFile(const QString& filePath,
@@ -47,6 +50,7 @@ signals:
     void declarationLocationActivated(int start, int end);
 
 private:
+    friend class StructDataViewPanelTestAccess;
     void toggleExpandCollapseAll();
     void showTreeContextMenu(const QPoint& pos);
     void addScopeMenu(QMenu* parent, const QString& label,
@@ -59,6 +63,10 @@ private:
                   bool writeSingleObject);
     void saveBinary(const QVector<const VisualizedNode*>& nodes,
                     StructBinaryExportMode mode);
+    void addOutformMenu(QMenu* parent,
+                        const QVector<const VisualizedNode*>& nodes);
+    void saveUsingOutform(const OutformNode& outform,
+                          const QVector<const VisualizedNode*>& nodes);
     void copyJsonToClipboard(const QVector<const VisualizedNode*>& nodes,
                              bool writeSingleObject) const;
     void copyScalarToClipboard(const VisualizedNode& node,
@@ -70,6 +78,8 @@ private:
     StructVisualizedTreeModel* m_model = nullptr;
     bool m_allExpanded = false;
     Endianness m_sourceEndianness = Endianness::Little;
+    QVector<OutformNode> m_outforms;
+    QString m_outformSavePathForTests;
 };
 
 }  // namespace breco
