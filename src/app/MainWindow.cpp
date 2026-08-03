@@ -196,39 +196,59 @@ QString utf8Glyph(const QByteArray& bytes, int start) {
     return decoded.left(1);
 }
 
-QString utf16Glyph(const QByteArray& bytes, int start, bool littleEndian) {
-    if (start < 0 || start >= bytes.size()) {
-        return QStringLiteral("n/a");
+std::optional<quint32> utf16CodepointAt(const QByteArray& bytes, int start, bool littleEndian) {
+    if (start < 0 || start + 1 >= bytes.size()) {
+        return std::nullopt;
     }
-    const QByteArray slice = bytes.mid(start, qMin(4, bytes.size() - start));
-    QStringDecoder decoder(littleEndian ? QStringDecoder::Utf16LE : QStringDecoder::Utf16BE);
-    const QString decoded = decoder.decode(slice);
-    if (decoded.isEmpty()) {
-        return QStringLiteral("n/a");
+
+    const auto readUnit = [&bytes, littleEndian](int index) {
+        const quint16 first = static_cast<unsigned char>(bytes.at(index));
+        const quint16 second = static_cast<unsigned char>(bytes.at(index + 1));
+        return littleEndian ? static_cast<quint16>(first | (second << 8U))
+                            : static_cast<quint16>((first << 8U) | second);
+    };
+
+    const quint16 first = readUnit(start);
+    if (first >= 0xD800U && first <= 0xDBFFU) {
+        if (start + 3 >= bytes.size()) {
+            return std::nullopt;
+        }
+        const quint16 second = readUnit(start + 2);
+        if (second < 0xDC00U || second > 0xDFFFU) {
+            return std::nullopt;
+        }
+        return 0x10000U +
+               ((static_cast<quint32>(first - 0xD800U) << 10U) |
+                static_cast<quint32>(second - 0xDC00U));
     }
-    return decoded.left(1);
+    if (first >= 0xDC00U && first <= 0xDFFFU) {
+        return std::nullopt;
+    }
+    return first;
+}
+
+QString utf16Glyph(const QByteArray& bytes, int start, bool littleEndian,
+                   const QString& unavailableText) {
+    const std::optional<quint32> codepoint = utf16CodepointAt(bytes, start, littleEndian);
+    if (!codepoint.has_value()) {
+        return unavailableText;
+    }
+    const char32_t glyph = static_cast<char32_t>(codepoint.value());
+    return QString::fromUcs4(&glyph, 1);
 }
 
 QString formatHex(quint64 value, int widthNibbles) {
     return QStringLiteral("0x%1").arg(value, widthNibbles, 16, QChar('0')).toUpper();
 }
 
-QString littleEndianSwappedChar(const QByteArray& bytes, int start) {
-    if (start < 0 || start + 1 >= bytes.size()) {
+QString utf16DisplayGlyph(const QByteArray& bytes, int start, bool littleEndian) {
+    const std::optional<quint32> codepoint = utf16CodepointAt(bytes, start, littleEndian);
+    if (!codepoint.has_value() || codepoint.value() < 0x20U ||
+        (codepoint.value() >= 0x7FU && codepoint.value() <= 0x9FU)) {
         return QStringLiteral("-");
     }
-    // Start of Windows-Port change:
-    // This change was introduced when porting breco to windows, this was the original code:
-    //     const QByteArray swapped({bytes.at(start + 1), bytes.at(start)});
-    const char swappedBytes[2] = { bytes.at(start + 1), bytes.at(start) };
-    const QByteArray swapped(swappedBytes, 2);
-    // End of Windows-Port change.
-    QStringDecoder decoder(QStringDecoder::Utf16LE);
-    const QString decoded = decoder.decode(swapped);
-    if (decoded.isEmpty()) {
-        return QStringLiteral("-");
-    }
-    return decoded.left(1);
+    const char32_t glyph = static_cast<char32_t>(codepoint.value());
+    return QString::fromUcs4(&glyph, 1);
 }
 
 QString signedValueString(quint64 value, int widthBytes) {
@@ -3440,7 +3460,8 @@ void MainWindow::updateCurrentByteInfoFromHover(const HoverBuffer& buffer, quint
     const QString ascii = printableAsciiChar(b0);
     const QString utf8 = utf8Glyph(buffer.data, relativeIndex);
     const bool useBigEndian = m_currentByteInfoPanel->bigEndianCheckBox()->isChecked();
-    const QString utf16 = utf16Glyph(buffer.data, relativeIndex, !useBigEndian);
+    const QString utf16 = utf16Glyph(buffer.data, relativeIndex, !useBigEndian,
+                                     QStringLiteral("n/a"));
 
     const NumberSystem numberSystem = currentNumberSystem(m_currentByteInfoPanel);
     bool ok8 = false;
@@ -3479,14 +3500,8 @@ void MainWindow::updateCurrentByteInfoFromHover(const HoverBuffer& buffer, quint
     m_currentByteInfoPanel->u64ValueLabel()->setText(
         ok64 ? formatUnsignedByNumberSystem(v64, 8, numberSystem) : na);
 
-    if (!useBigEndian) {
-        m_currentByteInfoPanel->byteInterpretationLargeLabel()->setText(
-            littleEndianSwappedChar(buffer.data, relativeIndex));
-    } else {
-        const bool printable = (b0 >= 0x20 && b0 <= 0x7E);
-        m_currentByteInfoPanel->byteInterpretationLargeLabel()->setText(
-            printable ? QString(QChar::fromLatin1(static_cast<char>(b0))) : formatHex(v8, 2));
-    }
+    m_currentByteInfoPanel->byteInterpretationLargeLabel()->setText(
+        utf16DisplayGlyph(buffer.data, relativeIndex, !useBigEndian));
     setCurrentByteCaptionHighlights(availableBytes);
 }
 

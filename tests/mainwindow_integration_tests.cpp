@@ -551,19 +551,41 @@ void MainWindowIntegrationTests::currentBytePanelShowsEndianAndWidthAwareValues(
     QCOMPARE(window.m_currentByteInfoPanel->u16ValueLabel()->text(), QStringLiteral("16640"));
     QCOMPARE(window.m_currentByteInfoPanel->u32ValueLabel()->text(), QStringLiteral("n/a"));
     QCOMPARE(window.m_currentByteInfoPanel->u64ValueLabel()->text(), QStringLiteral("n/a"));
-    QCOMPARE(window.m_currentByteInfoPanel->byteInterpretationLargeLabel()->text(), QStringLiteral("A"));
+    QCOMPARE(window.m_currentByteInfoPanel->byteInterpretationLargeLabel()->text(),
+             QString::fromUtf8("\xE4\x84\x80"));
     QCOMPARE(window.m_currentByteInfoPanel->hexStr8BytesValueLabel()->text(),
              QStringLiteral("0 x 41 00 FF -- -- -- -- --"));
 
     window.m_currentByteInfoPanel->bigEndianCheckBox()->setChecked(false);
     window.updateCurrentByteInfoFromHover(hover, 100);
     QCoreApplication::processEvents();
-    QCOMPARE(window.m_currentByteInfoPanel->byteInterpretationLargeLabel()->text(), QStringLiteral("-"));
+    QCOMPARE(window.m_currentByteInfoPanel->byteInterpretationLargeLabel()->text(), QStringLiteral("A"));
 
     window.updateCurrentByteInfoFromHover(hover, 101);
     QCoreApplication::processEvents();
     QCOMPARE(window.m_currentByteInfoPanel->asciiValueLabel()->text(), QStringLiteral("."));
     QCOMPARE(window.m_currentByteInfoPanel->u16ValueLabel()->text(), QStringLiteral("65280"));
+
+    hover.data = QByteArray::fromHex("0041D83DDE00");
+    window.m_currentByteInfoPanel->bigEndianCheckBox()->setChecked(true);
+    window.updateCurrentByteInfoFromHover(hover, 100);
+    QCOMPARE(window.m_currentByteInfoPanel->byteInterpretationLargeLabel()->text(), QStringLiteral("A"));
+    window.updateCurrentByteInfoFromHover(hover, 102);
+    QCOMPARE(window.m_currentByteInfoPanel->byteInterpretationLargeLabel()->text(),
+             QString::fromUtf8("\xF0\x9F\x98\x80"));
+    QCOMPARE(window.m_currentByteInfoPanel->utf16ValueLabel()->text(),
+             QString::fromUtf8("\xF0\x9F\x98\x80"));
+
+    hover.data = QByteArray::fromHex("41003DD800DE00D8");
+    window.m_currentByteInfoPanel->bigEndianCheckBox()->setChecked(false);
+    window.updateCurrentByteInfoFromHover(hover, 100);
+    QCOMPARE(window.m_currentByteInfoPanel->byteInterpretationLargeLabel()->text(), QStringLiteral("A"));
+    window.updateCurrentByteInfoFromHover(hover, 102);
+    QCOMPARE(window.m_currentByteInfoPanel->byteInterpretationLargeLabel()->text(),
+             QString::fromUtf8("\xF0\x9F\x98\x80"));
+    window.updateCurrentByteInfoFromHover(hover, 106);
+    QCOMPARE(window.m_currentByteInfoPanel->byteInterpretationLargeLabel()->text(), QStringLiteral("-"));
+    QCOMPARE(window.m_currentByteInfoPanel->utf16ValueLabel()->text(), QStringLiteral("n/a"));
 }
 
 void MainWindowIntegrationTests::shiftMarksCurrentBufferDirtyAndRestoresOnDeselect() {
