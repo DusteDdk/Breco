@@ -1594,6 +1594,51 @@ void testDynamicStructLanguage() {
                    QStringLiteral("/assert should surface arithmetic errors"));
     }
 
+    const breco::ParseResult overflowChecks = breco::parseStructDeclaration(QStringLiteral(
+        "struct MulOverflow {"
+        " /var(a) uint8 a;"
+        " /assert($a = 3037000500 * 3037000500);"
+        "}\n"
+        "struct MulNoOverflow {"
+        " /var(a) uint8 a;"
+        " /assert($a = 3037000499 * 3037000499);"
+        "}\n"
+        "struct AddOverflow {"
+        " /var(a) uint8 a;"
+        " /assert($a = 9223372036854775807 + 1);"
+        "}\n"
+        "struct SubOverflow {"
+        " /var(a) uint8 a;"
+        " /assert($a = -9223372036854775808 - 1);"
+        "}\n"
+        "struct DivideOverflow {"
+        " /var(a) uint8 a;"
+        " /assert($a = -9223372036854775808 / -1);"
+        "}"));
+    expectTrue(overflowChecks.valid, QStringLiteral("Overflow-check structs should parse"));
+    const auto assertErrorMessage = [&](const QString& structName) {
+        const breco::VisualizedNode node =
+            breco::visualize(overflowChecks.graph, structName, QByteArray::fromHex("01"), 0, 1);
+        return (!node.children.isEmpty() && !node.children.first().children.isEmpty())
+                   ? node.children.first().children.last().errorMessage
+                   : QString();
+    };
+    expectTrue(assertErrorMessage(QStringLiteral("MulOverflow"))
+                   .contains(QStringLiteral("Integer expression overflow")),
+               QStringLiteral("Multiplying two large factors should report overflow"));
+    expectTrue(!assertErrorMessage(QStringLiteral("MulNoOverflow"))
+                    .contains(QStringLiteral("overflow")),
+               QStringLiteral("A product within int64 range should not report overflow"));
+    expectTrue(assertErrorMessage(QStringLiteral("AddOverflow"))
+                   .contains(QStringLiteral("Integer expression overflow")),
+               QStringLiteral("INT64_MAX + 1 should report overflow"));
+    expectTrue(assertErrorMessage(QStringLiteral("SubOverflow"))
+                   .contains(QStringLiteral("Integer expression overflow")),
+               QStringLiteral("INT64_MIN - 1 should report overflow"));
+    expectTrue(assertErrorMessage(QStringLiteral("DivideOverflow"))
+                   .contains(QStringLiteral("Integer expression overflow")),
+               QStringLiteral("INT64_MIN / -1 should report overflow"));
+
     const breco::ParseResult whenDecl = breco::parseStructDeclaration(QStringLiteral(
         "struct Conditional {"
         " /var(kind) uint8 kind;"

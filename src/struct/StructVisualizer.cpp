@@ -207,6 +207,94 @@ void invalidate(DecodeResult& result, const QString& message) {
     }
 }
 
+// Overflow-checked qint64 arithmetic. These avoid __int128 (unsupported by
+// MSVC) and avoid ever letting a signed operation actually overflow (which is
+// undefined behavior in C++); every branch below is a pre-check on the
+// inputs, followed by an operation that is guaranteed to be in-range.
+bool addWithOverflowCheck(qint64 left, qint64 right, qint64* result) {
+    constexpr qint64 kMax = std::numeric_limits<qint64>::max();
+    constexpr qint64 kMin = std::numeric_limits<qint64>::min();
+    if (right >= 0) {
+        if (left > kMax - right) {
+            return false;
+        }
+    } else {
+        if (left < kMin - right) {
+            return false;
+        }
+    }
+    *result = left + right;
+    return true;
+}
+
+bool subtractWithOverflowCheck(qint64 left, qint64 right, qint64* result) {
+    constexpr qint64 kMax = std::numeric_limits<qint64>::max();
+    constexpr qint64 kMin = std::numeric_limits<qint64>::min();
+    if (right >= 0) {
+        if (left < kMin + right) {
+            return false;
+        }
+    } else {
+        if (left > kMax + right) {
+            return false;
+        }
+    }
+    *result = left - right;
+    return true;
+}
+
+bool multiplyWithOverflowCheck(qint64 left, qint64 right, qint64* result) {
+    constexpr qint64 kMax = std::numeric_limits<qint64>::max();
+    constexpr qint64 kMin = std::numeric_limits<qint64>::min();
+    if (left == 0 || right == 0) {
+        *result = 0;
+        return true;
+    }
+    // Handle -1 specially: it is the only factor for which negating the
+    // other operand could itself overflow (kMin * -1), and it also makes the
+    // divisor used below potentially equal to -1, which is unsafe to divide
+    // kMin by.
+    if (left == -1) {
+        if (right == kMin) {
+            return false;
+        }
+        *result = -right;
+        return true;
+    }
+    if (right == -1) {
+        if (left == kMin) {
+            return false;
+        }
+        *result = -left;
+        return true;
+    }
+    // Neither operand is 0 or -1 here, so dividing by either is always
+    // well-defined (never 0/x and never kMin/-1).
+    if (left > 0) {
+        if (right > 0) {
+            if (left > kMax / right) {
+                return false;
+            }
+        } else {
+            if (right < kMin / left) {
+                return false;
+            }
+        }
+    } else {
+        if (right > 0) {
+            if (left < kMin / right) {
+                return false;
+            }
+        } else {
+            if (left < kMax / right) {
+                return false;
+            }
+        }
+    }
+    *result = left * right;
+    return true;
+}
+
 bool integerValueToSigned(const EvaluatedValue& value, qint64* out, QString* error) {
     if (const auto* integer = std::get_if<qint64>(&value)) {
         *out = *integer;
@@ -312,29 +400,37 @@ std::optional<EvaluatedValue> evaluateIntExpression(const IntExpression& express
                 }
                 return std::nullopt;
             }
-            __int128 result = 0;
+            qint64 result = 0;
+            bool ok = true;
             switch (expression.binaryOp) {
                 case IntBinaryOp::Add:
-                    result = static_cast<__int128>(leftValue) + rightValue;
+                    ok = addWithOverflowCheck(leftValue, rightValue, &result);
                     break;
                 case IntBinaryOp::Subtract:
-                    result = static_cast<__int128>(leftValue) - rightValue;
+                    ok = subtractWithOverflowCheck(leftValue, rightValue, &result);
                     break;
                 case IntBinaryOp::Multiply:
-                    result = static_cast<__int128>(leftValue) * rightValue;
+                    ok = multiplyWithOverflowCheck(leftValue, rightValue, &result);
                     break;
                 case IntBinaryOp::Divide:
-                    result = leftValue / rightValue;
+                    // leftValue / rightValue is itself undefined behavior when
+                    // leftValue is INT64_MIN and rightValue is -1 (the only
+                    // signed-division case that overflows), so it must be
+                    // checked before the division executes.
+                    if (leftValue == std::numeric_limits<qint64>::min() && rightValue == -1) {
+                        ok = false;
+                    } else {
+                        result = leftValue / rightValue;
+                    }
                     break;
             }
-            if (result < std::numeric_limits<qint64>::min() ||
-                result > std::numeric_limits<qint64>::max()) {
+            if (!ok) {
                 if (error != nullptr) {
                     *error = QStringLiteral("Integer expression overflow");
                 }
                 return std::nullopt;
             }
-            return EvaluatedValue{static_cast<qint64>(result)};
+            return EvaluatedValue{result};
         }
     }
     return std::nullopt;
