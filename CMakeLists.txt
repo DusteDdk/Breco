@@ -195,7 +195,37 @@ if(WIN32)
 endif()
 
 if(WIN32)
-    function(breco_add_windows_executable_icon target icon_png)
+    # FILEVERSION/PRODUCTVERSION (the numeric VERSIONINFO header fields) must be
+    # 4 comma-separated 16-bit integers, so the git short SHA can't go there;
+    # it's used for the free-form StringFileInfo FileVersion/ProductVersion instead.
+    find_package(Git QUIET)
+    set(BRECO_GIT_SHORT_SHA "unknown")
+    if(GIT_FOUND)
+        execute_process(
+            COMMAND "${GIT_EXECUTABLE}" rev-parse --short HEAD
+            WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+            OUTPUT_VARIABLE BRECO_GIT_SHORT_SHA_OUT
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            RESULT_VARIABLE BRECO_GIT_SHA_RESULT
+            ERROR_QUIET
+        )
+        if(BRECO_GIT_SHA_RESULT EQUAL 0 AND BRECO_GIT_SHORT_SHA_OUT)
+            set(BRECO_GIT_SHORT_SHA "${BRECO_GIT_SHORT_SHA_OUT}")
+        endif()
+    endif()
+
+    set(BRECO_VERSIONINFO_COMPANY_NAME "DusteDs Stuff")
+    set(BRECO_VERSIONINFO_FILE_DESCRIPTION "Binary recovery and forensics utility")
+    set(BRECO_VERSIONINFO_FILE_VERSION_STR "${BRECO_GIT_SHORT_SHA}")
+    set(BRECO_VERSIONINFO_LEGAL_COPYRIGHT "Copyleft forever WTFPL")
+    set(BRECO_VERSIONINFO_PRODUCT_NAME "Breco Suite")
+    set(BRECO_VERSIONINFO_PRODUCT_VERSION_STR "${BRECO_GIT_SHORT_SHA}")
+    set(BRECO_VERSIONINFO_FILEVERSION_NUM "1,0,0,0")
+    set(BRECO_VERSIONINFO_PRODUCTVERSION_NUM "1,0,0,0")
+
+    # comments/internal_name/original_filename differ per executable;
+    # pass original_filename as "" to omit it from the string table.
+    function(breco_add_windows_executable_resources target icon_png comments internal_name original_filename)
         get_filename_component(icon_basename "${icon_png}" NAME_WE)
         set(icon_dir "${CMAKE_CURRENT_BINARY_DIR}/win-icons/${target}")
         set(icon_ico "${icon_dir}/${icon_basename}.ico")
@@ -208,7 +238,50 @@ if(WIN32)
         endif()
 
         file(MAKE_DIRECTORY "${icon_dir}")
-        file(WRITE "${icon_rc}" "IDI_ICON1 ICON DISCARDABLE \"${icon_ico}\"\n")
+
+        set(version_strings
+            "            VALUE \"CompanyName\", \"${BRECO_VERSIONINFO_COMPANY_NAME}\"\n"
+            "            VALUE \"Comments\", \"${comments}\"\n"
+            "            VALUE \"FileDescription\", \"${BRECO_VERSIONINFO_FILE_DESCRIPTION}\"\n"
+            "            VALUE \"FileVersion\", \"${BRECO_VERSIONINFO_FILE_VERSION_STR}\"\n"
+            "            VALUE \"InternalName\", \"${internal_name}\"\n"
+            "            VALUE \"LegalCopyright\", \"${BRECO_VERSIONINFO_LEGAL_COPYRIGHT}\"\n"
+        )
+        if(NOT "${original_filename}" STREQUAL "")
+            list(APPEND version_strings
+                "            VALUE \"OriginalFilename\", \"${original_filename}\"\n"
+            )
+        endif()
+        list(APPEND version_strings
+            "            VALUE \"ProductName\", \"${BRECO_VERSIONINFO_PRODUCT_NAME}\"\n"
+            "            VALUE \"ProductVersion\", \"${BRECO_VERSIONINFO_PRODUCT_VERSION_STR}\"\n"
+        )
+        string(JOIN "" version_strings_block ${version_strings})
+
+        file(WRITE "${icon_rc}" "\
+IDI_ICON1 ICON DISCARDABLE \"${icon_ico}\"
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION ${BRECO_VERSIONINFO_FILEVERSION_NUM}
+ PRODUCTVERSION ${BRECO_VERSIONINFO_PRODUCTVERSION_NUM}
+ FILEFLAGSMASK 0x3fL
+ FILEFLAGS 0x0L
+ FILEOS 0x40004L
+ FILETYPE 0x1L
+ FILESUBTYPE 0x0L
+BEGIN
+    BLOCK \"StringFileInfo\"
+    BEGIN
+        BLOCK \"040904b0\"
+        BEGIN
+${version_strings_block}        END
+    END
+    BLOCK \"VarFileInfo\"
+    BEGIN
+        VALUE \"Translation\", 0x409, 1200
+    END
+END
+")
 
         add_custom_command(
             OUTPUT "${icon_ico}"
@@ -225,8 +298,10 @@ if(WIN32)
         set_source_files_properties("${icon_rc}" PROPERTIES OBJECT_DEPENDS "${icon_ico}")
     endfunction()
 
-    breco_add_windows_executable_icon(breco breco-icon.png)
-    breco_add_windows_executable_icon(brecodump brecodump-icon.png)
+    breco_add_windows_executable_resources(breco breco-icon.png
+        "Breco - Graphical User Interface" "breco.exe" "")
+    breco_add_windows_executable_resources(brecodump brecodump-icon.png
+        "Breco - CLI for scripting" "BrecoDump" "brecodump.exe")
 endif()
 
 install(TARGETS breco brecodump
