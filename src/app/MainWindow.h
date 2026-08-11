@@ -65,7 +65,11 @@ public:
 protected:
     bool eventFilter(QObject* watched, QEvent* event) override;
 
+#ifdef BRECO_MAINWINDOW_TEST_ACCESS
+public slots:
+#else
 private slots:
+#endif
     void onSourcePathTextChanged(const QString& path);
     void validateSourcePathInput();
     void onOpenFile();
@@ -88,7 +92,11 @@ private slots:
     void onTextByteClicked(quint64 absoluteOffset);
     void onHoverLeft();
 
+#ifdef BRECO_MAINWINDOW_TEST_ACCESS
+public:
+#else
 private:
+#endif
     enum class SourceMode { None, SingleFile, Directory };
     enum class SourceTargetKind { None, File, BlockDevice, Directory };
     enum class SourcePathFeedback { None, NotFound, Found, PermissionDenied, Open };

@@ -247,10 +247,22 @@ qt_add_executable(breco_ui_integration_tests
     ${BRECO_RESOURCES}
 )
 target_include_directories(breco_ui_integration_tests PRIVATE src)
+# MSVC decorates member symbols differently by access, so the test and the
+# MainWindow implementation must see the same declarations.
+target_compile_definitions(
+    breco_ui_integration_tests PRIVATE BRECO_MAINWINDOW_TEST_ACCESS)
 target_link_libraries(
     breco_ui_integration_tests PRIVATE ${BRECO_QT_LIBS} Qt6::Test)
 
-add_test(NAME breco_ui_integration_tests COMMAND breco_ui_integration_tests)
+if(WIN32)
+    set(BRECO_UI_TEST_REPORT
+        "${CMAKE_CURRENT_BINARY_DIR}/breco_ui_integration_tests.txt")
+    add_test(
+        NAME breco_ui_integration_tests
+        COMMAND breco_ui_integration_tests -o "${BRECO_UI_TEST_REPORT},txt")
+else()
+    add_test(NAME breco_ui_integration_tests COMMAND breco_ui_integration_tests)
+endif()
 set_tests_properties(breco_ui_integration_tests PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
 qt_add_executable(breco_unit_tests

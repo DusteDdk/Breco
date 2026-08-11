@@ -41,7 +41,13 @@ jobs:
       - name: Test
         env:
           QT_QPA_PLATFORM: offscreen
-        run: ctest --test-dir build --build-config Release --output-on-failure
+        run: |
+          ctest --test-dir build --build-config Release --output-on-failure
+          $ctestExitCode = $LASTEXITCODE
+          if ($ctestExitCode -ne 0 -and (Test-Path build/breco_ui_integration_tests.txt)) {
+            Get-Content build/breco_ui_integration_tests.txt
+          }
+          exit $ctestExitCode
 
       - name: Install
         run: cmake --install build --prefix dist/breco-windows-x86_64
