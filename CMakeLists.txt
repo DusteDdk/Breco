@@ -201,24 +201,18 @@ if(WIN32)
         set(icon_ico "${icon_dir}/${icon_basename}.ico")
         set(icon_rc "${icon_dir}/${target}.rc")
 
-        find_program(BRECO_ICON_CONVERTER NAMES magick convert)
-        if(NOT BRECO_ICON_CONVERTER)
-            message(WARNING "ImageMagick (magick/convert) not found; ${target} will be built without a custom icon.")
+        find_program(BRECO_MAGICK_EXECUTABLE NAMES magick)
+        if(NOT BRECO_MAGICK_EXECUTABLE)
+            message(WARNING "ImageMagick (magick) not found; ${target} will be built without a custom icon.")
             return()
         endif()
 
-        if(BRECO_ICON_CONVERTER MATCHES "magick$")
-            set(_icon_convert_cmd "${BRECO_ICON_CONVERTER}" convert)
-        else()
-            set(_icon_convert_cmd "${BRECO_ICON_CONVERTER}")
-        endif()
-
         file(MAKE_DIRECTORY "${icon_dir}")
-        file(WRITE "${icon_rc}" "IDI_ICON1 ICON DISCARDABLE \"${icon_basename}.ico\"\n")
+        file(WRITE "${icon_rc}" "IDI_ICON1 ICON DISCARDABLE \"${icon_ico}\"\n")
 
         add_custom_command(
             OUTPUT "${icon_ico}"
-            COMMAND ${_icon_convert_cmd}
+            COMMAND "${BRECO_MAGICK_EXECUTABLE}"
                     "${CMAKE_CURRENT_SOURCE_DIR}/res/${icon_png}"
                     -define icon:auto-resize=256,128,64,48,32,16
                     "${icon_ico}"
