@@ -8,6 +8,7 @@ QT_BEGIN_NAMESPACE
 class QCheckBox;
 class QComboBox;
 class QLabel;
+class QLineEdit;
 class QRadioButton;
 class QSpinBox;
 namespace Ui {
@@ -26,8 +27,9 @@ public:
 
     QLabel* fileNameValueLabel() const;
     QLabel* fileSizeValueLabel() const;
-    QLabel* offsetValueLabel() const;
-    QLabel* selectedValueLabel() const;
+    QLineEdit* offsetValueEdit() const;
+    QLineEdit* selectedValueEdit() const;
+    QLineEdit* selectToValueEdit() const;
     QCheckBox* highlightResultCheckBox() const;
     QComboBox* showAsComboBox() const;
     QComboBox* newlineModeComboBox() const;

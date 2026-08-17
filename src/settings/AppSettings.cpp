@@ -209,7 +209,7 @@ int AppSettings::textNewlineModeIndex() {
 
 int AppSettings::textByteLineModeIndex() {
     QSettings settings(kOrg, kApp);
-    return settings.value(kTextByteLineModeIndexKey, 4).toInt();
+    return settings.value(kTextByteLineModeIndexKey, 1).toInt();
 }
 
 bool AppSettings::prefillOnMergeEnabled() {
@@ -258,7 +258,10 @@ bool AppSettings::currentByteInfoBigEndianEnabled() {
 int AppSettings::hexShowAsIndex() {
     QSettings settings(kOrg, kApp);
     if (!settings.contains(kHexShowAsIndexKey)) {
-        return settings.value(kTextByteModeKey, false).toBool() ? 0 : 1;
+        if (settings.contains(kTextByteModeKey)) {
+            return settings.value(kTextByteModeKey).toBool() ? 0 : 1;
+        }
+        return 4;
     }
     return settings.value(kHexShowAsIndexKey, 0).toInt();
 }

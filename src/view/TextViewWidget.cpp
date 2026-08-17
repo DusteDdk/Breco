@@ -10,7 +10,6 @@
 #include <QGuiApplication>
 #include <QKeySequence>
 #include <QMenu>
-#include <QMimeData>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QStyle>
@@ -152,6 +151,8 @@ TextViewWidget::TextViewWidget(QWidget* parent) : QWidget(parent) {
 
     m_gutterWidget = new QWidget(this);
     m_contentWidget = new QWidget(this);
+    m_gutterWidget->setObjectName(QStringLiteral("textViewGutter"));
+    m_contentWidget->setObjectName(QStringLiteral("textViewContent"));
     m_vScrollBar = new QScrollBar(Qt::Vertical, this);
     m_hScrollBar = new QScrollBar(Qt::Horizontal, this);
     m_gutterWidget->installEventFilter(this);
@@ -469,6 +470,42 @@ void TextViewWidget::setSelectedOffset(quint64 absoluteOffset, bool centerInView
         BRECO_SELTRACE(QStringLiteral("TextViewWidget::setSelectedOffset: done elapsed=%1us")
                            .arg(debug::selectionTraceElapsedUs() - startUs));
     }
+}
+
+bool TextViewWidget::setSelectionRange(quint64 startOffset, quint64 endOffsetExclusive) {
+    if (endOffsetExclusive <= startOffset || m_lines.isEmpty()) {
+        return false;
+    }
+
+    int firstVisibleIndex = -1;
+    int lastVisibleIndex = -1;
+    for (const DisplayLine& line : m_lines) {
+        for (const Token& token : line.tokens) {
+            const quint64 tokenLength = static_cast<quint64>(qMax(1, token.byteLen));
+            if (token.absoluteOffset == startOffset) {
+                firstVisibleIndex = token.visibleIndex;
+            }
+            if (token.absoluteOffset <= std::numeric_limits<quint64>::max() - tokenLength &&
+                token.absoluteOffset + tokenLength == endOffsetExclusive) {
+                lastVisibleIndex = token.visibleIndex;
+            }
+        }
+    }
+    if (firstVisibleIndex < 0 || lastVisibleIndex < firstVisibleIndex) {
+        return false;
+    }
+
+    m_selectionStartVisibleIndex = firstVisibleIndex;
+    m_selectionEndVisibleIndex = lastVisibleIndex;
+    m_clickPressVisibleIndex = -1;
+    m_hasSelection = true;
+    m_selecting = false;
+    m_selectedOffset = startOffset;
+    m_hasSelectedOffset = true;
+    m_contentWidget->update();
+    m_gutterWidget->update();
+    emitSelectionRangeChanged();
+    return true;
 }
 
 void TextViewWidget::setExternalSelectionRange(
@@ -1567,6 +1604,21 @@ QVector<quint64> TextViewWidget::selectedVisibleOffsets() const {
     return offsets;
 }
 
+std::optional<QPair<quint64, quint64>> TextViewWidget::selectedByteExtentOffsets() const {
+    const QVector<const Token*> selected = selectedTokens();
+    if (selected.isEmpty() || selected.first() == nullptr || selected.last() == nullptr) {
+        return std::nullopt;
+    }
+
+    const quint64 start = selected.first()->absoluteOffset;
+    const Token* last = selected.last();
+    const quint64 lastLength = static_cast<quint64>(qMax(1, last->byteLen));
+    if (last->absoluteOffset > std::numeric_limits<quint64>::max() - lastLength) {
+        return std::nullopt;
+    }
+    return qMakePair(start, last->absoluteOffset + lastLength);
+}
+
 std::optional<quint64> TextViewWidget::firstVisibleByteOffset() const {
     if (m_lines.isEmpty()) {
         return std::nullopt;
@@ -1845,17 +1897,6 @@ void TextViewWidget::copySelectionToClipboard(CopyFormat format) const {
         case CopyFormat::CHeader:
             clipboard->setText(selectedCHeaderText());
             break;
-        case CopyFormat::Binary: {
-            const QByteArray slice = selectedBytes();
-            if (slice.isEmpty()) {
-                return;
-            }
-            auto* mime = new QMimeData();
-            mime->setData(QStringLiteral("application/octet-stream"), slice);
-            mime->setText(selectedHexText());
-            clipboard->setMimeData(mime);
-            break;
-        }
     }
 }
 
@@ -1953,7 +1994,8 @@ void TextViewWidget::showSelectionContextMenu(const QPoint& localPos) {
     QAction* copyOffsetHex = copyMenu->addAction(QStringLiteral("Offset + Hex"));
     QAction* copyHex = copyMenu->addAction(QStringLiteral("Hex"));
     QAction* copyCHeader = copyMenu->addAction(QStringLiteral("C Header"));
-    QAction* copyBinary = copyMenu->addAction(QStringLiteral("Binary"));
+    QAction* saveBinary = copyMenu->addAction(QStringLiteral("Binary"));
+    QAction* saveBinaryFromHere = copyMenu->addAction(QStringLiteral("Binary (from here)"));
 
     QAction* selected = menu.exec(m_contentWidget->mapToGlobal(localPos));
     if (selected == copyText) {
@@ -1964,8 +2006,16 @@ void TextViewWidget::showSelectionContextMenu(const QPoint& localPos) {
         copySelectionToClipboard(CopyFormat::Hex);
     } else if (selected == copyCHeader) {
         copySelectionToClipboard(CopyFormat::CHeader);
-    } else if (selected == copyBinary) {
-        copySelectionToClipboard(CopyFormat::Binary);
+    } else if (selected == saveBinary) {
+        const auto range = selectedByteExtentOffsets();
+        if (range.has_value()) {
+            emit saveBinarySelectionRequested(range->first, range->second);
+        }
+    } else if (selected == saveBinaryFromHere) {
+        const auto range = selectedByteExtentOffsets();
+        if (range.has_value()) {
+            emit saveBinaryFromHereRequested(range->first);
+        }
     }
 }
 

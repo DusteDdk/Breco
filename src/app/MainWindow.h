@@ -6,6 +6,7 @@
 #include <QSet>
 #include <QStringList>
 #include <QVector>
+#include <functional>
 #include <memory>
 #include <optional>
 
@@ -102,6 +103,7 @@ private:
     enum class SourcePathFeedback { None, NotFound, Found, PermissionDenied, Open };
     enum class HoverSource { None, Text, Bitmap };
     enum class ScanKind { None, Text, Structure };
+    enum class HexNavigatorField { Offset, Selected, SelectTo };
 
     struct HoverBuffer {
         QString filePath;
@@ -140,6 +142,10 @@ private:
     void updateTextModeControlVisibility();
     void updateHexControlsVisibility();
     void updateHexInfoPanel();
+    void commitHexNavigatorEdit(HexNavigatorField field);
+    bool navigateHexView(quint64 viewportOffset,
+                         std::optional<QPair<quint64, quint64>> selectionRange);
+    static bool parseHexNavigatorOffset(const QString& text, quint64* offset);
     void refreshDataViewFromNavigator();
     void syncStructPreviewToControls();
     void createStructPreview(quint64 absoluteOffset);
@@ -221,6 +227,21 @@ private:
                                QString& errorMessage) const;
     void finishImageScan(quint64 scanId, const EmbeddedImageScanSummary& summary,
                          const QVector<EmbeddedImageResult>& results);
+    void saveSelectedBinaryRange(quint64 startOffset, quint64 endOffsetExclusive);
+    void saveBinaryFromHere(quint64 startOffset);
+    std::optional<quint64> promptBinaryRangeLength(quint64 remainingBytes);
+    void saveBinaryRangeWithDialogs(const ScanTarget& target, quint64 startOffset,
+                                    quint64 length);
+    void saveBinaryRangeWithProgress(const QString& outputPath, const ScanTarget& target,
+                                     quint64 startOffset, quint64 length);
+    bool writeBinaryRangeToFile(
+        const QString& outputPath, const ScanTarget& target, quint64 startOffset,
+        quint64 length, const ShiftSettings& shift, QString* errorMessage,
+        const std::function<void(quint64)>& progressCallback = {});
+    static quint64 binaryLengthFromInput(double value, int unitIndex,
+                                         quint64 remainingBytes);
+    static QString binaryAmountText(quint64 bytes, int unitIndex = -1);
+    static QString binaryProgressText(quint64 written, quint64 total);
 
     void refreshCurrentByteInfoFromLastHover();
     void updateCurrentByteInfoFromHover(const HoverBuffer& buffer, quint64 absoluteOffset);
@@ -288,6 +309,8 @@ private:
     bool m_previewSyncInProgress = false;
     bool m_previewUpdateScheduled = false;
     std::optional<quint64> m_pendingCenterOffset;
+    std::optional<quint64> m_pendingHexViewportOffset;
+    std::optional<QPair<quint64, quint64>> m_pendingHexSelectionRange;
     int m_activeOverlapTargetIdx = -1;
     bool m_mainSplitterHandleDragInProgress = false;
     quint64 m_textExpandBeforeBytes = 0;
@@ -304,6 +327,7 @@ private:
     QString m_savedStructureSearchTerm;
     bool m_savedStructureTermEnabled = true;
     bool m_savedIgnoreCaseEnabled = true;
+    bool m_destroying = false;
 };
 
 }  // namespace breco

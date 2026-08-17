@@ -15,9 +15,11 @@ QLabel* HexViewControlsPanel::fileNameValueLabel() const { return m_ui->fileName
 
 QLabel* HexViewControlsPanel::fileSizeValueLabel() const { return m_ui->fileSizeValueLabel; }
 
-QLabel* HexViewControlsPanel::offsetValueLabel() const { return m_ui->offsetValueLabel; }
+QLineEdit* HexViewControlsPanel::offsetValueEdit() const { return m_ui->offsetValueEdit; }
 
-QLabel* HexViewControlsPanel::selectedValueLabel() const { return m_ui->selectedValueLabel; }
+QLineEdit* HexViewControlsPanel::selectedValueEdit() const { return m_ui->selectedValueEdit; }
+
+QLineEdit* HexViewControlsPanel::selectToValueEdit() const { return m_ui->selectToValueEdit; }
 
 QCheckBox* HexViewControlsPanel::highlightResultCheckBox() const {
     return m_ui->highlightResultCheckBox;

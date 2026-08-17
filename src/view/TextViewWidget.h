@@ -61,6 +61,7 @@ public:
                  std::optional<unsigned char> previousByteBeforeBase = std::nullopt,
                  quint64 fileSizeBytes = 0);
     void setSelectedOffset(quint64 absoluteOffset, bool centerInView = true);
+    bool setSelectionRange(quint64 startOffset, quint64 endOffsetExclusive);
     void setExternalSelectionRange(
         std::optional<QPair<quint64, quint64>> absoluteRange);
     void setMatchRange(quint64 startOffset, quint32 length);
@@ -101,6 +102,8 @@ signals:
     void gutterWidthChanged(int width);
     void chunkEdgeExpansionRequested(int direction);
     void viewportFirstByteOffsetChanged(bool hasOffset, quint64 offset);
+    void saveBinarySelectionRequested(quint64 startOffset, quint64 endOffsetExclusive);
+    void saveBinaryFromHereRequested(quint64 startOffset);
 
 protected:
     void resizeEvent(QResizeEvent* event) override;
@@ -110,7 +113,7 @@ protected:
 
 private:
     enum class TokenKind { Text, ByteBox };
-    enum class CopyFormat { TextOnly, OffsetHex, Hex, CHeader, Binary };
+    enum class CopyFormat { TextOnly, OffsetHex, Hex, CHeader };
     enum class OffsetCopyFormat { Decimal, Hex, Binary };
 
     struct Token {
@@ -158,6 +161,7 @@ private:
     QPair<int, int> normalizedSelectionVisibleIndices() const;
     QVector<const Token*> selectedTokens() const;
     QVector<quint64> selectedVisibleOffsets() const;
+    std::optional<QPair<quint64, quint64>> selectedByteExtentOffsets() const;
     std::optional<quint64> lastVisibleByteOffset() const;
     QByteArray selectedBytes() const;
     QString selectedText(bool replaceNullMarkers) const;

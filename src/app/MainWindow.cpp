@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cmath>
 #include <cstring>
 #include <iostream>
 #include <limits>
@@ -21,21 +22,28 @@
 #include <QDialog>
 #include <QComboBox>
 #include <QColor>
+#include <QCoreApplication>
 #include <QEvent>
+#include <QDialogButtonBox>
+#include <QDoubleValidator>
+#include <QEventLoop>
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QHeaderView>
+#include <QHBoxLayout>
 #include <QItemSelectionModel>
 #include <QLabel>
 #include <QLayout>
 #include <QLineEdit>
+#include <QLocale>
 #include <QMessageBox>
 #include <QMetaObject>
 #include <QPlainTextEdit>
 #include <QProgressBar>
 #include <QPushButton>
 #include <QRadioButton>
+#include <QSaveFile>
 #include <QSignalBlocker>
 #include <QSpinBox>
 #include <QStatusBar>
@@ -83,6 +91,7 @@ constexpr quint64 kEvictedWindowRadiusBytes = 8ULL * 1024ULL * 1024ULL;
 constexpr quint64 kResultBufferCacheBudgetBytes = 2048ULL * 1024ULL * 1024ULL;
 constexpr quint64 kNotEmptyInitialBytes = 16ULL * 1024ULL * 1024ULL;
 constexpr quint64 kTextChunkExpandStepBytes = 8ULL * 1024ULL * 1024ULL;
+constexpr quint64 kBinarySaveChunkBytes = 16ULL * 1024ULL * 1024ULL;
 constexpr int kTopPaneMinHeightPx = 180;
 constexpr int kAdvancedSnapHideThresholdPx = 190;
 constexpr int kAdvancedSnapShowThresholdPx = 260;
@@ -560,6 +569,18 @@ MainWindow::MainWindow(QWidget* parent)
             &MainWindow::onStartScan);
     connect(m_scanControlsPanel->searchTermLineEdit(), &QLineEdit::returnPressed, this,
             &MainWindow::onStartScan);
+    connect(m_hexControlsPanel->offsetValueEdit(), &QLineEdit::returnPressed, this,
+            [this]() { commitHexNavigatorEdit(HexNavigatorField::Offset); });
+    connect(m_hexControlsPanel->selectedValueEdit(), &QLineEdit::returnPressed, this,
+            [this]() { commitHexNavigatorEdit(HexNavigatorField::Selected); });
+    connect(m_hexControlsPanel->selectToValueEdit(), &QLineEdit::returnPressed, this,
+            [this]() { commitHexNavigatorEdit(HexNavigatorField::SelectTo); });
+    for (QLineEdit* edit : {m_hexControlsPanel->offsetValueEdit(),
+                            m_hexControlsPanel->selectedValueEdit(),
+                            m_hexControlsPanel->selectToValueEdit()}) {
+        connect(edit, &QLineEdit::editingFinished, this,
+                [this]() { updateHexInfoPanel(); });
+    }
     connect(m_structModeLeftPanel, &StructModeLeftPanel::structureScanRequested,
             this, &MainWindow::onStartStructureScan);
     connect(m_structModeLeftPanel, &StructModeLeftPanel::structureScanStopRequested,
@@ -795,6 +816,10 @@ MainWindow::MainWindow(QWidget* parent)
         updateBufferStatusLine();
     });
     connect(m_textView, &TextViewWidget::byteClicked, this, &MainWindow::onTextByteClicked);
+    connect(m_textView, &TextViewWidget::saveBinarySelectionRequested, this,
+            &MainWindow::saveSelectedBinaryRange);
+    connect(m_textView, &TextViewWidget::saveBinaryFromHereRequested, this,
+            &MainWindow::saveBinaryFromHere);
     connect(m_bitmapView, &BitmapViewWidget::hoverAbsoluteOffsetChanged, this,
             &MainWindow::onBitmapHoverOffsetChanged);
     connect(m_bitmapView, &BitmapViewWidget::byteClicked, this, &MainWindow::onBitmapByteClicked);
@@ -1195,7 +1220,7 @@ MainWindow::MainWindow(QWidget* parent)
     }
 }
 
-MainWindow::~MainWindow() = default;
+MainWindow::~MainWindow() { m_destroying = true; }
 
 void MainWindow::setProtectedSourceOpenerForTests(std::unique_ptr<ProtectedSourceOpener> opener) {
     m_protectedSourceOpener = std::move(opener);
@@ -1936,7 +1961,7 @@ void MainWindow::updateHexControlsVisibility() {
 }
 
 void MainWindow::updateHexInfoPanel() {
-    if (m_hexControlsPanel == nullptr) {
+    if (m_destroying || m_hexControlsPanel == nullptr) {
         return;
     }
 
@@ -1959,27 +1984,191 @@ void MainWindow::updateHexInfoPanel() {
 
     const std::optional<quint64> firstVisible =
         (m_textView != nullptr) ? m_textView->firstVisibleByteOffset() : std::nullopt;
-    m_hexControlsPanel->offsetValueLabel()->setText(
-        firstVisible.has_value() ? formatHex(firstVisible.value(), 1) : QStringLiteral("-"));
+    QLineEdit* offsetEdit = m_hexControlsPanel->offsetValueEdit();
+    offsetEdit->setText(firstVisible.has_value() ? formatHex(firstVisible.value(), 1)
+                                                : QStringLiteral("-"));
+    offsetEdit->setEnabled(firstVisible.has_value());
+    offsetEdit->setModified(false);
 
     const std::optional<QPair<quint64, quint64>> selection =
         m_activeTextSelectionRange.has_value()
             ? m_activeTextSelectionRange
             : ((m_textView != nullptr) ? m_textView->selectionRangeOffsets() : std::nullopt);
     if (!selection.has_value()) {
-        m_hexControlsPanel->selectedValueLabel()->setText(QString());
+        m_hexControlsPanel->selectedValueEdit()->clear();
+        m_hexControlsPanel->selectedValueEdit()->setEnabled(false);
+        m_hexControlsPanel->selectedValueEdit()->setModified(false);
+        m_hexControlsPanel->selectToValueEdit()->clear();
+        m_hexControlsPanel->selectToValueEdit()->setEnabled(false);
+        m_hexControlsPanel->selectToValueEdit()->setModified(false);
         return;
     }
     const quint64 count = selection->second > selection->first
                               ? selection->second - selection->first
                               : 1ULL;
     if (count <= 1ULL) {
-        m_hexControlsPanel->selectedValueLabel()->setText(formatHex(selection->first, 1));
+        m_hexControlsPanel->selectedValueEdit()->setText(formatHex(selection->first, 1));
+    } else {
+        m_hexControlsPanel->selectedValueEdit()->setText(
+            QStringLiteral("%1 (+%2 bytes)")
+                .arg(formatHex(selection->first, 1), QString::number(count)));
+    }
+    m_hexControlsPanel->selectedValueEdit()->setEnabled(true);
+    m_hexControlsPanel->selectedValueEdit()->setModified(false);
+    m_hexControlsPanel->selectToValueEdit()->setText(
+        formatHex(selection->second - 1ULL, 1));
+    m_hexControlsPanel->selectToValueEdit()->setEnabled(true);
+    m_hexControlsPanel->selectToValueEdit()->setModified(false);
+}
+
+bool MainWindow::parseHexNavigatorOffset(const QString& text, quint64* offset) {
+    if (offset == nullptr) {
+        return false;
+    }
+    QString value = text.trimmed();
+    const int suffixStart = value.indexOf(QLatin1Char(' '));
+    if (suffixStart >= 0) {
+        value.truncate(suffixStart);
+    }
+    int base = 10;
+    if (value.startsWith(QStringLiteral("0x"), Qt::CaseInsensitive)) {
+        value.remove(0, 2);
+        base = 16;
+    }
+    if (value.isEmpty()) {
+        return false;
+    }
+    bool valid = false;
+    const quint64 parsed = value.toULongLong(&valid, base);
+    if (!valid) {
+        return false;
+    }
+    *offset = parsed;
+    return true;
+}
+
+void MainWindow::commitHexNavigatorEdit(HexNavigatorField field) {
+    QLineEdit* edit = nullptr;
+    switch (field) {
+        case HexNavigatorField::Offset:
+            edit = m_hexControlsPanel->offsetValueEdit();
+            break;
+        case HexNavigatorField::Selected:
+            edit = m_hexControlsPanel->selectedValueEdit();
+            break;
+        case HexNavigatorField::SelectTo:
+            edit = m_hexControlsPanel->selectToValueEdit();
+            break;
+    }
+
+    quint64 editedValue = 0;
+    const std::optional<int> targetIndex = activePreviewTargetIndex();
+    const std::optional<quint64> viewportOffset =
+        m_textView != nullptr ? m_textView->firstVisibleByteOffset() : std::nullopt;
+    const std::optional<QPair<quint64, quint64>> selection =
+        m_activeTextSelectionRange.has_value()
+            ? m_activeTextSelectionRange
+            : (m_textView != nullptr ? m_textView->selectionRangeOffsets() : std::nullopt);
+    if (edit == nullptr || !parseHexNavigatorOffset(edit->text(), &editedValue) ||
+        !targetIndex.has_value() || !viewportOffset.has_value()) {
+        updateHexInfoPanel();
         return;
     }
-    m_hexControlsPanel->selectedValueLabel()->setText(
-        QStringLiteral("%1 (+%2 bytes)")
-            .arg(formatHex(selection->first, 1), QString::number(count)));
+
+    const quint64 fileSize = m_scanTargets.at(targetIndex.value()).fileSize;
+    if (fileSize == 0 || editedValue >= fileSize) {
+        updateHexInfoPanel();
+        return;
+    }
+
+    if (!selection.has_value()) {
+        if (field == HexNavigatorField::Offset) {
+            navigateHexView(editedValue, std::nullopt);
+        } else {
+            updateHexInfoPanel();
+        }
+        return;
+    }
+
+    const quint64 selectionStart = selection->first;
+    const quint64 selectionEnd = selection->second;
+    if (selectionEnd <= selectionStart || selectionStart < viewportOffset.value()) {
+        updateHexInfoPanel();
+        return;
+    }
+    const quint64 delta = selectionStart - viewportOffset.value();
+    const quint64 selectionLength = selectionEnd - selectionStart;
+    quint64 nextViewport = viewportOffset.value();
+    quint64 nextSelectionStart = selectionStart;
+    quint64 nextSelectionEnd = selectionEnd;
+
+    switch (field) {
+        case HexNavigatorField::Offset:
+            if (editedValue > std::numeric_limits<quint64>::max() - delta) {
+                updateHexInfoPanel();
+                return;
+            }
+            nextViewport = editedValue;
+            nextSelectionStart = editedValue + delta;
+            if (nextSelectionStart >= fileSize ||
+                selectionLength > fileSize - nextSelectionStart) {
+                updateHexInfoPanel();
+                return;
+            }
+            nextSelectionEnd = nextSelectionStart + selectionLength;
+            break;
+        case HexNavigatorField::Selected:
+            if (editedValue < delta || selectionLength > fileSize - editedValue) {
+                updateHexInfoPanel();
+                return;
+            }
+            nextSelectionStart = editedValue;
+            nextSelectionEnd = editedValue + selectionLength;
+            nextViewport = editedValue - delta;
+            break;
+        case HexNavigatorField::SelectTo:
+            if (editedValue < selectionStart) {
+                updateHexInfoPanel();
+                return;
+            }
+            nextSelectionEnd = editedValue + 1ULL;
+            break;
+    }
+
+    navigateHexView(nextViewport,
+                    qMakePair(nextSelectionStart, nextSelectionEnd));
+}
+
+bool MainWindow::navigateHexView(
+    quint64 viewportOffset,
+    std::optional<QPair<quint64, quint64>> selectionRange) {
+    const std::optional<int> targetIndex = activePreviewTargetIndex();
+    if (!targetIndex.has_value()) {
+        updateHexInfoPanel();
+        return false;
+    }
+    const quint64 fileSize = m_scanTargets.at(targetIndex.value()).fileSize;
+    if (viewportOffset >= fileSize ||
+        (selectionRange.has_value() &&
+         (selectionRange->second <= selectionRange->first ||
+          selectionRange->second > fileSize))) {
+        updateHexInfoPanel();
+        return false;
+    }
+
+    m_pendingHexViewportOffset = viewportOffset;
+    m_pendingHexSelectionRange = selectionRange;
+    const quint64 anchor = selectionRange.has_value() ? selectionRange->first : viewportOffset;
+    jumpToAbsoluteOffset(anchor);
+    m_pendingHexViewportOffset.reset();
+    m_pendingHexSelectionRange.reset();
+
+    const bool viewportApplied =
+        m_textView != nullptr && m_textView->firstVisibleByteOffset() == viewportOffset;
+    const bool selectionApplied =
+        !selectionRange.has_value() || m_activeTextSelectionRange == selectionRange;
+    updateHexInfoPanel();
+    return viewportApplied && selectionApplied;
 }
 
 void MainWindow::refreshDataViewFromNavigator() {
@@ -2558,6 +2747,8 @@ void MainWindow::clearResultBufferCacheState() {
     m_activeOverlapTargetIdx = -1;
     m_sharedCenterOffset = 0;
     m_pendingCenterOffset.reset();
+    m_pendingHexViewportOffset.reset();
+    m_pendingHexSelectionRange.reset();
     m_previewUpdateScheduled = false;
     m_textExpandBeforeBytes = 0;
     m_textExpandAfterBytes = 0;
@@ -2945,8 +3136,25 @@ void MainWindow::updateSharedPreviewNow() {
     m_sharedCenterOffset = center;
     BRECO_SELTRACE(QStringLiteral("updateSharedPreviewNow: center=%1").arg(center));
 
+    const std::optional<quint64> forcedViewportOffset = m_pendingHexViewportOffset;
+    const std::optional<QPair<quint64, quint64>> forcedSelectionRange =
+        m_pendingHexSelectionRange;
+    m_pendingHexViewportOffset.reset();
+    m_pendingHexSelectionRange.reset();
+
     ByteSpan textSpan = centeredSpan(backing, center, textViewportByteWindow());
-    if (pageDirection != 0 && pageEdgeOffset.has_value()) {
+    if (forcedViewportOffset.has_value()) {
+        const quint64 backingEndExclusive = backing.fileOffset + backingSize;
+        textSpan.start = qBound(backing.fileOffset, forcedViewportOffset.value(),
+                                backingEndExclusive - 1ULL);
+        quint64 requestedSize = textViewportByteWindow();
+        if (forcedSelectionRange.has_value() &&
+            forcedSelectionRange->second > textSpan.start) {
+            requestedSize = qMax(requestedSize,
+                                 forcedSelectionRange->second - textSpan.start);
+        }
+        textSpan.size = qMin(requestedSize, backingEndExclusive - textSpan.start);
+    } else if (pageDirection != 0 && pageEdgeOffset.has_value()) {
         const quint64 backingStart = backing.fileOffset;
         const quint64 windowSize = qMax<quint64>(1, qMin(textSpan.size, backingSize));
         const quint64 maxStart = backingStart + (backingSize - windowSize);
@@ -3040,7 +3248,11 @@ void MainWindow::updateSharedPreviewNow() {
     }
     m_textView->setData(textBytes, textSpan.start, previousTextByte, fileSizeBytes);
     m_textView->setMatchRange(match->offset, static_cast<quint32>(termLen));
-    m_textView->setSelectedOffset(center, true);
+    m_textView->setSelectedOffset(center, !forcedViewportOffset.has_value());
+    if (forcedSelectionRange.has_value()) {
+        m_textView->setSelectionRange(forcedSelectionRange->first,
+                                      forcedSelectionRange->second);
+    }
 
     m_bitmapView->setData(bitmapBytes);
     m_bitmapView->setCenterAnchorOffset(center);
@@ -3197,6 +3409,348 @@ std::optional<int> MainWindow::activePreviewTargetIndex() const {
         return 0;
     }
     return std::nullopt;
+}
+
+quint64 MainWindow::binaryLengthFromInput(double value, int unitIndex,
+                                          quint64 remainingBytes) {
+    static constexpr quint64 multipliers[] = {
+        1ULL,
+        1024ULL,
+        1024ULL * 1024ULL,
+        1024ULL * 1024ULL * 1024ULL,
+        1024ULL * 1024ULL * 1024ULL * 1024ULL,
+    };
+    if (!std::isfinite(value) || value <= 0.0) {
+        return 0;
+    }
+
+    const int clampedUnit = qBound(0, unitIndex, 4);
+    const long double multiplier = static_cast<long double>(multipliers[clampedUnit]);
+    const long double maxBytes =
+        static_cast<long double>(std::numeric_limits<quint64>::max());
+    const long double input = static_cast<long double>(value);
+    const quint64 requestedBytes =
+        input >= maxBytes / multiplier
+            ? std::numeric_limits<quint64>::max()
+            : static_cast<quint64>(input * multiplier);
+    return qMin(remainingBytes, requestedBytes);
+}
+
+QString MainWindow::binaryAmountText(quint64 bytes, int unitIndex) {
+    static constexpr quint64 multipliers[] = {
+        1ULL,
+        1024ULL,
+        1024ULL * 1024ULL,
+        1024ULL * 1024ULL * 1024ULL,
+        1024ULL * 1024ULL * 1024ULL * 1024ULL,
+    };
+    static const char* units[] = {"Bytes", "KiB", "MiB", "GiB", "TiB"};
+
+    if (unitIndex < 0) {
+        unitIndex = 0;
+        while (unitIndex < 4 && bytes >= multipliers[unitIndex + 1]) {
+            ++unitIndex;
+        }
+    }
+    unitIndex = qBound(0, unitIndex, 4);
+    if (unitIndex == 0) {
+        return QStringLiteral("%1 Bytes").arg(bytes);
+    }
+
+    const long double value = static_cast<long double>(bytes) /
+                              static_cast<long double>(multipliers[unitIndex]);
+    return QStringLiteral("%1 %2")
+        .arg(QString::number(static_cast<double>(value), 'f', 2), units[unitIndex]);
+}
+
+QString MainWindow::binaryProgressText(quint64 written, quint64 total) {
+    int unitIndex = 0;
+    static constexpr quint64 multipliers[] = {
+        1ULL,
+        1024ULL,
+        1024ULL * 1024ULL,
+        1024ULL * 1024ULL * 1024ULL,
+        1024ULL * 1024ULL * 1024ULL * 1024ULL,
+    };
+    while (unitIndex < 4 && total >= multipliers[unitIndex + 1]) {
+        ++unitIndex;
+    }
+    return QStringLiteral("%1 / %2")
+        .arg(binaryAmountText(written, unitIndex), binaryAmountText(total, unitIndex));
+}
+
+std::optional<quint64> MainWindow::promptBinaryRangeLength(quint64 remainingBytes) {
+    QDialog dialog(this);
+    dialog.setObjectName(QStringLiteral("saveRangeAsBinaryDialog"));
+    dialog.setWindowTitle(QStringLiteral("Save range as binary"));
+    dialog.setMinimumWidth(460);
+
+    auto* layout = new QVBoxLayout(&dialog);
+    auto* untilEndRadio = new QRadioButton(
+        QStringLiteral("Until end of file (%1)").arg(binaryAmountText(remainingBytes)), &dialog);
+    untilEndRadio->setObjectName(QStringLiteral("saveRangeUntilEndRadio"));
+    untilEndRadio->setChecked(true);
+    layout->addWidget(untilEndRadio);
+
+    auto* numericRow = new QHBoxLayout();
+    auto* numericRadio = new QRadioButton(&dialog);
+    numericRadio->setObjectName(QStringLiteral("saveRangeNumericRadio"));
+    numericRadio->setAccessibleName(QStringLiteral("Specific length"));
+    numericRow->addWidget(numericRadio);
+
+    auto* valueInput = new QLineEdit(&dialog);
+    valueInput->setObjectName(QStringLiteral("saveRangeValueInput"));
+    auto* validator = new QDoubleValidator(
+        0.0, std::numeric_limits<double>::max(), 12, valueInput);
+    validator->setNotation(QDoubleValidator::ScientificNotation);
+    validator->setLocale(QLocale::c());
+    valueInput->setValidator(validator);
+    valueInput->setAlignment(Qt::AlignRight);
+    numericRow->addWidget(valueInput, 1);
+
+    auto* unitCombo = new QComboBox(&dialog);
+    unitCombo->setObjectName(QStringLiteral("saveRangeUnitCombo"));
+    unitCombo->addItems({QStringLiteral("Bytes"), QStringLiteral("KiB"),
+                         QStringLiteral("MiB"), QStringLiteral("GiB"),
+                         QStringLiteral("TiB")});
+    numericRow->addWidget(unitCombo);
+    layout->addLayout(numericRow);
+
+    static constexpr quint64 multipliers[] = {
+        1ULL,
+        1024ULL,
+        1024ULL * 1024ULL,
+        1024ULL * 1024ULL * 1024ULL,
+        1024ULL * 1024ULL * 1024ULL * 1024ULL,
+    };
+    int initialUnit = 0;
+    while (initialUnit < 4 && remainingBytes >= multipliers[initialUnit + 1]) {
+        ++initialUnit;
+    }
+    unitCombo->setCurrentIndex(initialUnit);
+    const long double initialValue =
+        static_cast<long double>(remainingBytes) /
+        static_cast<long double>(multipliers[initialUnit]);
+    valueInput->setText(QString::number(static_cast<double>(initialValue), 'g', 12));
+
+    valueInput->setEnabled(false);
+    unitCombo->setEnabled(false);
+    connect(numericRadio, &QRadioButton::toggled, valueInput, &QWidget::setEnabled);
+    connect(numericRadio, &QRadioButton::toggled, unitCombo, &QWidget::setEnabled);
+
+    auto* buttons = new QDialogButtonBox(
+        QDialogButtonBox::Cancel | QDialogButtonBox::Ok, &dialog);
+    buttons->setObjectName(QStringLiteral("saveRangeButtons"));
+    layout->addWidget(buttons);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+
+    std::optional<quint64> selectedLength;
+    auto updateOkEnabled = [&]() {
+        const bool acceptable = untilEndRadio->isChecked() || valueInput->hasAcceptableInput();
+        buttons->button(QDialogButtonBox::Ok)->setEnabled(acceptable);
+    };
+    connect(untilEndRadio, &QRadioButton::toggled, &dialog,
+            [&](bool) { updateOkEnabled(); });
+    connect(valueInput, &QLineEdit::textChanged, &dialog,
+            [&](const QString&) { updateOkEnabled(); });
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, [&]() {
+        if (untilEndRadio->isChecked()) {
+            selectedLength = remainingBytes;
+            dialog.accept();
+            return;
+        }
+        bool valid = false;
+        const double value = QLocale::c().toDouble(valueInput->text(), &valid);
+        if (!valid || value < 0.0) {
+            valueInput->setFocus();
+            return;
+        }
+        selectedLength = binaryLengthFromInput(value, unitCombo->currentIndex(),
+                                               remainingBytes);
+        dialog.accept();
+    });
+    updateOkEnabled();
+
+    if (dialog.exec() != QDialog::Accepted) {
+        return std::nullopt;
+    }
+    return selectedLength;
+}
+
+void MainWindow::saveSelectedBinaryRange(quint64 startOffset,
+                                         quint64 endOffsetExclusive) {
+    const std::optional<int> targetIndex = activePreviewTargetIndex();
+    if (!targetIndex.has_value()) {
+        QMessageBox::warning(this, QStringLiteral("Save File"),
+                             QStringLiteral("There is no active source to save."));
+        return;
+    }
+    const ScanTarget target = m_scanTargets.at(targetIndex.value());
+    const quint64 end = qMin(endOffsetExclusive, target.fileSize);
+    if (startOffset >= target.fileSize || end <= startOffset) {
+        QMessageBox::warning(this, QStringLiteral("Save File"),
+                             QStringLiteral("The selected byte range is outside the active source."));
+        return;
+    }
+    saveBinaryRangeWithDialogs(target, startOffset, end - startOffset);
+}
+
+void MainWindow::saveBinaryFromHere(quint64 startOffset) {
+    const std::optional<int> targetIndex = activePreviewTargetIndex();
+    if (!targetIndex.has_value()) {
+        QMessageBox::warning(this, QStringLiteral("Save File"),
+                             QStringLiteral("There is no active source to save."));
+        return;
+    }
+    const ScanTarget target = m_scanTargets.at(targetIndex.value());
+    if (startOffset >= target.fileSize) {
+        QMessageBox::warning(this, QStringLiteral("Save File"),
+                             QStringLiteral("The selected byte offset is outside the active source."));
+        return;
+    }
+
+    const std::optional<quint64> length =
+        promptBinaryRangeLength(target.fileSize - startOffset);
+    if (!length.has_value()) {
+        return;
+    }
+    saveBinaryRangeWithDialogs(target, startOffset, length.value());
+}
+
+void MainWindow::saveBinaryRangeWithDialogs(const ScanTarget& target,
+                                            quint64 startOffset, quint64 length) {
+    const QString outputPath = QFileDialog::getSaveFileName(
+        this, QStringLiteral("Save File"), QString(), QStringLiteral("*.*"));
+    if (outputPath.isEmpty()) {
+        return;
+    }
+    saveBinaryRangeWithProgress(outputPath, target, startOffset, length);
+}
+
+void MainWindow::saveBinaryRangeWithProgress(const QString& outputPath,
+                                             const ScanTarget& target,
+                                             quint64 startOffset, quint64 length) {
+    QDialog progressDialog(this);
+    progressDialog.setObjectName(QStringLiteral("binarySaveProgressDialog"));
+    progressDialog.setWindowTitle(QStringLiteral("Save binary"));
+    progressDialog.setWindowModality(Qt::WindowModal);
+    progressDialog.setWindowFlag(Qt::WindowCloseButtonHint, false);
+    progressDialog.setMinimumWidth(420);
+
+    auto* layout = new QVBoxLayout(&progressDialog);
+    auto* statusLabel = new QLabel(QStringLiteral("Saving file..."), &progressDialog);
+    statusLabel->setObjectName(QStringLiteral("binarySaveStatusLabel"));
+    layout->addWidget(statusLabel);
+
+    auto* progressBar = new QProgressBar(&progressDialog);
+    progressBar->setObjectName(QStringLiteral("binarySaveProgressBar"));
+    progressBar->setRange(0, 1000);
+    progressBar->setValue(length == 0 ? 1000 : 0);
+    progressBar->setFormat(binaryProgressText(0, length));
+    layout->addWidget(progressBar);
+
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok, &progressDialog);
+    buttons->setObjectName(QStringLiteral("binarySaveButtons"));
+    buttons->hide();
+    layout->addWidget(buttons);
+    connect(buttons, &QDialogButtonBox::accepted, &progressDialog, &QDialog::accept);
+
+    bool saved = false;
+    QString errorMessage;
+    QTimer::singleShot(0, &progressDialog, [&]() {
+        QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
+        const auto updateProgress = [&](quint64 written) {
+            const int progress =
+                length == 0
+                    ? 1000
+                    : static_cast<int>((static_cast<long double>(written) * 1000.0L) /
+                                       static_cast<long double>(length));
+            progressBar->setValue(qBound(0, progress, 1000));
+            progressBar->setFormat(binaryProgressText(written, length));
+            QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
+        };
+
+        saved = writeBinaryRangeToFile(outputPath, target, startOffset, length,
+                                       currentShiftSettings(), &errorMessage,
+                                       updateProgress);
+        if (!saved) {
+            progressDialog.reject();
+            return;
+        }
+        statusLabel->setText(QStringLiteral("File saved"));
+        progressBar->hide();
+        buttons->show();
+    });
+
+    progressDialog.exec();
+    if (!saved) {
+        QMessageBox::warning(
+            this, QStringLiteral("Save File"),
+            errorMessage.isEmpty()
+                ? QStringLiteral("Could not save the binary file to %1.").arg(outputPath)
+                : errorMessage);
+    }
+}
+
+bool MainWindow::writeBinaryRangeToFile(
+    const QString& outputPath, const ScanTarget& target, quint64 startOffset,
+    quint64 length, const ShiftSettings& shift, QString* errorMessage,
+    const std::function<void(quint64)>& progressCallback) {
+    auto fail = [&](const QString& message) {
+        if (errorMessage != nullptr) {
+            *errorMessage = message;
+        }
+        return false;
+    };
+
+    if (outputPath.isEmpty() || target.filePath.isEmpty() ||
+        startOffset > target.fileSize || length > target.fileSize - startOffset) {
+        return fail(QStringLiteral("The requested byte range is invalid."));
+    }
+
+    QSaveFile output(outputPath);
+    if (!output.open(QIODevice::WriteOnly)) {
+        return fail(QStringLiteral("Could not open %1 for writing: %2")
+                        .arg(outputPath, output.errorString()));
+    }
+
+    quint64 written = 0;
+    while (written < length) {
+        const quint64 chunkSize = qMin(kBinarySaveChunkBytes, length - written);
+        const quint64 chunkOffset = startOffset + written;
+        const std::optional<QByteArray> chunk = m_windowLoader.loadTransformedWindow(
+            target.filePath, target.fileSize, chunkOffset, chunkSize, shift);
+        if (!chunk.has_value() || static_cast<quint64>(chunk->size()) != chunkSize) {
+            output.cancelWriting();
+            return fail(QStringLiteral("Could not read %1 bytes from the source at offset %2.")
+                            .arg(chunkSize)
+                            .arg(chunkOffset));
+        }
+
+        qint64 chunkWritten = 0;
+        while (chunkWritten < chunk->size()) {
+            const qint64 count = output.write(
+                chunk->constData() + chunkWritten, chunk->size() - chunkWritten);
+            if (count <= 0) {
+                const QString outputError = output.errorString();
+                output.cancelWriting();
+                return fail(QStringLiteral("Could not write %1: %2")
+                                .arg(outputPath, outputError));
+            }
+            chunkWritten += count;
+        }
+
+        written += chunkSize;
+        if (progressCallback) {
+            progressCallback(written);
+        }
+    }
+
+    if (!output.commit()) {
+        return fail(QStringLiteral("Could not finish writing %1: %2")
+                        .arg(outputPath, output.errorString()));
+    }
+    return true;
 }
 
 quint64 MainWindow::imageScanStartOffset() const {

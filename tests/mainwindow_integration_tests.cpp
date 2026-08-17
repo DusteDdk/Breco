@@ -5,6 +5,8 @@
 #include <QComboBox>
 #include <QCompleter>
 #include <QDir>
+#include <QDialog>
+#include <QDialogButtonBox>
 #include <QDockWidget>
 #include <QEnterEvent>
 #include <QFile>
@@ -138,8 +140,14 @@ private slots:
     void selectingResultRowUpdatesPreviewBuffers();
     void twoColumnCompositionAndDataViewToolbar();
     void navigatorLabelsAndDataViewEndianFollowSelection();
+    void hexViewDefaultsPersistAcrossWindows();
+    void hexNavigatorEditsPreserveDeltaAndSelectionLength();
     void currentBytePanelShowsEndianAndWidthAwareValues();
     void shiftMarksCurrentBufferDirtyAndRestoresOnDeselect();
+    void binarySelectionMenuContainsBothFileActions();
+    void binaryRangeDialogClampsNumericLength();
+    void binaryRangeWriterUsesShiftAndSixteenMiBChunks();
+    void binarySaveProgressReportsCompletion();
     void sourcePathInputValidatesAndOpensTargets();
     void sourcePathAutocompleteKeepsTypingFocusAndLimitsSuggestions();
 #ifdef Q_OS_UNIX
@@ -516,21 +524,161 @@ void MainWindowIntegrationTests::navigatorLabelsAndDataViewEndianFollowSelection
     QCoreApplication::processEvents();
 
     QCOMPARE(window.m_hexControlsPanel->fileNameValueLabel()->text(), QStringLiteral("labels.bin"));
-    QCOMPARE(window.m_hexControlsPanel->offsetValueLabel()->text(), QStringLiteral("0X0"));
+    QCOMPARE(window.m_hexControlsPanel->offsetValueEdit()->text(), QStringLiteral("0X0"));
     QVERIFY(window.m_hexControlsPanel->fileSizeValueLabel()->text().contains(QStringLiteral("B")));
 
     window.m_activeTextSelectionRange = qMakePair<quint64, quint64>(1, 4);
     window.updateHexInfoPanel();
     window.refreshDataViewFromNavigator();
     QCoreApplication::processEvents();
-    QCOMPARE(window.m_hexControlsPanel->selectedValueLabel()->text(),
+    QCOMPARE(window.m_hexControlsPanel->selectedValueEdit()->text(),
              QStringLiteral("0X1 (+3 bytes)"));
+    QCOMPARE(window.m_hexControlsPanel->selectToValueEdit()->text(),
+             QStringLiteral("0X3"));
     QCOMPARE(window.m_currentByteInfoPanel->asciiValueLabel()->text(), QStringLiteral("E"));
 
     window.m_rawDataViewShellPanel->bigEndianRadioButton()->setChecked(true);
     QCoreApplication::processEvents();
     QVERIFY(window.m_currentByteInfoPanel->bigEndianCheckBox()->isChecked());
     QVERIFY(window.m_structDataViewShellPanel->bigEndianRadioButton()->isChecked());
+}
+
+void MainWindowIntegrationTests::hexViewDefaultsPersistAcrossWindows() {
+    SettingsValueGuard showAsGuard(QStringLiteral("ui/hexShowAsIndex"));
+    SettingsValueGuard byteLineGuard(QStringLiteral("ui/textByteLineModeIndex"));
+    SettingsValueGuard legacyByteModeGuard(QStringLiteral("ui/textByteModeEnabled"));
+    QSettings settings(QStringLiteral("breco"), QStringLiteral("breco"));
+    settings.remove(QStringLiteral("ui/hexShowAsIndex"));
+    settings.remove(QStringLiteral("ui/textByteLineModeIndex"));
+    settings.remove(QStringLiteral("ui/textByteModeEnabled"));
+
+    {
+        breco::MainWindow window;
+        QCOMPARE(window.m_hexControlsPanel->showAsComboBox()->currentText(),
+                 QStringLiteral("Classic"));
+        QCOMPARE(window.m_hexControlsPanel->bytesPerLineComboBox()->currentText(),
+                 QStringLiteral("16"));
+        window.m_hexControlsPanel->showAsComboBox()->setCurrentIndex(2);
+        window.m_hexControlsPanel->bytesPerLineComboBox()->setCurrentIndex(3);
+    }
+
+    {
+        breco::MainWindow restored;
+        QCOMPARE(restored.m_hexControlsPanel->showAsComboBox()->currentIndex(), 2);
+        QCOMPARE(restored.m_hexControlsPanel->bytesPerLineComboBox()->currentIndex(), 3);
+    }
+}
+
+void MainWindowIntegrationTests::hexNavigatorEditsPreserveDeltaAndSelectionLength() {
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    const QString filePath = tempDir.filePath(QStringLiteral("navigator-edits.bin"));
+    QByteArray bytes(256, '\0');
+    for (int i = 0; i < bytes.size(); ++i) {
+        bytes[i] = static_cast<char>(i);
+    }
+    QFile file(filePath);
+    QVERIFY(file.open(QIODevice::WriteOnly));
+    QCOMPARE(file.write(bytes), bytes.size());
+    file.close();
+
+    breco::MainWindow window;
+    window.show();
+    QCoreApplication::processEvents();
+    window.m_hexControlsPanel->showAsComboBox()->setCurrentIndex(4);
+    window.m_hexControlsPanel->bytesPerLineComboBox()->setCurrentIndex(1);
+
+    breco::ScanTarget target;
+    target.filePath = filePath;
+    target.fileSize = static_cast<quint64>(bytes.size());
+    window.m_scanTargets = {target};
+    window.m_sourceMode = breco::MainWindow::SourceMode::SingleFile;
+
+    breco::ResultBuffer buffer;
+    buffer.scanTargetIdx = 0;
+    buffer.fileOffset = 0;
+    buffer.bytes = bytes;
+    window.m_resultBuffers = {buffer};
+    window.m_matchBufferIndices = {0};
+
+    breco::MatchRecord match;
+    match.scanTargetIdx = 0;
+    match.threadId = 1;
+    match.offset = 0;
+    match.searchTimeNs = 1;
+    window.m_resultModel.clear();
+    window.m_resultModel.appendBatch({match});
+    window.rebuildTargetMatchIntervals();
+    window.showMatchPreview(0, match);
+    QVERIFY(window.m_textView->setSelectionRange(10, 13));
+    QCoreApplication::processEvents();
+
+    QLineEdit* offset = window.m_hexControlsPanel->offsetValueEdit();
+    QLineEdit* selected = window.m_hexControlsPanel->selectedValueEdit();
+    QLineEdit* selectTo = window.m_hexControlsPanel->selectToValueEdit();
+    QCOMPARE(offset->text(), QStringLiteral("0X0"));
+    QCOMPARE(selected->text(), QStringLiteral("0XA (+3 bytes)"));
+    QCOMPARE(selectTo->text(), QStringLiteral("0XC"));
+
+    offset->setFocus();
+    offset->selectAll();
+    QTest::keyClicks(offset, QStringLiteral("20"));
+    QTest::keyClick(offset, Qt::Key_Return);
+    QCoreApplication::processEvents();
+    QCOMPARE(offset->text(), QStringLiteral("0X14"));
+    QCOMPARE(selected->text(), QStringLiteral("0X1E (+3 bytes)"));
+    QCOMPARE(selectTo->text(), QStringLiteral("0X20"));
+
+    selected->setFocus();
+    selected->selectAll();
+    QTest::keyClicks(selected, QStringLiteral("0x42"));
+    QTest::keyClick(selected, Qt::Key_Return);
+    QCoreApplication::processEvents();
+    QCOMPARE(offset->text(), QStringLiteral("0X38"));
+    QCOMPARE(selected->text(), QStringLiteral("0X42 (+3 bytes)"));
+    QCOMPARE(selectTo->text(), QStringLiteral("0X44"));
+
+    selectTo->setFocus();
+    selectTo->selectAll();
+    QTest::keyClicks(selectTo, QStringLiteral("0x48"));
+    QTest::keyClick(selectTo, Qt::Key_Return);
+    QCoreApplication::processEvents();
+    QCOMPARE(offset->text(), QStringLiteral("0X38"));
+    QCOMPARE(selected->text(), QStringLiteral("0X42 (+7 bytes)"));
+    QCOMPARE(selectTo->text(), QStringLiteral("0X48"));
+
+    offset->setFocus();
+    offset->selectAll();
+    QTest::keyClicks(offset, QStringLiteral("99"));
+    window.m_hexControlsPanel->showAsComboBox()->setFocus();
+    QCoreApplication::processEvents();
+    QCOMPARE(offset->text(), QStringLiteral("0X38"));
+    QCOMPARE(selected->text(), QStringLiteral("0X42 (+7 bytes)"));
+
+    QVERIFY(window.navigateHexView(5, std::nullopt));
+    QVERIFY(selected->text().isEmpty());
+    QVERIFY(selectTo->text().isEmpty());
+    QVERIFY(!selected->isEnabled());
+    QVERIFY(!selectTo->isEnabled());
+    offset->setFocus();
+    offset->selectAll();
+    QTest::keyClicks(offset, QStringLiteral("25"));
+    QTest::keyClick(offset, Qt::Key_Return);
+    QCoreApplication::processEvents();
+    QCOMPARE(offset->text(), QStringLiteral("0X19"));
+    QVERIFY(selected->text().isEmpty());
+    QVERIFY(selectTo->text().isEmpty());
+
+    QVERIFY(window.navigateHexView(30, qMakePair<quint64, quint64>(35, 36)));
+    QCOMPARE(selected->text(), QStringLiteral("0X23"));
+    QCOMPARE(selectTo->text(), QStringLiteral("0X23"));
+    selectTo->setFocus();
+    selectTo->selectAll();
+    QTest::keyClicks(selectTo, QStringLiteral("0x22"));
+    QTest::keyClick(selectTo, Qt::Key_Return);
+    QCoreApplication::processEvents();
+    QCOMPARE(selected->text(), QStringLiteral("0X23"));
+    QCOMPARE(selectTo->text(), QStringLiteral("0X23"));
 }
 
 void MainWindowIntegrationTests::currentBytePanelShowsEndianAndWidthAwareValues() {
@@ -649,6 +797,236 @@ void MainWindowIntegrationTests::shiftMarksCurrentBufferDirtyAndRestoresOnDesele
     QVERIFY(!window.m_resultBuffers.at(0).dirty);
     QCOMPARE(window.m_resultBuffers.at(0).bytes, bytes);
     settings.remove(QStringLiteral("ui/hexShiftBitsValue"));
+}
+
+void MainWindowIntegrationTests::binarySelectionMenuContainsBothFileActions() {
+    breco::TextViewWidget view;
+    view.resize(800, 320);
+    view.setDisplayMode(breco::TextDisplayMode::ByteMode);
+    view.setData(QByteArray::fromHex("0011223344556677"), 0);
+    view.show();
+    QCoreApplication::processEvents();
+
+    QWidget* content = view.findChild<QWidget*>(QStringLiteral("textViewContent"));
+    QVERIFY(content != nullptr);
+    QTest::mouseClick(content, Qt::LeftButton, Qt::NoModifier, QPoint(12, 12));
+
+    QStringList actionLabels;
+    bool sawCopyMenu = false;
+    QTimer::singleShot(0, &view, [&]() {
+        auto* menu = qobject_cast<QMenu*>(QApplication::activePopupWidget());
+        if (menu == nullptr) {
+            return;
+        }
+        for (QAction* action : menu->actions()) {
+            if (action->text() != QStringLiteral("Copy") || action->menu() == nullptr) {
+                continue;
+            }
+            sawCopyMenu = true;
+            for (QAction* childAction : action->menu()->actions()) {
+                actionLabels.push_back(childAction->text());
+            }
+        }
+        menu->close();
+    });
+    QTimer::singleShot(250, &view, []() {
+        if (QWidget* popup = QApplication::activePopupWidget(); popup != nullptr) {
+            popup->close();
+        }
+    });
+    QTest::mouseClick(content, Qt::RightButton, Qt::NoModifier, QPoint(12, 12));
+
+    QVERIFY(sawCopyMenu);
+    const QStringList expectedLabels = {
+        QStringLiteral("Text only"), QStringLiteral("Offset + Hex"), QStringLiteral("Hex"),
+        QStringLiteral("C Header"), QStringLiteral("Binary"),
+        QStringLiteral("Binary (from here)"),
+    };
+    QCOMPARE(actionLabels, expectedLabels);
+}
+
+void MainWindowIntegrationTests::binaryRangeDialogClampsNumericLength() {
+    breco::MainWindow window;
+    bool inspected = false;
+    QString observedTitle;
+    QString observedUntilEndText;
+    QStringList observedUnits;
+    bool untilEndWasChecked = false;
+    QTimer::singleShot(0, &window, [&]() {
+        QDialog* dialog =
+            window.findChild<QDialog*>(QStringLiteral("saveRangeAsBinaryDialog"));
+        if (dialog == nullptr) {
+            return;
+        }
+        inspected = true;
+        observedTitle = dialog->windowTitle();
+
+        auto* untilEnd =
+            dialog->findChild<QRadioButton*>(QStringLiteral("saveRangeUntilEndRadio"));
+        auto* numeric =
+            dialog->findChild<QRadioButton*>(QStringLiteral("saveRangeNumericRadio"));
+        auto* value = dialog->findChild<QLineEdit*>(QStringLiteral("saveRangeValueInput"));
+        auto* unit = dialog->findChild<QComboBox*>(QStringLiteral("saveRangeUnitCombo"));
+        auto* buttons =
+            dialog->findChild<QDialogButtonBox*>(QStringLiteral("saveRangeButtons"));
+        if (untilEnd == nullptr || numeric == nullptr || value == nullptr || unit == nullptr ||
+            buttons == nullptr) {
+            dialog->reject();
+            return;
+        }
+        untilEndWasChecked = untilEnd->isChecked();
+        observedUntilEndText = untilEnd->text();
+        for (int i = 0; i < unit->count(); ++i) {
+            observedUnits.push_back(unit->itemText(i));
+        }
+
+        numeric->setChecked(true);
+        value->setText(QStringLiteral("2"));
+        unit->setCurrentIndex(1);
+        buttons->button(QDialogButtonBox::Ok)->click();
+    });
+    QTimer::singleShot(250, &window, [&window]() {
+        if (QDialog* dialog =
+                window.findChild<QDialog*>(QStringLiteral("saveRangeAsBinaryDialog"));
+            dialog != nullptr) {
+            dialog->reject();
+        }
+    });
+
+    const std::optional<quint64> length = window.promptBinaryRangeLength(1536);
+    QVERIFY(inspected);
+    QCOMPARE(observedTitle, QStringLiteral("Save range as binary"));
+    QVERIFY(untilEndWasChecked);
+    QCOMPARE(observedUntilEndText, QStringLiteral("Until end of file (1.50 KiB)"));
+    const QStringList expectedUnits = {
+        QStringLiteral("Bytes"), QStringLiteral("KiB"), QStringLiteral("MiB"),
+        QStringLiteral("GiB"), QStringLiteral("TiB"),
+    };
+    QCOMPARE(observedUnits, expectedUnits);
+    QVERIFY(length.has_value());
+    QCOMPARE(length.value(), 1536ULL);
+    QCOMPARE(breco::MainWindow::binaryLengthFromInput(0.5, 1, 4096), 512ULL);
+    QCOMPARE(breco::MainWindow::binaryProgressText(16ULL * 1024ULL * 1024ULL,
+                                                   20ULL * 1024ULL * 1024ULL),
+             QStringLiteral("16.00 MiB / 20.00 MiB"));
+}
+
+void MainWindowIntegrationTests::binaryRangeWriterUsesShiftAndSixteenMiBChunks() {
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    constexpr qsizetype chunkSize = 16 * 1024 * 1024;
+    QByteArray sourceBytes(chunkSize + 4, '\0');
+    for (qsizetype i = 0; i < sourceBytes.size(); ++i) {
+        sourceBytes[i] = static_cast<char>((i * 37 + 11) & 0xFF);
+    }
+
+    const QString sourcePath = tempDir.filePath(QStringLiteral("binary-source.bin"));
+    QFile sourceFile(sourcePath);
+    QVERIFY(sourceFile.open(QIODevice::WriteOnly));
+    QCOMPARE(sourceFile.write(sourceBytes), sourceBytes.size());
+    sourceFile.close();
+
+    const QString outputPath = tempDir.filePath(QStringLiteral("binary-output.bin"));
+    breco::ScanTarget target;
+    target.filePath = sourcePath;
+    target.fileSize = static_cast<quint64>(sourceBytes.size());
+    const quint64 startOffset = 1;
+    const quint64 length = static_cast<quint64>(chunkSize) + 2ULL;
+    QVector<quint64> updates;
+    QString errorMessage;
+
+    breco::MainWindow window;
+    const bool saved = window.writeBinaryRangeToFile(
+        outputPath, target, startOffset, length,
+        breco::ShiftSettings{1, breco::ShiftUnit::Bits}, &errorMessage,
+        [&](quint64 written) { updates.push_back(written); });
+    QVERIFY2(saved, qPrintable(errorMessage));
+    const QVector<quint64> expectedUpdates = {static_cast<quint64>(chunkSize), length};
+    QCOMPARE(updates, expectedUpdates);
+
+    QFile outputFile(outputPath);
+    QVERIFY(outputFile.open(QIODevice::ReadOnly));
+    QCOMPARE(static_cast<quint64>(outputFile.size()), length);
+    const QByteArray outputBytes = outputFile.readAll();
+    QCOMPARE(static_cast<quint64>(outputBytes.size()), length);
+
+    const auto expectedByteAt = [&](quint64 outputRelativeOffset) {
+        const quint64 sourceIndex = startOffset + outputRelativeOffset;
+        const unsigned char current =
+            static_cast<unsigned char>(sourceBytes.at(static_cast<qsizetype>(sourceIndex)));
+        const unsigned char next =
+            static_cast<unsigned char>(sourceBytes.at(static_cast<qsizetype>(sourceIndex + 1ULL)));
+        return static_cast<char>((current << 1U) | (next >> 7U));
+    };
+    for (const quint64 sample : {0ULL, static_cast<quint64>(chunkSize) - 1ULL,
+                                 static_cast<quint64>(chunkSize), length - 1ULL}) {
+        QCOMPARE(outputBytes.at(static_cast<qsizetype>(sample)), expectedByteAt(sample));
+    }
+}
+
+void MainWindowIntegrationTests::binarySaveProgressReportsCompletion() {
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    const QByteArray sourceBytes = QByteArray::fromHex("00112233445566778899AABBCCDDEEFF");
+    const QString sourcePath = tempDir.filePath(QStringLiteral("progress-source.bin"));
+    QFile sourceFile(sourcePath);
+    QVERIFY(sourceFile.open(QIODevice::WriteOnly));
+    QCOMPARE(sourceFile.write(sourceBytes), sourceBytes.size());
+    sourceFile.close();
+
+    breco::ScanTarget target;
+    target.filePath = sourcePath;
+    target.fileSize = static_cast<quint64>(sourceBytes.size());
+    const QString outputPath = tempDir.filePath(QStringLiteral("progress-output.bin"));
+
+    breco::MainWindow window;
+    bool sawProgress = false;
+    bool sawFileSaved = false;
+    QTimer completionPoll;
+    completionPoll.setInterval(5);
+    QObject::connect(&completionPoll, &QTimer::timeout, &window, [&]() {
+        QDialog* dialog =
+            window.findChild<QDialog*>(QStringLiteral("binarySaveProgressDialog"));
+        if (dialog == nullptr) {
+            return;
+        }
+        auto* label =
+            dialog->findChild<QLabel*>(QStringLiteral("binarySaveStatusLabel"));
+        auto* buttons =
+            dialog->findChild<QDialogButtonBox*>(QStringLiteral("binarySaveButtons"));
+        if (label != nullptr && label->text() == QStringLiteral("File saved") &&
+            buttons != nullptr) {
+            sawFileSaved = true;
+            completionPoll.stop();
+            buttons->button(QDialogButtonBox::Ok)->click();
+        }
+    });
+    QTimer::singleShot(0, &window, [&]() {
+        QDialog* dialog =
+            window.findChild<QDialog*>(QStringLiteral("binarySaveProgressDialog"));
+        auto* progress = dialog != nullptr
+                             ? dialog->findChild<QProgressBar*>(
+                                   QStringLiteral("binarySaveProgressBar"))
+                             : nullptr;
+        sawProgress = progress != nullptr && progress->isVisible() &&
+                      progress->format() == QStringLiteral("0 Bytes / 8 Bytes");
+        completionPoll.start();
+    });
+    QTimer::singleShot(1000, &window, [&window]() {
+        if (QDialog* dialog =
+                window.findChild<QDialog*>(QStringLiteral("binarySaveProgressDialog"));
+            dialog != nullptr) {
+            dialog->reject();
+        }
+    });
+
+    window.saveBinaryRangeWithProgress(outputPath, target, 4, 8);
+    QVERIFY(sawProgress);
+    QVERIFY(sawFileSaved);
+
+    QFile outputFile(outputPath);
+    QVERIFY(outputFile.open(QIODevice::ReadOnly));
+    QCOMPARE(outputFile.readAll(), sourceBytes.mid(4, 8));
 }
 
 void MainWindowIntegrationTests::sourcePathInputValidatesAndOpensTargets() {
