@@ -1,21 +1,22 @@
 #pragma once
 
 #include <QList>
+#include <QSettings>
 #include <QString>
+
+#include <memory>
 
 namespace breco {
 
 class AppSettings {
 public:
-    static QString lastFileDialogPath();
-    static QString lastDirectoryDialogPath();
-    static QString lastBrowseDialogDirectory();
-    static QString lastStructDefinitionDialogDirectory();
+    static void useIsolatedIni(const QString& filePath);
+    static std::unique_ptr<QSettings> open();
+    static QString lastSelectedPath(const QString& activityKey);
     static QString rememberedSingleFilePath();
     static quint64 rememberedSingleFileOffset();
-    static void setLastFileDialogPath(const QString& path);
-    static void setLastDirectoryDialogPath(const QString& path);
-    static void setLastBrowseDialogDirectory(const QString& path);
+    static void setLastSelectedPath(const QString& activityKey,
+                                    const QString& path);
     static void setRememberedSingleFilePath(const QString& path);
     static void setRememberedSingleFileOffset(quint64 offset);
     static void clearRememberedSingleFilePath();
@@ -50,20 +51,13 @@ public:
     static int dataViewImageMaxResults();
     static int dataViewImageJobs(int defaultValue);
     static QList<int> dataViewByteAndBitmapSplitterSizes();
-    static QList<int> dataViewStructuredSplitterSizes();
+    static int visualizeModeIndex();
     static bool viewScanLogVisible();
     static bool viewEditsVisible();
-    static QString lastStructDefinitionFilePath();
-    static QString structureLibraryDirectory();
-    static QString structDeclarationText();
-    static QString structEntryName();
-    static int structEntryCount();
-    static bool structPreviewEnabled();
-    static bool structViewsVisible();
-    static bool structLanguageVisible();
-    static void setLastStructDefinitionFilePath(const QString& path);
-    static void setStructureLibraryDirectory(const QString& path);
-    static void setStructDeclarationText(const QString& text);
+    static QString lastBrecoLangSchemaPath();
+    static QString brecoLangLibraryDirectory();
+    static void setLastBrecoLangSchemaPath(const QString& path);
+    static void setBrecoLangLibraryDirectory(const QString& path);
     static void setTextByteModeEnabled(bool enabled);
     static void setTextWrapModeEnabled(bool enabled);
     static void setTextCollapseEnabled(bool enabled);
@@ -94,14 +88,9 @@ public:
     static void setDataViewImageMaxResults(int value);
     static void setDataViewImageJobs(int value);
     static void setDataViewByteAndBitmapSplitterSizes(const QList<int>& sizes);
-    static void setDataViewStructuredSplitterSizes(const QList<int>& sizes);
+    static void setVisualizeModeIndex(int index);
     static void setViewScanLogVisible(bool visible);
     static void setViewEditsVisible(bool visible);
-    static void setStructEntryName(const QString& name);
-    static void setStructEntryCount(int count);
-    static void setStructPreviewEnabled(bool enabled);
-    static void setStructViewsVisible(bool visible);
-    static void setStructLanguageVisible(bool visible);
 };
 
 }  // namespace breco

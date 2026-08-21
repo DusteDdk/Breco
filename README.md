@@ -146,32 +146,78 @@ Hovering text or bitmap data updates:
 
 ## Data tabs
 
-`Raw`, `Struct`, and `Image` are top-level tabs alongside `Scan`. Right-click a
+`Raw`, `BrecoLang`, `Visualize`, and `Image` are top-level tabs alongside `Scan`. Right-click a
 tab and choose `Detach view`, or double-click it, to move that tab into its own
 window. Closing the detached window returns the tab to its original position.
-The Struct tab's `Structure controls` and `Decoded structure` panes can also be
-floated independently.
 
-## Struct tab
+## BrecoLang tab
 
-Struct mode parses BrecoScript declarations and previews a selected entry at
-the active file offset. Its tree shows `Name`, `Type`, `Value`, `Bytes`, and
-`Valid`; the name column sizes itself to its content. Passing `/cond` rows are
-light green, while failed `/cond` and truncated rows are light red. Odd rows
-use darker variants of those colors; unqualified complete rows retain the
-normal alternating backgrounds. `Valid` reports `true`, `false`, the
-missing-byte count, or both when applicable. Condition diagnostics appear
-only on the failing member; containing struct rows keep their normal value.
+The BrecoLang tab compiles `.breco` schemas and decodes a selected entry at a
+decimal or hexadecimal byte offset. Bind every named input used by the entry;
+the currently selected source is suggested for the default input. The tree
+shows `Name`, `Type`, `Value`, `Input`, `Offset`, and `Length` without copying
+source byte ranges into every node.
 
 Clicking a decoded tree item centers the hex view on that item's first byte
-in natural file order and highlights its byte range. Clicking a row in the
-saved `Views` table centers on that view's starting offset and highlights the
-decoded view range.
+and highlights its byte range. The live schema editor recompiles after a short
+debounce and re-decodes a successful live view. `Pin View` keeps independent
+decoded views in closable tabs; only the first tree level expands automatically.
 
-Loading a declaration file remembers its path. On the next launch Breco
-reloads that file when it still exists; when both the declaration and the
-remembered single-file source are valid, it creates the struct preview
-automatically.
+The toolbar exports streaming JSON, lossless source-layout binary data, and
+declared text or binary outforms. `Scan for Entry` runs the selected entry in
+probe mode at candidate offsets through the normal asynchronous scan pipeline.
+The schema library loads `.breco` files only. Older schema files remain on disk
+and are listed in a migration notice; the application does not convert or
+delete them. See [BrecoLang 0.1](docs/BrecoLang.md).
+
+## Visualize tab
+
+The `Visualize` tab displays the current hex selection as `cartesian2d`,
+`cartesian3d`, or a bitmap. A selection longer than one byte is used directly.
+With no selection (or a one-byte selection), visualization begins at the
+selected/current offset and reads `VisCfg.NumBytesOnNoSelection` bytes (1024
+by default), or to end of file. Setting it to `0` reads the entire file from
+offset zero. Explicit selections are capped at 8 MiB.
+
+All three modes use one BrecoLang program named `Visualize.breco` in the
+configured schema-library directory. If it is absent, the built-in program is
+used. `language` and `inputs` may be omitted; visualization always reads the
+currently loaded file. A missing `VisCfg`, `Cart2D`, `Cart3D`, or `Bitmap`
+record falls back to that record from the built-in program without hiding other
+user-defined records. The shared program remains editable in the
+`Visualize.breco` dock. Changes are saved to the library directory and valid
+programs automatically update the rendering.
+
+The editor and result panes are docks. By default the editor occupies the left
+third and the result occupies the remaining width; either can be floated and
+reattaches when closed. While docked they are not closable. Switching among
+2D, 3D, and bitmap only updates the rendered content inside that container;
+camera, zoom, pan, and packing state are preserved.
+
+`Cart2D.Points` supplies `y` and optionally `x` (otherwise X increases by one).
+`Cart3D.Points` supplies `x`, `y`, and `z`. Optional `Color` fields provide
+per-point RGBA data. `VisCfg.Style`, or a mode-record override, selects `dot`,
+`line`, `area`, `skin`, or `bar`. In 2D, `area` and `skin` both form filled
+triangles after their first two vertices; `bar` draws a separate vertical line
+from the X axis to each point. `bar` falls back to the mode default outside
+Cart2D. Optional `Chart.tickDistance` draws 2D axis ticks or a 3D tick grid.
+
+Bitmap color depth is inferred from its declared `Color` fields: no `Color`
+means 1 bpp, then `r`, `g`, `b`, and `a` expand it to 8, 16, 24, and 32 bpp.
+Without `Plot`, pixels are packed sequentially. The first packing aims for a
+square image; later data updates keep the current aspect ratio. Hovering an
+edge shows the window-resize cursor and dragging that edge changes row/column
+packing. The four 4×4 px corners use diagonal resize cursors and change how
+many input bytes are read, preserving aspect ratio: top corners move the start
+offset while growing or shrinking the window, and bottom corners keep the
+start offset. With `Plot`, records are placed at `Plot.x, Plot.y` and the
+image extent follows the coordinates. The canvas has a fixed 8 px checkerboard;
+wheel zoom and middle-button drag pan the image.
+
+Bitmap render buffers are capped at 512 MiB while preserving aspect ratio and
+use bilinear splatting when reduced. Panning reuses the rendered image.
+Zoom-out levels are cached; zooming in scales immediately and replaces that
+preview with a background render at the requested display size.
 
 ## Image tab
 
@@ -220,8 +266,8 @@ Status bar is used for lifecycle and cache messages, for example:
 - scan block size value and unit
 - main splitter sizes
 - text gutter format and gutter width
-- Raw/Struct endian state, Raw text/bitmap options, and Image scan options including Jobs
-- Struct declaration text, last loaded declaration file, entry, and repeat count
+- Raw endian state, Raw text/bitmap options, Visualize mode, and Image scan options including Jobs
+- last loaded BrecoLang schema and schema-library directory
 
 ## Current limits and caveats
 

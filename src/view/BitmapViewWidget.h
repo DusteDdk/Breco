@@ -7,6 +7,8 @@
 #include <QPaintEvent>
 #include <QPoint>
 #include <QPair>
+#include <QRect>
+#include <QResizeEvent>
 #include <QTimer>
 #include <QWheelEvent>
 #include <QVector>
@@ -32,6 +34,12 @@ public:
                             quint32 validAfter, quint64 previewBaseOffset);
     void setZoom(int zoom);
     int zoom() const;
+    void setBaseCellSize(int pixels);
+    int baseCellSize() const;
+    void setPanButton(Qt::MouseButton button);
+    Qt::MouseButton panButton() const;
+    void setDataOriginAtTopLeft(bool enabled);
+    bool dataOriginAtTopLeft() const;
     quint64 viewportByteCapacity() const;
     void setCenterAnchorOffset(quint64 absoluteOffset);
     void setOverlapIntervals(const QVector<QPair<quint64, quint64>>& intervals);
@@ -48,6 +56,7 @@ signals:
 
 protected:
     void paintEvent(QPaintEvent* event) override;
+    void resizeEvent(QResizeEvent* event) override;
     void wheelEvent(QWheelEvent* event) override;
     void mousePressEvent(QMouseEvent* event) override;
     void mouseMoveEvent(QMouseEvent* event) override;
@@ -58,11 +67,12 @@ private:
     bool isHighlightedOffset(quint64 absoluteByteOffset) const;
     void markDirty();
     void markTextAnalysisDirty();
-    void rebuildImageIfNeeded();
+    void rebuildImageIfNeeded(const QRect& targetRect);
     void rebuildTextAnalysisIfNeeded();
     void rebuildMergedIntervals();
     bool overlapsAnyOtherMatch(quint64 absoluteByteOffset, int* intervalIdx) const;
     void resetPanOffset();
+    int effectiveScale() const;
     void applyOverlayColor(int baseLuma, int overlayR, int overlayG, int overlayB, int& outR, int& outG,
                            int& outB) const;
     std::optional<int> byteIndexAtPoint(const QPoint& point) const;
@@ -81,6 +91,9 @@ private:
     quint32 m_validAfter = 0;
     quint64 m_previewBaseOffset = 0;
     int m_zoom = 1;
+    int m_baseCellSize = 1;
+    Qt::MouseButton m_panButton = Qt::LeftButton;
+    bool m_dataOriginAtTopLeft = false;
     quint64 m_centerAnchorOffset = 0;
     quint64 m_beforeStart = 0;
     quint64 m_termStart = 0;
@@ -103,8 +116,7 @@ private:
     bool m_textAnalysisDirty = true;
     std::optional<quint64> m_externalHoverOffset;
     std::optional<QPair<quint64, quint64>> m_externalSelectionRange;
-    int m_cachedWidth = 0;
-    int m_cachedHeight = 0;
+    QRect m_cachedRect;
     QImage m_cachedImage;
     TextAnalysisResult m_textAnalysis;
     std::array<QColor, 256> m_rgbi256Palette{};

@@ -16,9 +16,9 @@
 #include <map>
 
 #include "model/ResultTypes.h"
+#include "brecolang/runtime/ProbeScan.h"
 #include "scan/ScanWorker.h"
 #include "scan/ScanProgress.h"
-#include "struct/StructureGraph.h"
 
 namespace breco {
 
@@ -37,9 +37,7 @@ public:
                    bool prefillOnMerge,
                    std::chrono::steady_clock::time_point scanButtonPressTime =
                        std::chrono::steady_clock::time_point{},
-                   std::shared_ptr<const StructureGraph> structureGraph = {},
-                   QString structureEntry = {},
-                   std::shared_ptr<const QHash<QString, VisualizationSource>> externalSources = {});
+                   std::shared_ptr<const lang::ProbeScanPlan> probePlan = {});
     void requestStop();
     bool isRunning() const;
     quint64 totalPlannedBytes() const;
@@ -83,10 +81,8 @@ private:
     TextInterpretationMode m_textMode = TextInterpretationMode::Ascii;
     bool m_ignoreCase = false;
     bool m_prefillOnMerge = true;
-    std::shared_ptr<const StructureGraph> m_structureGraph;
-    QString m_structureEntry;
+    std::shared_ptr<const lang::ProbeScanPlan> m_probePlan;
     quint32 m_matchLength = 1;
-    std::shared_ptr<const QHash<QString, VisualizationSource>> m_externalSources;
     std::chrono::steady_clock::time_point m_scanStartTime{};
     std::atomic<quint64> m_chunkCounter{0};
     std::atomic<quint64> m_totalScanned{0};

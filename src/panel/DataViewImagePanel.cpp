@@ -2,10 +2,8 @@
 
 #include <QCheckBox>
 #include <QComboBox>
-#include <QDir>
 #include <QEnterEvent>
 #include <QEvent>
-#include <QFileDialog>
 #include <QFileInfo>
 #include <QFrame>
 #include <QLabel>
@@ -22,6 +20,7 @@
 #include <QTimer>
 #include <QVBoxLayout>
 
+#include "settings/PathSelect.h"
 #include "ui_DataViewImage.h"
 
 namespace breco {
@@ -89,17 +88,16 @@ QString offsetText(quint64 offset) {
     return QStringLiteral("0x%1").arg(offset, 0, 16).toUpper();
 }
 
-void saveEncodedImage(QWidget* parent, const EmbeddedImageResult& result, int imageNumber) {
+void saveEncodedImage(QWidget* parent, const EmbeddedImageResult& result) {
     if (result.encodedData.isEmpty()) {
         QMessageBox::warning(parent, QStringLiteral("Save File"),
                              QStringLiteral("The original encoded image data is unavailable."));
         return;
     }
     const QString extension = embeddedImageFileExtension(result.format);
-    const QString suggestedPath = QDir::home().filePath(
-        QStringLiteral("image-%1.%2").arg(imageNumber).arg(extension));
-    QString path = QFileDialog::getSaveFileName(
-        parent, QStringLiteral("Save File"), suggestedPath,
+    QString path = promptForPath(
+        parent, PathSelectActivity::SaveEmbeddedImage,
+        PathSelectKind::SaveFile, QStringLiteral("Save File"),
         QStringLiteral("%1 image (*.%2);;All files (*)")
             .arg(result.formatName)
             .arg(extension));
@@ -108,6 +106,7 @@ void saveEncodedImage(QWidget* parent, const EmbeddedImageResult& result, int im
     }
     if (QFileInfo(path).suffix().isEmpty()) {
         path += QStringLiteral(".") + extension;
+        setLastSelectedPathFor(PathSelectActivity::SaveEmbeddedImage, path);
     }
     QSaveFile output(path);
     if (!output.open(QIODevice::WriteOnly) ||
@@ -359,7 +358,7 @@ void DataViewImagePanel::addResult(const EmbeddedImageResult& result) {
             .arg(offsetText(result.offset)));
     imageLabel->clicked = [this, offset = result.offset]() { emit resultActivated(offset); };
     imageLabel->saveRequested =
-        [card, result, imageNumber]() { saveEncodedImage(card, result, imageNumber); };
+        [card, result]() { saveEncodedImage(card, result); };
     imageLabel->hoverChanged = [card](bool highlighted) {
         card->setHighlighted(highlighted);
     };

@@ -11,9 +11,9 @@
 #include <thread>
 
 #include "model/ResultTypes.h"
+#include "brecolang/runtime/ByteSource.h"
+#include "brecolang/runtime/ProbeScan.h"
 #include "scan/ScanTypes.h"
-#include "struct/StructureGraph.h"
-#include "struct/StructVisualizer.h"
 
 namespace breco {
 
@@ -25,9 +25,7 @@ public:
                std::atomic<quint64>* totalBytesScanned,
                std::chrono::steady_clock::time_point scanStartTime,
                JobCompleteCallback onJobComplete,
-               std::shared_ptr<const StructureGraph> structureGraph = {},
-               QString structureEntry = {},
-               std::shared_ptr<const QHash<QString, VisualizationSource>> externalSources = {});
+               std::shared_ptr<const lang::ProbeScanPlan> probePlan = {});
 
     ~ScanWorker();
 
@@ -56,9 +54,9 @@ private:
     mutable std::mutex m_jobMutex;
     ScanJob m_pendingJob;
     bool m_hasPendingJob = false;
-    std::shared_ptr<const StructureGraph> m_structureGraph;
-    QString m_structureEntry;
-    std::shared_ptr<const QHash<QString, VisualizationSource>> m_externalSources;
+    std::shared_ptr<const lang::ProbeScanPlan> m_probePlan;
+    QString m_probeTargetPath;
+    QVector<std::shared_ptr<lang::ByteSource>> m_probeInputs;
     std::thread m_thread;
 };
 

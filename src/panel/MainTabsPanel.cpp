@@ -13,9 +13,44 @@ namespace breco {
 MainTabsPanel::MainTabsPanel(QWidget* parent)
     : QWidget(parent), m_ui(std::make_unique<Ui::MainTabsPanel>()) {
     m_ui->setupUi(this);
+    m_brecoLangTab = new QWidget(m_ui->mainTabWidget);
+    m_brecoLangTab->setObjectName(QStringLiteral("brecoLangTab"));
+    auto* brecoLangLayout = new QVBoxLayout(m_brecoLangTab);
+    brecoLangLayout->setContentsMargins(0, 0, 0, 0);
+    brecoLangLayout->setSpacing(0);
+    m_brecoLangHost = new QWidget(m_brecoLangTab);
+    m_brecoLangHost->setObjectName(QStringLiteral("brecoLangHost"));
+    brecoLangLayout->addWidget(m_brecoLangHost);
+    const int imageIndex = m_ui->mainTabWidget->indexOf(m_ui->imageDataTab);
+    m_ui->mainTabWidget->insertTab(imageIndex, m_brecoLangTab,
+                                   QStringLiteral("BrecoLang"));
+    m_visualizeTab = new QWidget(m_ui->mainTabWidget);
+    m_visualizeTab->setObjectName(QStringLiteral("visualizeTab"));
+    auto* visualizeLayout = new QVBoxLayout(m_visualizeTab);
+    visualizeLayout->setContentsMargins(0, 0, 0, 0);
+    visualizeLayout->setSpacing(0);
+    m_visualizeHost = new QWidget(m_visualizeTab);
+    m_visualizeHost->setObjectName(QStringLiteral("visualizeHost"));
+    visualizeLayout->addWidget(m_visualizeHost);
+    m_ui->mainTabWidget->insertTab(
+        m_ui->mainTabWidget->indexOf(m_ui->imageDataTab), m_visualizeTab,
+        QStringLiteral("Visualize"));
+    m_editsTab = new QWidget(m_ui->mainTabWidget);
+    m_editsTab->setObjectName(QStringLiteral("editsTab"));
+    auto* editsLayout = new QVBoxLayout(m_editsTab);
+    editsLayout->setContentsMargins(0, 0, 0, 0);
+    editsLayout->setSpacing(0);
+    m_editsHost = new QWidget(m_editsTab);
+    m_editsHost->setObjectName(QStringLiteral("editsHost"));
+    editsLayout->addWidget(m_editsHost);
+    m_ui->mainTabWidget->insertTab(
+        m_ui->mainTabWidget->indexOf(m_ui->imageDataTab), m_editsTab,
+        QStringLiteral("Edits"));
     for (int index = 0; index < m_ui->mainTabWidget->count(); ++index) {
         m_pageOrder.insert(m_ui->mainTabWidget->widget(index), index);
     }
+    m_editsTabOrder = m_pageOrder.value(m_editsTab, m_ui->mainTabWidget->indexOf(m_editsTab));
+    setEditsTabVisible(false);
     m_ui->mainTabWidget->tabBar()->setContextMenuPolicy(Qt::CustomContextMenu);
     connect(m_ui->mainTabWidget->tabBar(), &QWidget::customContextMenuRequested,
             this, [this](const QPoint& point) {
@@ -57,17 +92,56 @@ QWidget* MainTabsPanel::resultsPanelHost() const { return m_ui->resultsPanelHost
 
 QWidget* MainTabsPanel::rawDataHost() const { return m_ui->rawDataHost; }
 
-QWidget* MainTabsPanel::structDataHost() const { return m_ui->structDataHost; }
+QWidget* MainTabsPanel::brecoLangHost() const { return m_brecoLangHost; }
+
+QWidget* MainTabsPanel::visualizeHost() const { return m_visualizeHost; }
+
+QWidget* MainTabsPanel::editsHost() const { return m_editsHost; }
 
 QWidget* MainTabsPanel::imageDataHost() const { return m_ui->imageDataHost; }
 
 QWidget* MainTabsPanel::rawDataTab() const { return m_ui->rawDataTab; }
 
-QWidget* MainTabsPanel::structDataTab() const { return m_ui->structDataTab; }
+QWidget* MainTabsPanel::brecoLangTab() const { return m_brecoLangTab; }
+
+QWidget* MainTabsPanel::visualizeTab() const { return m_visualizeTab; }
+
+QWidget* MainTabsPanel::editsTab() const { return m_editsTab; }
 
 QWidget* MainTabsPanel::imageDataTab() const { return m_ui->imageDataTab; }
 
 QFrame* MainTabsPanel::editStack() const { return m_ui->editStack; }
+
+void MainTabsPanel::setEditsTabVisible(bool visible) {
+    if (m_editsTab == nullptr) {
+        return;
+    }
+    const int index = m_ui->mainTabWidget->indexOf(m_editsTab);
+    if (visible) {
+        if (index < 0 && !m_detachedTabs.contains(m_editsTab)) {
+            int insertionIndex = m_ui->mainTabWidget->count();
+            for (int i = 0; i < m_ui->mainTabWidget->count(); ++i) {
+                QWidget* existing = m_ui->mainTabWidget->widget(i);
+                if (m_pageOrder.value(existing, i) > m_editsTabOrder) {
+                    insertionIndex = i;
+                    break;
+                }
+            }
+            m_ui->mainTabWidget->insertTab(insertionIndex, m_editsTab,
+                                           QStringLiteral("Edits"));
+        }
+        activateTab(m_editsTab);
+        return;
+    }
+    if (index >= 0) {
+        m_ui->mainTabWidget->removeTab(index);
+    }
+}
+
+bool MainTabsPanel::isEditsTabVisible() const {
+    return m_ui->mainTabWidget->indexOf(m_editsTab) >= 0 ||
+           m_detachedTabs.contains(m_editsTab);
+}
 
 void MainTabsPanel::activateScanTab() {
     activateTab(m_ui->scanTab);

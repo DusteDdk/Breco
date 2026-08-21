@@ -4,6 +4,12 @@ project(breco VERSION 0.1.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+if(MSVC)
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
+    add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:/WX>")
+elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:-Werror>")
+endif()
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 set(CMAKE_AUTOUIC ON)
@@ -12,7 +18,7 @@ set(CMAKE_AUTOUIC_SEARCH_PATHS "${CMAKE_CURRENT_SOURCE_DIR}/ui")
 include(CTest)
 include(GNUInstallDirs)
 
-find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets)
+find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets OpenGL)
 
 if(WIN32)
     add_compile_definitions(WINVER=0x0A00 _WIN32_WINNT=0x0A00)
@@ -27,19 +33,22 @@ endif()
 set(BRECO_SOURCES
     src/main.cpp
     src/app/MainWindow.cpp
+    src/brecolang/gui/BrecoLangLibrary.cpp
+    src/brecolang/gui/BrecoDecodeController.cpp
+    src/brecolang/gui/BrecoLangPanel.cpp
+    src/brecolang/gui/DecodedTreeModel.cpp
     src/panel/BitmapViewPanel.cpp
     src/panel/CurrentByteInfoPanel.cpp
     src/panel/DataViewByteAndBitmapPanel.cpp
     src/panel/DataViewImagePanel.cpp
     src/panel/DataViewShellPanel.cpp
-    src/panel/DataViewStructuredPanel.cpp
     src/panel/HexViewControlsPanel.cpp
     src/panel/ResultsTablePanel.cpp
     src/panel/ScanControlsPanel.cpp
-    src/panel/StructDataViewPanel.cpp
-    src/panel/StructDeclarationPanel.cpp
-    src/panel/StructModeLeftPanel.cpp
     src/panel/TextViewPanel.cpp
+    src/panel/VisualizePanel.cpp
+    src/panel/EditsPanel.cpp
+    src/edit/EditQueue.cpp
     src/scan/ScanController.cpp
     src/scan/ScanProgress.cpp
     src/scan/ScanWorker.cpp
@@ -48,22 +57,21 @@ set(BRECO_SOURCES
     src/model/ResultModel.cpp
     src/panel/MainTabsPanel.cpp
     src/view/BitmapViewWidget.cpp
+    src/view/Cartesian2DView.cpp
+    src/view/Cartesian3DView.cpp
+    src/view/ResizableBitmapCanvas.cpp
+    src/view/VisualizeBitmapCanvas.cpp
     src/view/TextViewWidget.cpp
+    src/visualize/VisualizeData.cpp
     src/io/FileEnumerator.cpp
     src/io/OpenFilePool.cpp
     src/io/ProtectedSourceOpener.cpp
     src/io/ShiftedWindowLoader.cpp
     src/image/EmbeddedImageScanner.cpp
     src/settings/AppSettings.cpp
+    src/settings/PathSelect.cpp
     src/text/TextSequenceAnalyzer.cpp
     src/text/StringModeRules.cpp
-    src/struct/StructureGraph.cpp
-    src/struct/StructureLibrary.cpp
-    src/struct/StructureScanner.cpp
-    src/struct/StructDeclarationParser.cpp
-    src/struct/StructExport.cpp
-    src/struct/StructVisualizer.cpp
-    src/struct/StructVisualizedTreeModel.cpp
 )
 
 if(BRECO_ENABLE_LINUX_PRIVILEGED_OPEN)
@@ -75,20 +83,23 @@ endif()
 
 set(BRECO_HEADERS
     src/app/MainWindow.h
+    src/brecolang/gui/BrecoLangLibrary.h
+    src/brecolang/gui/BrecoDecodeController.h
+    src/brecolang/gui/BrecoLangPanel.h
+    src/brecolang/gui/DecodedTreeModel.h
     src/panel/BitmapViewPanel.h
     src/panel/CurrentByteInfoPanel.h
     src/panel/DataViewByteAndBitmapPanel.h
     src/panel/DataViewImagePanel.h
     src/panel/DataViewShellPanel.h
-    src/panel/DataViewStructuredPanel.h
     src/panel/HexViewControlsPanel.h
     src/panel/MainTabsPanel.h
     src/panel/ResultsTablePanel.h
     src/panel/ScanControlsPanel.h
-    src/panel/StructDataViewPanel.h
-    src/panel/StructDeclarationPanel.h
-    src/panel/StructModeLeftPanel.h
     src/panel/TextViewPanel.h
+    src/panel/VisualizePanel.h
+    src/panel/EditsPanel.h
+    src/edit/EditQueue.h
     src/scan/ScanController.h
     src/scan/ScanProgress.h
     src/scan/ScanWorker.h
@@ -99,24 +110,21 @@ set(BRECO_HEADERS
     src/model/ResultTypes.h
     src/model/ResultModel.h
     src/view/BitmapViewWidget.h
+    src/view/Cartesian2DView.h
+    src/view/Cartesian3DView.h
+    src/view/ResizableBitmapCanvas.h
+    src/view/VisualizeBitmapCanvas.h
     src/view/TextViewWidget.h
+    src/visualize/VisualizeData.h
     src/io/FileEnumerator.h
     src/io/OpenFilePool.h
     src/io/ProtectedSourceOpener.h
     src/io/ShiftedWindowLoader.h
     src/image/EmbeddedImageScanner.h
     src/settings/AppSettings.h
+    src/settings/PathSelect.h
     src/text/TextSequenceAnalyzer.h
     src/text/StringModeRules.h
-    src/struct/StructTypes.h
-    src/struct/StructureGraph.h
-    src/struct/StructureLibrary.h
-    src/struct/StructureScanner.h
-    src/struct/VisualizedNode.h
-    src/struct/StructDeclarationParser.h
-    src/struct/StructExport.h
-    src/struct/StructVisualizer.h
-    src/struct/StructVisualizedTreeModel.h
 )
 
 if(BRECO_ENABLE_LINUX_PRIVILEGED_OPEN)
@@ -133,27 +141,62 @@ set(BRECO_UI
     ui/DataViewByteAndBitmap.ui
     ui/DataViewImage.ui
     ui/DataViewShell.ui
-    ui/DataViewStructured.ui
     ui/EditStack.ui
     ui/HexViewControlsPanel.ui
     ui/MainTabsPanel.ui
     ui/MainWindow.ui
     ui/ResultsTablePanel.ui
     ui/ScanControlsPanel.ui
-    ui/StructDataView.ui
-    ui/StructDeclaration.ui
-    ui/StructModeLeftPanel.ui
     ui/TextViewPanel.ui
+    ui/VisualizePanel.ui
 )
 
 set(BRECO_RESOURCES
     res/icons.qrc
 )
 
-set(BRECO_QT_LIBS Qt6::Core Qt6::Gui Qt6::Widgets)
+set(BRECO_QT_LIBS
+    Qt6::Core Qt6::Gui Qt6::Widgets Qt6::OpenGL)
 if(BRECO_ENABLE_LINUX_PRIVILEGED_OPEN)
     list(APPEND BRECO_QT_LIBS Qt6::DBus Qt6::Network)
 endif()
+
+add_library(brecolang_compiler STATIC
+    src/brecolang/compiler/Compiler.cpp
+    src/brecolang/compiler/Lexer.cpp
+    src/brecolang/compiler/Parser.cpp
+    src/brecolang/compiler/Compiler.h
+    src/brecolang/compiler/Lexer.h
+    src/brecolang/compiler/Parser.h
+    src/brecolang/compiler/Source.h
+    src/brecolang/compiler/Syntax.h
+    src/brecolang/ir/BrecoProgram.h
+)
+target_include_directories(brecolang_compiler PUBLIC src)
+target_link_libraries(brecolang_compiler PUBLIC Qt6::Core)
+
+add_library(brecolang_runtime STATIC
+    src/brecolang/render/OutformRenderer.cpp
+    src/brecolang/render/RenderStore.cpp
+    src/brecolang/runtime/ByteSource.cpp
+    src/brecolang/runtime/DecodedData.cpp
+    src/brecolang/runtime/DecodeDocument.cpp
+    src/brecolang/runtime/DecodeTarget.cpp
+    src/brecolang/runtime/Interpreter.cpp
+    src/brecolang/runtime/JsonWriter.cpp
+    src/brecolang/runtime/ByteSource.h
+    src/brecolang/runtime/DecodedData.h
+    src/brecolang/runtime/DecodeDocument.h
+    src/brecolang/runtime/DecodeTarget.h
+    src/brecolang/runtime/DecodeTypes.h
+    src/brecolang/runtime/Interpreter.h
+    src/brecolang/runtime/JsonWriter.h
+    src/brecolang/runtime/ProbeScan.h
+    src/brecolang/render/OutformRenderer.h
+    src/brecolang/render/RenderStore.h
+)
+target_include_directories(brecolang_runtime PUBLIC src)
+target_link_libraries(brecolang_runtime PUBLIC brecolang_compiler Qt6::Core)
 
 qt_add_executable(breco
     ${BRECO_SOURCES}
@@ -163,7 +206,7 @@ qt_add_executable(breco
 )
 
 target_include_directories(breco PRIVATE src)
-target_link_libraries(breco PRIVATE ${BRECO_QT_LIBS})
+target_link_libraries(breco PRIVATE ${BRECO_QT_LIBS} brecolang_runtime)
 
 if(WIN32)
     set_target_properties(breco PROPERTIES WIN32_EXECUTABLE TRUE)
@@ -177,18 +220,9 @@ endif()
 
 add_executable(brecodump
     src/cli/brecodump.cpp
-    src/io/OpenFilePool.cpp
-    src/io/ShiftedWindowLoader.cpp
-    src/scan/ShiftTransform.cpp
-    src/struct/StructureGraph.cpp
-    src/struct/StructureLibrary.cpp
-    src/struct/StructureScanner.cpp
-    src/struct/StructDeclarationParser.cpp
-    src/struct/StructExport.cpp
-    src/struct/StructVisualizer.cpp
 )
 target_include_directories(brecodump PRIVATE src)
-target_link_libraries(brecodump PRIVATE Qt6::Core)
+target_link_libraries(brecodump PRIVATE Qt6::Core brecolang_runtime)
 
 if(WIN32)
     set_target_properties(brecodump PROPERTIES WIN32_EXECUTABLE FALSE)
@@ -225,17 +259,10 @@ if(WIN32)
 
     # comments/internal_name/original_filename differ per executable;
     # pass original_filename as "" to omit it from the string table.
-    function(breco_add_windows_executable_resources target icon_png comments internal_name original_filename)
-        get_filename_component(icon_basename "${icon_png}" NAME_WE)
+    function(breco_add_windows_executable_resources target icon_ico comments internal_name original_filename)
         set(icon_dir "${CMAKE_CURRENT_BINARY_DIR}/win-icons/${target}")
-        set(icon_ico "${icon_dir}/${icon_basename}.ico")
         set(icon_rc "${icon_dir}/${target}.rc")
-
-        find_program(BRECO_MAGICK_EXECUTABLE NAMES magick)
-        if(NOT BRECO_MAGICK_EXECUTABLE)
-            message(WARNING "ImageMagick (magick) not found; ${target} will be built without a custom icon.")
-            return()
-        endif()
+        set(icon_path "${CMAKE_CURRENT_SOURCE_DIR}/res/${icon_ico}")
 
         file(MAKE_DIRECTORY "${icon_dir}")
 
@@ -259,7 +286,10 @@ if(WIN32)
         string(JOIN "" version_strings_block ${version_strings})
 
         file(WRITE "${icon_rc}" "\
-IDI_ICON1 ICON DISCARDABLE \"${icon_ico}\"
+    #define IDI_ICON1 101
+    #define VS_VERSION_INFO 1
+
+    IDI_ICON1 ICON DISCARDABLE \"${icon_path}\"
 
 VS_VERSION_INFO VERSIONINFO
  FILEVERSION ${BRECO_VERSIONINFO_FILEVERSION_NUM}
@@ -283,29 +313,62 @@ ${version_strings_block}        END
 END
 ")
 
-        add_custom_command(
-            OUTPUT "${icon_ico}"
-            COMMAND "${BRECO_MAGICK_EXECUTABLE}"
-                    "${CMAKE_CURRENT_SOURCE_DIR}/res/${icon_png}"
-                    -define icon:auto-resize=256,128,64,48,32,16
-                    "${icon_ico}"
-            DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/res/${icon_png}"
-            COMMENT "Generating Windows icon ${icon_ico}"
-            VERBATIM
-        )
-
         target_sources(${target} PRIVATE "${icon_rc}")
-        set_source_files_properties("${icon_rc}" PROPERTIES OBJECT_DEPENDS "${icon_ico}")
+        set_source_files_properties("${icon_rc}" PROPERTIES OBJECT_DEPENDS "${icon_path}")
     endfunction()
 
-    breco_add_windows_executable_resources(breco breco-icon.png
+    breco_add_windows_executable_resources(breco breco-icon.ico
         "Breco - Graphical User Interface" "breco.exe" "")
-    breco_add_windows_executable_resources(brecodump brecodump-icon.png
+    breco_add_windows_executable_resources(brecodump brecodump-icon.ico
         "Breco - CLI for scripting" "BrecoDump" "brecodump.exe")
+
+    get_target_property(BRECO_QMAKE_EXECUTABLE Qt6::qmake IMPORTED_LOCATION)
+    get_filename_component(BRECO_QT_BIN_DIR "${BRECO_QMAKE_EXECUTABLE}" DIRECTORY)
+    find_program(BRECO_WINDEPLOYQT_EXECUTABLE
+        NAMES windeployqt
+        HINTS "${BRECO_QT_BIN_DIR}" "$ENV{QT_HOST_PATH}/bin"
+    )
+
+    if(BRECO_WINDEPLOYQT_EXECUTABLE)
+        set(BRECO_DIST_DIR "${CMAKE_CURRENT_SOURCE_DIR}/dist")
+        if(MSVC)
+            set(BRECO_DIST_SYMBOL_COMMANDS
+                COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                        "$<TARGET_PDB_FILE:breco>" "${BRECO_DIST_DIR}/breco.pdb"
+                COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                        "$<TARGET_PDB_FILE:brecodump>" "${BRECO_DIST_DIR}/brecodump.pdb"
+            )
+        endif()
+        add_custom_target(dist
+            COMMAND "${CMAKE_COMMAND}"
+                    -D "DIR=${BRECO_DIST_DIR}"
+                    -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/clear_directory_contents.cmake"
+            COMMAND "${CMAKE_COMMAND}" -E copy "$<TARGET_FILE:breco>" "${BRECO_DIST_DIR}/breco.exe"
+            COMMAND "${CMAKE_COMMAND}" -E copy "$<TARGET_FILE:brecodump>" "${BRECO_DIST_DIR}/brecodump.exe"
+            ${BRECO_DIST_SYMBOL_COMMANDS}
+            COMMAND "${CMAKE_COMMAND}" -E copy_directory
+                    "${CMAKE_CURRENT_SOURCE_DIR}/examples" "${BRECO_DIST_DIR}/examples"
+            COMMAND "${BRECO_WINDEPLOYQT_EXECUTABLE}"
+                    --dir "${BRECO_DIST_DIR}"
+                    --release
+                    --no-translations
+                    --compiler-runtime
+                    "${BRECO_DIST_DIR}/breco.exe"
+                    "${BRECO_DIST_DIR}/brecodump.exe"
+            DEPENDS breco brecodump
+            COMMENT "Staging Windows distribution in ${BRECO_DIST_DIR}"
+            VERBATIM
+        )
+    else()
+        message(WARNING "windeployqt not found; the dist target will not be available.")
+    endif()
 endif()
 
 install(TARGETS breco brecodump
     RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
+)
+install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/examples/"
+    DESTINATION "examples"
 )
 
 if(BUILD_TESTING)
@@ -327,7 +390,8 @@ target_include_directories(breco_ui_integration_tests PRIVATE src)
 target_compile_definitions(
     breco_ui_integration_tests PRIVATE BRECO_MAINWINDOW_TEST_ACCESS)
 target_link_libraries(
-    breco_ui_integration_tests PRIVATE ${BRECO_QT_LIBS} Qt6::Test)
+    breco_ui_integration_tests PRIVATE ${BRECO_QT_LIBS} Qt6::Test
+                                       brecolang_runtime)
 
 if(WIN32)
     set(BRECO_UI_TEST_REPORT
@@ -351,33 +415,57 @@ qt_add_executable(breco_unit_tests
     src/io/ShiftedWindowLoader.cpp
     src/image/EmbeddedImageScanner.cpp
     src/settings/AppSettings.cpp
+    src/settings/PathSelect.cpp
     src/text/TextSequenceAnalyzer.cpp
     src/text/StringModeRules.cpp
-    src/struct/StructureGraph.cpp
-    src/struct/StructureLibrary.cpp
-    src/struct/StructureScanner.cpp
-    src/struct/StructDeclarationParser.cpp
-    src/struct/StructExport.cpp
-    src/struct/StructVisualizer.cpp
-    src/struct/StructVisualizedTreeModel.cpp
-    src/panel/StructModeLeftPanel.cpp
-    src/panel/StructModeLeftPanel.h
-    ui/StructModeLeftPanel.ui
     src/view/BitmapViewWidget.cpp
     src/view/BitmapViewWidget.h
     src/view/TextViewWidget.cpp
     src/view/TextViewWidget.h
+    src/edit/EditQueue.cpp
+    src/edit/EditQueue.h
 )
 target_include_directories(breco_unit_tests PRIVATE src)
 target_link_libraries(breco_unit_tests PRIVATE Qt6::Core Qt6::Gui Qt6::Widgets)
 
 add_test(NAME breco_unit_tests COMMAND breco_unit_tests)
 
+qt_add_executable(brecolang_compiler_tests
+    tests/brecolang_compiler_tests.cpp
+)
+target_compile_definitions(
+    brecolang_compiler_tests PRIVATE BRECO_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+target_link_libraries(
+    brecolang_compiler_tests PRIVATE brecolang_compiler Qt6::Core Qt6::Test)
+add_test(NAME brecolang_compiler_tests COMMAND brecolang_compiler_tests)
+
+qt_add_executable(brecolang_runtime_tests
+    tests/brecolang_runtime_tests.cpp
+)
+target_compile_definitions(
+    brecolang_runtime_tests PRIVATE BRECO_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+target_link_libraries(
+    brecolang_runtime_tests PRIVATE brecolang_runtime Qt6::Core Qt6::Test)
+add_test(NAME brecolang_runtime_tests COMMAND brecolang_runtime_tests)
+
+qt_add_executable(breco_visualize_tests
+    tests/visualize_tests.cpp
+    src/visualize/VisualizeData.cpp
+    src/visualize/VisualizeData.h
+)
+target_include_directories(breco_visualize_tests PRIVATE src)
+target_link_libraries(
+    breco_visualize_tests PRIVATE brecolang_runtime Qt6::Core Qt6::Gui Qt6::Test)
+add_test(NAME breco_visualize_tests COMMAND breco_visualize_tests)
+
 qt_add_executable(brecodump_cli_tests
     tests/brecodump_cli_tests.cpp
 )
 target_compile_definitions(
-    brecodump_cli_tests PRIVATE BRECODUMP_PATH="$<TARGET_FILE:brecodump>")
+    brecodump_cli_tests PRIVATE
+    BRECODUMP_PATH="$<TARGET_FILE:brecodump>"
+    QT_TESTCASE_SOURCEDIR="${CMAKE_CURRENT_SOURCE_DIR}"
+)
 target_link_libraries(brecodump_cli_tests PRIVATE Qt6::Core Qt6::Test)
 add_dependencies(brecodump_cli_tests brecodump)
 
@@ -408,6 +496,7 @@ else()
 
     set(DOC_PAGES
         "index|${CMAKE_SOURCE_DIR}/docs/html/index.md"
+        "BrecoLang|${CMAKE_SOURCE_DIR}/docs/BrecoLang.md"
         "codemap|${CMAKE_SOURCE_DIR}/docs/codemap.md"
         "runtime-behavior|${CMAKE_SOURCE_DIR}/docs/runtime-behavior.md"
         "scan-and-io-behavior|${CMAKE_SOURCE_DIR}/docs/scan-and-io-behavior.md"

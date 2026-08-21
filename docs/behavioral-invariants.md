@@ -162,12 +162,11 @@ Evidence:
 - byte line mode combo index
 - prefill-on-merge toggle
 - Image tab format mask, scope, max pixels K, max results, and Jobs
-- Struct declaration text, selected entry, repeat count, and last loaded declaration-file path
+- last BrecoLang schema path and schema-library directory
 
-When the remembered declaration path still exists, startup reloads its current
-contents instead of relying on cached editor text. A struct preview is restored
-only when that declaration parses successfully and the remembered single-file
-source also opens successfully.
+When the remembered schema path still exists, startup recompiles its current
+contents. A live decode is restored only when compilation succeeds and the
+remembered single-file source also opens successfully.
 
 Settings are saved immediately at control-change call sites (no delayed batch commit).
 
@@ -175,23 +174,37 @@ Evidence:
 - `src/settings/AppSettings.cpp`
 - `src/app/MainWindow.cpp` constructor + control handlers
 
-## Struct Declaration Runtime Invariants
+## BrecoLang Runtime Invariants
 
-- Arithmetic expressions are evaluated at decode time in the current variable
-  scope. Count expressions must be non-negative and no larger than the dynamic
-  element limit.
-- A false `/when` emits no visualized node and consumes no bytes. A failing or
-  unevaluable `/when` invalidates the containing struct.
-- `/assert` runs after preceding struct members have decoded. It emits a
-  condition-style node, and a failing assertion invalidates the struct without
-  hiding already decoded members.
-- Bitfield rows are children of the scalar integer word that owns them. They do
-  not consume bytes separately.
+- Source-order `require`, `check`, and `match` evaluation is preserved.
+- Regions and `within` cursors cannot advance beyond their declared bounds.
+- Uncommitted alternatives restore cursor, values, nodes, diagnostics, and
+  probe anchors. Streaming transactional scopes trial silently and replay once.
+- Named selects retain one variant value and `Select` node. Bare selects add
+  only the chosen arm's named fields to the current object; their statement ID
+  remains in materialization locators even though no wrapper node is visible.
+- Same-named yields from separate bare selects in one object share an ordered
+  aggregate. The tree always exposes one sequence container, while JSON keeps
+  a singleton's original shape and flattens sequence contributions after
+  promotion.
+- Streaming defers only aggregate members until their owner closes. Their
+  memory cost is proportional to the aggregate's encoded output; unrelated
+  members remain incremental.
+- Repeat and while failures do not emit partial sequence JSON.
+- Parse depth, loop iteration, node, recovery probe, and transform-output limits
+  are enforced at runtime.
+- Tree nodes reference input spans; they do not retain per-node raw-byte copies.
+- Bitfield members are virtual children sharing the containing word's span.
+- GUI and CLI file exports use staged output and leave the destination unchanged
+  when decoding or rendering fails.
+- Binary outform integer encoders reject values outside the target type range.
 
 Evidence:
-- `src/struct/StructDeclarationParser.cpp`
-- `src/struct/StructVisualizer.cpp`
-- `tests/unit_tests.cpp` (`testDynamicStructLanguage`)
+- `src/brecolang/runtime/Interpreter.cpp`
+- `src/brecolang/render/OutformRenderer.cpp`
+- `src/cli/brecodump.cpp`
+- `tests/brecolang_runtime_tests.cpp`
+- `tests/brecodump_cli_tests.cpp`
 
 ## Error Handling Invariants
 

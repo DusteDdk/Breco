@@ -1,96 +1,48 @@
 #include <QCoreApplication>
 #include <QFile>
 #include <QFileInfo>
-#include <QJsonObject>
+#include <QHash>
+#include <QSaveFile>
 #include <QStringList>
 
 #include <iostream>
-#include <iterator>
-#include <limits>
+#include <algorithm>
+#include <memory>
 #include <optional>
-#include <string>
 
-#include "io/OpenFilePool.h"
-#include "io/ShiftedWindowLoader.h"
-#include "model/ResultTypes.h"
-#include "struct/StructDeclarationParser.h"
-#include "struct/StructExport.h"
-#include "struct/StructVisualizer.h"
-#include "struct/VisualizedNode.h"
+#include "brecolang/compiler/Compiler.h"
+#include "brecolang/render/OutformRenderer.h"
+#include "brecolang/runtime/Interpreter.h"
 
 namespace {
 
 struct Options {
-    QString structDeclarationPath;
-    QString inputPath;
-    QString outputPath;
+    QString schemaPath;
+    QHash<QString, QString> inputs;
     QString entryName;
     QString outformName;
+    QString outputPath;
     quint64 offset = 0;
-    int bitshift = 0;
-    int repeat = 1;
     bool help = false;
 };
 
 void printUsage() {
     std::cout
         << "Usage:\n"
-        << "  brecodump [-s STRUCT_DECLARATION_FILE] -i BINARY_FILE_NAME "
-           "[-e ENTRY_NAME=last] [-ofs BYTE_OFFSET=0] [-bs BITSHIFT=0] "
-           "[-r REPEATNUM=1] "
-           "[-outform NAME] "
-           "[-o OUTPUT_FILE=stdout] [-h|--help]\n\n"
-        << "Purpose:\n"
-        << "  Dump binary data through breco's Struct Declaration parser and visualizer.\n"
-        << "  The declaration uses the same language as the Struct Declaration text area.\n\n"
-        << "Behavior:\n"
-        << "  With -s, the declaration is read from that file. Without -s, the\n"
-        << "  declaration is read from stdin so agents can pipe declarations directly.\n"
-        << "  -e selects a visualizable entry by name. Without -e, the last visualizable\n"
-        << "  declaration in source order is decoded. Decoding starts at the selected\n"
-        << "  byte offset and uses the requested repeat count. -outform renders the\n"
-        << "  decoded node with a named outform declared in the script.\n\n"
-        << "Output format:\n"
-        << "  Pretty JSON. metadata contains the input parameters and source info.\n"
-        << "  The other top-level key is the decoded struct or field name. Each node\n"
-        << "  contains focused data such as value, type, rawBytesHex, bytesMissing,\n"
-        << "  error, and nested struct/field names. Fields retain declaration order;\n"
-        << "  valid appears directly after value for /cond fields and /assert nodes.\n"
-        << "  Endianness is\n"
-        << "  emitted only when explicitly decorated. Struct members are nested in a\n"
-        << "  value object, and repeated values are nested in a value array.\n";
+        << "  brecodump --schema FILE --input NAME=FILE [--input NAME=FILE ...]\n"
+        << "            [--entry NAME] [--offset BYTES] [--outform NAME]\n"
+        << "            [--output FILE]\n\n"
+        << "Compiles a BrecoLang 0.1 schema and decodes its selected entry. If\n"
+        << "--entry is omitted, the schema's default entry is used. JSON is written\n"
+        << "incrementally unless --outform selects a declared text or binary renderer.\n"
+        << "Use '-' for one input stream or for output. File output is atomically\n"
+        << "replaced only after decoding and rendering succeed.\n";
 }
 
 bool parseUnsigned(const QString& text, quint64* value) {
-    if (value == nullptr) {
-        return false;
-    }
     bool ok = false;
     const quint64 parsed = text.toULongLong(&ok, 0);
-    if (!ok) {
-        return false;
-    }
-    *value = parsed;
-    return true;
-}
-
-bool parseSignedInt(const QString& text, int* value) {
-    if (value == nullptr) {
-        return false;
-    }
-    bool ok = false;
-    const qlonglong parsed = text.toLongLong(&ok, 0);
-    if (!ok || parsed < std::numeric_limits<int>::min() ||
-        parsed > std::numeric_limits<int>::max()) {
-        return false;
-    }
-    *value = static_cast<int>(parsed);
-    return true;
-}
-
-bool parsePositiveInt(const QString& text, int* value) {
-    int parsed = 0;
-    if (!parseSignedInt(text, &parsed) || parsed < 1) {
+    if (!ok || value == nullptr) {
         return false;
     }
     *value = parsed;
@@ -99,151 +51,348 @@ bool parsePositiveInt(const QString& text, int* value) {
 
 std::optional<Options> parseOptions(const QStringList& args, QString* error) {
     Options options;
-    for (int i = 1; i < args.size(); ++i) {
-        const QString arg = args.at(i);
-        if (arg == QStringLiteral("-h") || arg == QStringLiteral("--help")) {
+    for (int index = 1; index < args.size(); ++index) {
+        const QString option = args.at(index);
+        if (option == QStringLiteral("-h") || option == QStringLiteral("--help")) {
             options.help = true;
             return options;
         }
-
-        const auto requireValue = [&](QString* value) -> bool {
-            if (i + 1 >= args.size()) {
+        const auto valueFor = [&](QString* value) -> bool {
+            if (index + 1 >= args.size()) {
                 if (error != nullptr) {
-                    *error = QStringLiteral("Missing value for %1").arg(arg);
+                    *error = QStringLiteral("Missing value for %1").arg(option);
                 }
                 return false;
             }
-            *value = args.at(++i);
+            *value = args.at(++index);
             return true;
         };
 
         QString value;
-        if (arg == QStringLiteral("-s")) {
-            if (!requireValue(&options.structDeclarationPath)) {
+        if (option == QStringLiteral("--schema")) {
+            if (!valueFor(&options.schemaPath)) return std::nullopt;
+        } else if (option == QStringLiteral("--input")) {
+            if (!valueFor(&value)) return std::nullopt;
+            const qsizetype separator = value.indexOf(QLatin1Char('='));
+            const QString name = value.left(separator).trimmed();
+            const QString path = separator >= 0 ? value.mid(separator + 1) : QString();
+            if (separator <= 0 || name.isEmpty() || path.isEmpty()) {
+                if (error != nullptr) {
+                    *error = QStringLiteral("--input must use NAME=FILE syntax");
+                }
                 return std::nullopt;
             }
-        } else if (arg == QStringLiteral("-i")) {
-            if (!requireValue(&options.inputPath)) {
+            if (options.inputs.contains(name)) {
+                if (error != nullptr) {
+                    *error = QStringLiteral("Input '%1' was bound more than once")
+                                 .arg(name);
+                }
                 return std::nullopt;
             }
-        } else if (arg == QStringLiteral("-e")) {
-            if (!requireValue(&options.entryName)) {
-                return std::nullopt;
-            }
-            if (options.entryName.isEmpty()) {
+            options.inputs.insert(name, path);
+        } else if (option == QStringLiteral("--entry")) {
+            if (!valueFor(&options.entryName) || options.entryName.isEmpty()) {
                 if (error != nullptr) {
                     *error = QStringLiteral("Entry name cannot be empty");
                 }
                 return std::nullopt;
             }
-        } else if (arg == QStringLiteral("-ofs")) {
-            if (!requireValue(&value) || !parseUnsigned(value, &options.offset)) {
-                if (error != nullptr) {
-                    *error = QStringLiteral("Invalid byte offset: %1").arg(value);
-                }
-                return std::nullopt;
-            }
-        } else if (arg == QStringLiteral("-bs")) {
-            if (!requireValue(&value) || !parseSignedInt(value, &options.bitshift)) {
-                if (error != nullptr) {
-                    *error = QStringLiteral("Invalid bitshift: %1").arg(value);
-                }
-                return std::nullopt;
-            }
-        } else if (arg == QStringLiteral("-r")) {
-            if (!requireValue(&value) || !parsePositiveInt(value, &options.repeat)) {
-                if (error != nullptr) {
-                    *error = QStringLiteral("Invalid repeat count: %1").arg(value);
-                }
-                return std::nullopt;
-            }
-        } else if (arg == QStringLiteral("-o")) {
-            if (!requireValue(&options.outputPath)) {
-                return std::nullopt;
-            }
-        } else if (arg == QStringLiteral("-outform")) {
-            if (!requireValue(&options.outformName)) {
-                return std::nullopt;
-            }
-            if (options.outformName.isEmpty()) {
+        } else if (option == QStringLiteral("--outform")) {
+            if (!valueFor(&options.outformName) || options.outformName.isEmpty()) {
                 if (error != nullptr) {
                     *error = QStringLiteral("Outform name cannot be empty");
                 }
                 return std::nullopt;
             }
+        } else if (option == QStringLiteral("--output")) {
+            if (!valueFor(&options.outputPath)) return std::nullopt;
+        } else if (option == QStringLiteral("--offset")) {
+            if (!valueFor(&value) || !parseUnsigned(value, &options.offset)) {
+                if (error != nullptr) {
+                    *error = QStringLiteral("Invalid byte offset: %1").arg(value);
+                }
+                return std::nullopt;
+            }
         } else {
             if (error != nullptr) {
-                *error = QStringLiteral("Unknown argument: %1").arg(arg);
+                *error = QStringLiteral("Unknown argument: %1").arg(option);
             }
             return std::nullopt;
         }
     }
-
-    if (options.inputPath.isEmpty()) {
+    if (options.schemaPath.isEmpty()) {
         if (error != nullptr) {
-            *error = QStringLiteral("Missing required -i BINARY_FILE_NAME");
+            *error = QStringLiteral("Missing required --schema FILE");
+        }
+        return std::nullopt;
+    }
+    if (options.schemaPath == QStringLiteral("-") &&
+        std::any_of(options.inputs.cbegin(), options.inputs.cend(),
+                    [](const QString& path) { return path == QStringLiteral("-"); })) {
+        if (error != nullptr) {
+            *error = QStringLiteral("Schema and binary input cannot both use stdin");
+        }
+        return std::nullopt;
+    }
+    int stdinInputs = 0;
+    for (const QString& path : options.inputs) {
+        if (path == QStringLiteral("-")) ++stdinInputs;
+    }
+    if (stdinInputs > 1) {
+        if (error != nullptr) {
+            *error = QStringLiteral("Only one declared input may use stdin");
         }
         return std::nullopt;
     }
     return options;
 }
 
-std::optional<QByteArray> readAllFile(const QString& path, QString* error) {
-    QFile file(path);
-    if (!file.open(QIODevice::ReadOnly)) {
-        if (error != nullptr) {
-            *error = QStringLiteral("Could not open '%1': %2")
-                         .arg(path, file.errorString());
+std::optional<QByteArray> readSchema(const QString& path, QString* error) {
+    QFile file;
+    if (path == QStringLiteral("-")) {
+        if (!file.open(stdin, QIODevice::ReadOnly, QFileDevice::DontCloseHandle)) {
+            if (error != nullptr) *error = file.errorString();
+            return std::nullopt;
         }
-        return std::nullopt;
+    } else {
+        file.setFileName(path);
+        if (!file.open(QIODevice::ReadOnly)) {
+            if (error != nullptr) {
+                *error = QStringLiteral("Could not open schema '%1': %2")
+                             .arg(path, file.errorString());
+            }
+            return std::nullopt;
+        }
     }
     const QByteArray bytes = file.readAll();
     if (file.error() != QFileDevice::NoError) {
-        if (error != nullptr) {
-            *error = QStringLiteral("Could not read '%1': %2")
-                         .arg(path, file.errorString());
-        }
+        if (error != nullptr) *error = file.errorString();
         return std::nullopt;
     }
     return bytes;
 }
 
-QByteArray readAllStdin() {
-    const std::string input((std::istreambuf_iterator<char>(std::cin)),
-                            std::istreambuf_iterator<char>());
-    return QByteArray(input.data(), static_cast<qsizetype>(input.size()));
+QString compileDiagnostics(const QVector<breco::lang::Diagnostic>& diagnostics) {
+    QStringList messages;
+    for (const breco::lang::Diagnostic& diagnostic : diagnostics) {
+        messages.push_back(QStringLiteral("%1: %2 (source offset %3)")
+                               .arg(diagnostic.code, diagnostic.message)
+                               .arg(diagnostic.span.start));
+    }
+    return messages.join(QLatin1Char('\n'));
 }
 
-bool writeOutput(const QByteArray& bytes, const QString& outputPath, bool appendNewline,
-                 QString* error) {
-    if (outputPath.isEmpty() || outputPath == QStringLiteral("-") ||
-        outputPath == QStringLiteral("stdout")) {
-        std::cout.write(bytes.constData(), bytes.size());
-        if (appendNewline) {
-            std::cout << '\n';
+QString runtimeDiagnostics(
+    const QVector<breco::lang::RuntimeDiagnostic>& diagnostics) {
+    QStringList messages;
+    for (const breco::lang::RuntimeDiagnostic& diagnostic : diagnostics) {
+        messages.push_back(
+            QStringLiteral("%1: %2").arg(diagnostic.code, diagnostic.message));
+    }
+    return messages.join(QLatin1Char('\n'));
+}
+
+QStringList entryNames(const breco::lang::BrecoProgram& program) {
+    QStringList names;
+    for (const breco::lang::EntryDesc& entry : program.entries) {
+        names.push_back(program.symbol(entry.name));
+    }
+    return names;
+}
+
+QStringList inputNames(const breco::lang::BrecoProgram& program) {
+    QStringList names;
+    for (const breco::lang::InputDesc& input : program.inputs) {
+        names.push_back(program.symbol(input.name));
+    }
+    return names;
+}
+
+QStringList outformNames(const breco::lang::BrecoProgram& program) {
+    QStringList names;
+    for (const breco::lang::OutformDesc& outform : program.outforms) {
+        names.push_back(program.symbol(outform.name));
+    }
+    return names;
+}
+
+class OutputDestination {
+public:
+    bool open(const QString& path, QString* error) {
+        if (path.isEmpty() || path == QStringLiteral("-")) {
+            if (!m_stdout.open(stdout, QIODevice::WriteOnly,
+                               QFileDevice::DontCloseHandle)) {
+                if (error != nullptr) *error = m_stdout.errorString();
+                return false;
+            }
+            m_device = &m_stdout;
+            return true;
         }
-        return std::cout.good();
+        m_file = std::make_unique<QSaveFile>(path);
+        m_file->setDirectWriteFallback(false);
+        if (!m_file->open(QIODevice::WriteOnly)) {
+            if (error != nullptr) {
+                *error = QStringLiteral("Could not stage output '%1': %2")
+                             .arg(path, m_file->errorString());
+            }
+            m_file.reset();
+            return false;
+        }
+        m_device = m_file.get();
+        return true;
     }
 
-    QFile output(outputPath);
-    if (!output.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-        if (error != nullptr) {
-            *error = QStringLiteral("Could not open output '%1': %2")
-                         .arg(outputPath, output.errorString());
+    QIODevice* device() const { return m_device; }
+
+    bool commit(QString* error) {
+        if (m_file) {
+            if (!m_file->commit()) {
+                if (error != nullptr) *error = m_file->errorString();
+                return false;
+            }
+            return true;
         }
-        return false;
-    }
-    if (output.write(bytes) != bytes.size()) {
-        if (error != nullptr) {
-            *error = QStringLiteral("Could not write output '%1': %2")
-                         .arg(outputPath, output.errorString());
+        if (!m_stdout.flush()) {
+            if (error != nullptr) *error = m_stdout.errorString();
+            return false;
         }
-        return false;
+        return true;
     }
-    if (appendNewline) {
-        output.write("\n", 1);
+
+    void cancel() {
+        if (m_file && m_file->isOpen()) m_file->cancelWriting();
     }
-    return true;
+
+private:
+    QFile m_stdout;
+    std::unique_ptr<QSaveFile> m_file;
+    QIODevice* m_device = nullptr;
+};
+
+int run(const Options& options) {
+    QString error;
+    const std::optional<QByteArray> schema = readSchema(options.schemaPath, &error);
+    if (!schema.has_value()) {
+        std::cerr << error.toStdString() << '\n';
+        return 1;
+    }
+    const breco::lang::CompileResult compiled = breco::lang::compileBrecoLang(
+        QString::fromUtf8(*schema),
+        options.schemaPath == QStringLiteral("-")
+            ? QStringLiteral("<stdin>")
+            : QFileInfo(options.schemaPath).absoluteFilePath());
+    if (!compiled.success()) {
+        std::cerr << compileDiagnostics(compiled.diagnostics).toStdString() << '\n';
+        return 2;
+    }
+
+    const auto& program = *compiled.program;
+    const QStringList entries = entryNames(program);
+    const QStringList inputs = inputNames(program);
+    const QStringList outforms = outformNames(program);
+    QString entryName = options.entryName;
+    if (entryName.isEmpty() && program.defaultEntry != breco::lang::kInvalidId) {
+        entryName = program.symbol(program.defaultEntry);
+    }
+    if (!entries.contains(entryName)) {
+        std::cerr << (entryName.isEmpty() ? "No entry was selected"
+                                          : "Unknown entry '" +
+                                                entryName.toStdString() + "'")
+                  << ". Available entries: "
+                  << entries.join(QStringLiteral(", ")).toStdString() << '\n';
+        return 2;
+    }
+    if (!options.outformName.isEmpty() &&
+        !outforms.contains(options.outformName)) {
+        std::cerr << "Unknown outform '" << options.outformName.toStdString()
+                  << "'. Available outforms: "
+                  << outforms.join(QStringLiteral(", ")).toStdString() << '\n';
+        return 2;
+    }
+
+    QVector<std::shared_ptr<breco::lang::ByteSource>> sources(program.inputs.size());
+    std::shared_ptr<QFile> stdinDevice;
+    for (auto binding = options.inputs.cbegin(); binding != options.inputs.cend();
+         ++binding) {
+        const qsizetype input = inputs.indexOf(binding.key());
+        if (input < 0) {
+            std::cerr << "Unknown input '" << binding.key().toStdString()
+                      << "'. Available inputs: "
+                      << inputs.join(QStringLiteral(", ")).toStdString() << '\n';
+            return 2;
+        }
+        if (binding.value() == QStringLiteral("-")) {
+            stdinDevice = std::make_shared<QFile>();
+            if (!stdinDevice->open(stdin, QIODevice::ReadOnly,
+                                   QFileDevice::DontCloseHandle)) {
+                std::cerr << stdinDevice->errorString().toStdString() << '\n';
+                return 1;
+            }
+            sources[static_cast<breco::lang::InputId>(input)] =
+                std::make_shared<breco::lang::SpoolingSource>(stdinDevice,
+                                                              QStringLiteral("<stdin>"));
+        } else {
+            QString sourceError;
+            sources[static_cast<breco::lang::InputId>(input)] =
+                breco::lang::PagedFileSource::open(binding.value(), &sourceError);
+            if (!sources[static_cast<breco::lang::InputId>(input)]) {
+                std::cerr << "Could not bind input '" << binding.key().toStdString()
+                          << "': " << sourceError.toStdString() << '\n';
+                return 1;
+            }
+        }
+    }
+
+    OutputDestination output;
+    if (!output.open(options.outputPath, &error)) {
+        std::cerr << error.toStdString() << '\n';
+        return 1;
+    }
+
+    breco::lang::DecodeRequest request;
+    request.program = compiled.program;
+    request.entryName = entryName;
+    request.inputs = sources;
+    request.startOffset = options.offset;
+    request.mode = options.outformName.isEmpty()
+                       ? breco::lang::DecodeMode::Streaming
+                       : breco::lang::DecodeMode::Tree;
+    request.output = options.outformName.isEmpty() ? output.device() : nullptr;
+    const breco::lang::DecodeResult decoded =
+        breco::lang::decodeBrecoProgram(request);
+    if (!decoded.success()) {
+        const QString messages = runtimeDiagnostics(decoded.diagnostics);
+        std::cerr << (messages.isEmpty() ? "Decode failed" : messages.toStdString())
+                  << '\n';
+        std::cerr << "Declared inputs: "
+                  << inputs.join(QStringLiteral(", ")).toStdString() << '\n';
+        output.cancel();
+        return 1;
+    }
+
+    if (options.outformName.isEmpty()) {
+        if (output.device()->write("\n", 1) != 1) {
+            std::cerr << output.device()->errorString().toStdString() << '\n';
+            output.cancel();
+            return 1;
+        }
+    } else {
+        const breco::lang::RenderStore store(compiled.program, decoded.tree, sources,
+                                              decoded.rootValue);
+        const breco::lang::OutformRenderResult rendered =
+            breco::lang::renderOutform(store, options.outformName,
+                                       output.device());
+        if (!rendered.success) {
+            std::cerr << rendered.error.toStdString() << '\n';
+            output.cancel();
+            return 1;
+        }
+    }
+    if (!output.commit(&error)) {
+        std::cerr << error.toStdString() << '\n';
+        return 1;
+    }
+    return 0;
 }
 
 }  // namespace
@@ -253,152 +402,16 @@ int main(int argc, char** argv) {
     QCoreApplication::setApplicationName(QStringLiteral("brecodump"));
 
     QString error;
-    const std::optional<Options> maybeOptions =
+    const std::optional<Options> options =
         parseOptions(QCoreApplication::arguments(), &error);
-    if (!maybeOptions.has_value()) {
+    if (!options.has_value()) {
         std::cerr << error.toStdString() << "\n\n";
         printUsage();
         return 2;
     }
-
-    const Options options = *maybeOptions;
-    if (options.help) {
+    if (options->help) {
         printUsage();
         return 0;
     }
-
-    const QFileInfo inputInfo(options.inputPath);
-    if (!inputInfo.exists() || !inputInfo.isFile() || inputInfo.size() < 0) {
-        std::cerr << "Input file is not a readable regular file: "
-                  << options.inputPath.toStdString() << '\n';
-        return 2;
-    }
-
-    const quint64 fileSize = static_cast<quint64>(inputInfo.size());
-    if (options.offset > fileSize) {
-        std::cerr << "Byte offset is past end of input\n";
-        return 2;
-    }
-
-    breco::OpenFilePool filePool;
-    breco::ShiftedWindowLoader loader(&filePool);
-    breco::ShiftSettings shift;
-    shift.amount = options.bitshift;
-    shift.unit = breco::ShiftUnit::Bits;
-    const quint64 windowSize = fileSize - options.offset;
-    const std::optional<QByteArray> bytes =
-        loader.loadTransformedWindow(inputInfo.absoluteFilePath(), fileSize,
-                                     options.offset, windowSize, shift);
-    if (!bytes.has_value()) {
-        std::cerr << "Could not read input bytes\n";
-        return 1;
-    }
-
-    QJsonObject metadata;
-    metadata.insert(QStringLiteral("tool"), QStringLiteral("brecodump"));
-    metadata.insert(QStringLiteral("input"), inputInfo.absoluteFilePath());
-    metadata.insert(QStringLiteral("offset"), QString::number(options.offset));
-    metadata.insert(QStringLiteral("bitshift"), options.bitshift);
-    metadata.insert(QStringLiteral("repeat"), options.repeat);
-    metadata.insert(QStringLiteral("byteCount"), bytes->size());
-
-    std::optional<QByteArray> declarationBytes;
-    if (options.structDeclarationPath.isEmpty()) {
-        metadata.insert(QStringLiteral("declarationSource"), QStringLiteral("stdin"));
-        declarationBytes = readAllStdin();
-    } else {
-        const QFileInfo declarationInfo(options.structDeclarationPath);
-        metadata.insert(QStringLiteral("declarationSource"),
-                        declarationInfo.absoluteFilePath());
-        declarationBytes = readAllFile(options.structDeclarationPath, &error);
-    }
-    if (!declarationBytes.has_value()) {
-        std::cerr << error.toStdString() << '\n';
-        return 1;
-    }
-
-    const breco::ParseResult parsed = options.structDeclarationPath.isEmpty()
-                                          ? breco::parseStructDeclaration(
-                                                QString::fromUtf8(*declarationBytes))
-                                          : breco::parseStructDeclarationFile(
-                                                options.structDeclarationPath);
-    if (!parsed.valid) {
-        std::cerr << "Invalid struct declaration";
-        if (!parsed.errorMessage.isEmpty()) {
-            std::cerr << ": " << parsed.errorMessage.toStdString();
-        }
-        std::cerr << '\n';
-        return 2;
-    }
-
-    const QStringList entryNames = parsed.graph.entryNames();
-    if (entryNames.isEmpty()) {
-        std::cerr << "Struct declaration has no visualizable entries\n";
-        return 2;
-    }
-
-    QString entryName = options.entryName;
-    if (entryName.isEmpty()) {
-        entryName = entryNames.first();
-        int latestSourcePosition =
-            parsed.graph.nameRangeForEntry(entryName).start;
-        for (const QString& candidate : entryNames) {
-            const int sourcePosition =
-                parsed.graph.nameRangeForEntry(candidate).start;
-            if (sourcePosition > latestSourcePosition) {
-                entryName = candidate;
-                latestSourcePosition = sourcePosition;
-            }
-        }
-    } else if (!parsed.graph.isVisualizableEntryName(entryName)) {
-        std::cerr << "Unknown entry '" << entryName.toStdString()
-                  << "'. Available entries: "
-                  << entryNames.join(QStringLiteral(", ")).toStdString() << '\n';
-        return 2;
-    }
-    metadata.insert(QStringLiteral("entrypoint"), entryName);
-
-    const breco::VisualizedNode visualization =
-        breco::visualize(parsed.graph, entryName, *bytes, 0, options.repeat);
-    const bool singleDecodedNode =
-        visualization.children.size() == 1 && options.repeat == 1;
-    const breco::VisualizedNode& outputNode =
-        singleDecodedNode ? visualization.children.first() : visualization;
-    QByteArray output;
-    if (options.outformName.isEmpty()) {
-        output = serializeDump(metadata, entryName, outputNode);
-    } else {
-        const breco::OutformNode* outform =
-            parsed.graph.findOutform(options.outformName);
-        if (outform == nullptr) {
-            QStringList names;
-            for (const breco::OutformNode& candidate : parsed.graph.outforms()) {
-                names.push_back(candidate.name);
-            }
-            std::cerr << "Unknown outform '" << options.outformName.toStdString() << "'";
-            if (!names.isEmpty()) {
-                std::cerr << ". Available outforms: "
-                          << names.join(QStringLiteral(", ")).toStdString();
-            }
-            std::cerr << '\n';
-            return 2;
-        }
-        QString templateError;
-        output = breco::renderStructureTemplate(outform->templateText, outputNode,
-                                                &templateError)
-                     .toUtf8();
-        if (!templateError.isEmpty()) {
-            std::cerr << "Could not render outform '"
-                      << options.outformName.toStdString() << "': "
-                      << templateError.toStdString() << '\n';
-            return 2;
-        }
-    }
-    if (!writeOutput(output, options.outputPath, options.outformName.isEmpty(), &error)) {
-        if (!error.isEmpty()) {
-            std::cerr << error.toStdString() << '\n';
-        }
-        return 1;
-    }
-    return 0;
+    return run(*options);
 }

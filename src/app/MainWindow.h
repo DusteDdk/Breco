@@ -12,10 +12,9 @@
 
 #include "io/OpenFilePool.h"
 #include "io/ShiftedWindowLoader.h"
+#include "edit/EditQueue.h"
 #include "model/ResultModel.h"
 #include "scan/ScanController.h"
-#include "struct/VisualizedNode.h"
-#include "struct/StructVisualizer.h"
 
 QT_BEGIN_NAMESPACE
 class QComboBox;
@@ -32,13 +31,16 @@ QT_END_NAMESPACE
 
 namespace breco {
 
+namespace lang {
+class BrecoLangPanel;
+}
+
 class BitmapViewWidget;
 class BitmapViewPanel;
 class CurrentByteInfoPanel;
 class DataViewByteAndBitmapPanel;
 class DataViewImagePanel;
 class DataViewShellPanel;
-class DataViewStructuredPanel;
 class EmbeddedImageScanController;
 struct EmbeddedImageResult;
 struct EmbeddedImageScanOptions;
@@ -46,13 +48,13 @@ struct EmbeddedImageScanSource;
 struct EmbeddedImageScanSummary;
 class HexViewControlsPanel;
 class MainTabsPanel;
+class EditsPanel;
 class ProtectedSourceOpener;
 class ResultsTablePanel;
 class ScanControlsPanel;
-class StructDataViewPanel;
-class StructModeLeftPanel;
 class TextViewWidget;
 class TextViewPanel;
+class VisualizePanel;
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -76,7 +78,7 @@ private slots:
     void onOpenFile();
     void onOpenDirectory();
     void onStartScan();
-    void onStartStructureScan();
+    void onStartBrecoLangScan();
     void onStopScan();
     void onResultActivated(const QModelIndex& index);
     void onResultsBatchReady(const QVector<MatchRecord>& matches, int mergedTotal);
@@ -102,7 +104,7 @@ private:
     enum class SourceTargetKind { None, File, BlockDevice, Directory };
     enum class SourcePathFeedback { None, NotFound, Found, PermissionDenied, Open };
     enum class HoverSource { None, Text, Bitmap };
-    enum class ScanKind { None, Text, Structure };
+    enum class ScanKind { None, Text, BrecoLang };
     enum class HexNavigatorField { Offset, Selected, SelectTo };
 
     struct HoverBuffer {
@@ -121,18 +123,6 @@ private:
         quint64 size = 0;
     };
 
-    struct StructViewState {
-        quint64 id = 0;
-        QString name;
-        QString type;
-        int repeat = 1;
-        quint64 offset = 0;
-        QString filePath;
-        quint64 fileSize = 0;
-        VisualizedNode decodedRoot;
-        QString reloadError;
-    };
-
     quint64 effectiveBlockSizeBytes() const;
     ShiftSettings currentShiftSettings() const;
     TextInterpretationMode selectedTextMode() const;
@@ -147,22 +137,31 @@ private:
                          std::optional<QPair<quint64, quint64>> selectionRange);
     static bool parseHexNavigatorOffset(const QString& text, quint64* offset);
     void refreshDataViewFromNavigator();
-    void syncStructPreviewToControls();
-    void createStructPreview(quint64 absoluteOffset);
-    void clearStructPreview();
-    void addCurrentStructView();
-    void removeCurrentStructViews(const QVector<quint64>& ids);
-    void updateCurrentStructView(quint64 id, const QString& name, int repeat,
-                                 quint64 offset);
-    void rebuildStructVisualization();
-    bool decodeStructView(StructViewState& view, bool allowSourceReload);
-    bool loadExternalStructSources(QHash<QString, VisualizationSource>* sources);
-    quint64 structVisualizationStartOffset() const;
-    void navigateToStructSource(const QString& filePath,
-                                quint64 absoluteOffset, quint64 byteLength);
-    void setStructSourceHighlight(quint64 absoluteOffset,
-                                  quint64 byteLength);
-    void clearStructSourceHighlight();
+    void refreshVisualization();
+    void applyVisualizationWindow(quint64 start, quint64 length, bool truncated,
+                                  quint64 fileSize);
+    void navigateToDecodedSource(const QString& filePath,
+                                 quint64 absoluteOffset, quint64 byteLength);
+    quint64 strideAlignedOffset(quint64 offset) const;
+    void queueFileEdit(const QString& filePath, quint64 offset, const QByteArray& newBytes,
+                       QByteArray originalBytes = {});
+    void refreshQueuedEditOverlays();
+    void showEditsTabIfNeeded();
+    QByteArray readFileBytes(const QString& filePath, quint64 offset, int length);
+    bool applyQueuedEditsToPath(const QString& filePath, const QString& destinationPath,
+                                bool writeSidecar, QString* error, bool showProgress);
+    void appendSidecarRecord(const QString& filePath, const QueuedEdit& edit);
+    void reloadBuffersForPath(const QString& filePath);
+    void onQueuedByteEditCommitted(quint64 offset, const QByteArray& newBytes);
+    void onEditsDeleteRequested();
+    void onApplyQueuedEdits();
+    void onSaveQueuedEditsAs();
+    void setCurrentFileEditingEnabled(bool enabled);
+    QString currentPreviewFilePath() const;
+    void syncCurrentFileEditingUi();
+    void setDecodedSourceHighlight(quint64 absoluteOffset,
+                                   quint64 byteLength);
+    void clearDecodedSourceHighlight();
     void setScanButtonMode(bool running);
     void startScan(ScanKind kind);
     void restoreTransientScanUi();
@@ -275,14 +274,15 @@ private:
     TextViewPanel* m_textPanel = nullptr;
     HexViewControlsPanel* m_hexControlsPanel = nullptr;
     DataViewShellPanel* m_rawDataViewShellPanel = nullptr;
-    DataViewShellPanel* m_structDataViewShellPanel = nullptr;
     DataViewByteAndBitmapPanel* m_dataViewByteAndBitmapPanel = nullptr;
     DataViewImagePanel* m_dataViewImagePanel = nullptr;
-    DataViewStructuredPanel* m_dataViewStructuredPanel = nullptr;
+    lang::BrecoLangPanel* m_brecoLangPanel = nullptr;
+    VisualizePanel* m_visualizePanel = nullptr;
+    EditsPanel* m_editsPanel = nullptr;
+    EditQueue m_editQueue;
+    QSet<QString> m_unlockedEditPaths;
     CurrentByteInfoPanel* m_currentByteInfoPanel = nullptr;
-    StructModeLeftPanel* m_structModeLeftPanel = nullptr;
     BitmapViewPanel* m_bitmapPanel = nullptr;
-    StructDataViewPanel* m_structDataViewPanel = nullptr;
     TextViewWidget* m_textView = nullptr;
     BitmapViewWidget* m_bitmapView = nullptr;
     QSpinBox* m_shiftValueSpin = nullptr;
@@ -298,12 +298,8 @@ private:
     TextInterpretationMode m_lastTextInterpretationMode = TextInterpretationMode::Ascii;
     std::optional<quint64> m_lastHoverAbsoluteOffset;
     std::optional<QPair<quint64, quint64>> m_activeTextSelectionRange;
-    std::optional<StructViewState> m_structPreview;
-    QVector<StructViewState> m_currentStructViews;
-    QHash<QString, QString> m_externalStructSourcePaths;
-    bool m_structNavigationInProgress = false;
-    std::optional<QPair<quint64, quint64>> m_structSourceHighlightRange;
-    quint64 m_nextStructViewId = 1;
+    bool m_decodedNavigationInProgress = false;
+    std::optional<QPair<quint64, quint64>> m_decodedSourceHighlightRange;
     int m_activePreviewRow = -1;
     quint64 m_sharedCenterOffset = 0;
     bool m_previewSyncInProgress = false;
@@ -324,8 +320,8 @@ private:
     bool m_dataViewBigEndian = false;
     quint64 m_activeImageScanId = 0;
     ScanKind m_activeScanKind = ScanKind::None;
-    QString m_savedStructureSearchTerm;
-    bool m_savedStructureTermEnabled = true;
+    QString m_savedSchemaSearchTerm;
+    bool m_savedSchemaTermEnabled = true;
     bool m_savedIgnoreCaseEnabled = true;
     bool m_destroying = false;
 };

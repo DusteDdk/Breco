@@ -52,16 +52,16 @@ cp "${MXE_QT_PLUGINS}/imageformats/"*.dll "${PACKAGING_DIR}/imageformats/"
 echo "==> Copying user documentation and examples"
 mkdir -p "${PACKAGING_DIR}/docs" "${PACKAGING_DIR}/examples"
 cp README.md "${PACKAGING_DIR}/docs/"
-cp docs/BrecoScript.md "${PACKAGING_DIR}/docs/"
-cp examples/pnghead.brecostruct "${PACKAGING_DIR}/examples/"
+cp docs/BrecoLang.md "${PACKAGING_DIR}/docs/"
+cp examples/png.breco "${PACKAGING_DIR}/examples/"
 
 required_files=(
   "breco.exe"
   "brecodump.exe"
   "platforms/qwindows.dll"
   "docs/README.md"
-  "docs/BrecoScript.md"
-  "examples/pnghead.brecostruct"
+  "docs/BrecoLang.md"
+  "examples/png.breco"
 )
 for required in "${required_files[@]}"; do
   if [[ ! -f "${PACKAGING_DIR}/${required}" ]]; then
@@ -72,4 +72,4 @@ done
 
 echo "Portable Windows package ready: ${PACKAGING_DIR}"
 echo "Copy this directory to Windows and run breco.exe or brecodump.exe from it."
-echo "User docs: docs/README.md (app guide), docs/BrecoScript.md (struct language reference)."
+echo "User docs: docs/README.md (app guide), docs/BrecoLang.md (language reference)."

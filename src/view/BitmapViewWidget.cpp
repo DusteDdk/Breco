@@ -152,11 +152,55 @@ void BitmapViewWidget::setZoom(int zoom) {
 
 int BitmapViewWidget::zoom() const { return m_zoom; }
 
+void BitmapViewWidget::setBaseCellSize(int pixels) {
+    const int next = qBound(1, pixels, 16);
+    if (m_baseCellSize == next) {
+        return;
+    }
+    m_baseCellSize = next;
+    resetPanOffset();
+    markDirty();
+    update();
+}
+
+int BitmapViewWidget::baseCellSize() const { return m_baseCellSize; }
+
+void BitmapViewWidget::setPanButton(Qt::MouseButton button) {
+    if (button != Qt::LeftButton && button != Qt::MiddleButton &&
+        button != Qt::RightButton) {
+        return;
+    }
+    if (m_panButton == button) {
+        return;
+    }
+    resetPanOffset();
+    m_panButton = button;
+}
+
+Qt::MouseButton BitmapViewWidget::panButton() const { return m_panButton; }
+
+void BitmapViewWidget::setDataOriginAtTopLeft(bool enabled) {
+    if (m_dataOriginAtTopLeft == enabled) {
+        return;
+    }
+    m_dataOriginAtTopLeft = enabled;
+    resetPanOffset();
+    markDirty();
+    update();
+}
+
+bool BitmapViewWidget::dataOriginAtTopLeft() const { return m_dataOriginAtTopLeft; }
+
+int BitmapViewWidget::effectiveScale() const {
+    return qMax(1, m_zoom * m_baseCellSize);
+}
+
 quint64 BitmapViewWidget::viewportByteCapacity() const {
     const int w = qMax(1, width());
     const int h = qMax(1, height());
-    const int sourceWidth = qMax(1, w / qMax(1, m_zoom));
-    const int sourceHeight = qMax(1, h / qMax(1, m_zoom));
+    const int scale = effectiveScale();
+    const int sourceWidth = qMax(1, w / scale);
+    const int sourceHeight = qMax(1, h / scale);
     const quint64 sourcePixels =
         static_cast<quint64>(sourceWidth) * static_cast<quint64>(sourceHeight);
 
@@ -374,8 +418,9 @@ std::optional<int> BitmapViewWidget::byteIndexAtPoint(const QPoint& point) const
 
     const int w = qMax(1, width());
     const int h = qMax(1, height());
-    const int sourceWidth = qMax(1, w / m_zoom);
-    const int sourceHeight = qMax(1, h / m_zoom);
+    const int scale = effectiveScale();
+    const int sourceWidth = qMax(1, w / scale);
+    const int sourceHeight = qMax(1, h / scale);
     const qint64 centerSourceIndex =
         static_cast<qint64>(sourceHeight / 2) * static_cast<qint64>(sourceWidth) + (sourceWidth / 2);
     const bool binaryMode = m_mode == BitmapMode::Binary;
@@ -387,17 +432,23 @@ std::optional<int> BitmapViewWidget::byteIndexAtPoint(const QPoint& point) const
     }
 
     const qint64 anchorRelative =
-        binaryMode
-            ? (static_cast<qint64>(m_centerAnchorOffset) - static_cast<qint64>(m_previewBaseOffset)) * 8
-            : static_cast<qint64>(m_centerAnchorOffset) - static_cast<qint64>(m_previewBaseOffset);
+        m_dataOriginAtTopLeft
+            ? 0
+            : (binaryMode
+                   ? (static_cast<qint64>(m_centerAnchorOffset) -
+                      static_cast<qint64>(m_previewBaseOffset)) *
+                         8
+                   : static_cast<qint64>(m_centerAnchorOffset) -
+                         static_cast<qint64>(m_previewBaseOffset));
 
     const int sx = static_cast<int>(qFloor((static_cast<double>(point.x() - m_panDxPixels)) /
-                                           static_cast<double>(m_zoom)));
+                                           static_cast<double>(scale)));
     const int sy = static_cast<int>(qFloor((static_cast<double>(point.y() - m_panDyPixels)) /
-                                           static_cast<double>(m_zoom)));
+                                           static_cast<double>(scale)));
     const qint64 sourcePixelIndex =
         static_cast<qint64>(sy) * static_cast<qint64>(sourceWidth) + static_cast<qint64>(sx);
-    const qint64 deltaPixels = sourcePixelIndex - centerSourceIndex;
+    const qint64 deltaPixels =
+        m_dataOriginAtTopLeft ? sourcePixelIndex : sourcePixelIndex - centerSourceIndex;
 
     if (binaryMode) {
         const qint64 bitIndexSigned = anchorRelative + deltaPixels;
@@ -445,16 +496,26 @@ QString BitmapViewWidget::tooltipForSequence(int sequenceIndex, int hoveredByteI
         .arg(text);
 }
 
-void BitmapViewWidget::rebuildImageIfNeeded() {
+void BitmapViewWidget::rebuildImageIfNeeded(const QRect& targetRect) {
     const quint64 rebuildStartUs = debug::selectionTraceElapsedUs();
     const int w = qMax(1, width());
     const int h = qMax(1, height());
-    if (!m_dirty && m_cachedWidth == w && m_cachedHeight == h && !m_cachedImage.isNull()) {
+    const QRect clippedRect = targetRect.intersected(rect());
+    if (clippedRect.isEmpty()) {
+        m_cachedRect = {};
+        m_cachedImage = {};
+        return;
+    }
+    if (!m_dirty && m_cachedRect == clippedRect && !m_cachedImage.isNull()) {
         return;
     }
     if (debug::selectionTraceEnabled()) {
         BRECO_SELTRACE(QStringLiteral(
-                           "BitmapViewWidget::rebuildImageIfNeeded: rebuilding w=%1 h=%2 bytes=%3 mode=%4 zoom=%5")
+                           "BitmapViewWidget::rebuildImageIfNeeded: rebuilding rect=%1,%2 %3x%4 canvas=%5x%6 bytes=%7 mode=%8 zoom=%9")
+                           .arg(clippedRect.x())
+                           .arg(clippedRect.y())
+                           .arg(clippedRect.width())
+                           .arg(clippedRect.height())
                            .arg(w)
                            .arg(h)
                            .arg(m_bytes.size())
@@ -462,9 +523,9 @@ void BitmapViewWidget::rebuildImageIfNeeded() {
                            .arg(m_zoom));
     }
 
-    m_cachedWidth = w;
-    m_cachedHeight = h;
-    m_cachedImage = QImage(w, h, QImage::Format_RGB32);
+    m_cachedRect = clippedRect;
+    m_cachedImage =
+        QImage(clippedRect.width(), clippedRect.height(), QImage::Format_RGB32);
     m_cachedImage.fill(Qt::black);
 
     if (m_bytes.isEmpty()) {
@@ -489,31 +550,41 @@ void BitmapViewWidget::rebuildImageIfNeeded() {
     const bool binaryMode = m_mode == BitmapMode::Binary;
     const bool textMode = m_mode == BitmapMode::Text;
 
-    const int sourceWidth = qMax(1, w / m_zoom);
-    const int sourceHeight = qMax(1, h / m_zoom);
+    const int scale = effectiveScale();
+    const int sourceWidth = qMax(1, w / scale);
+    const int sourceHeight = qMax(1, h / scale);
     const qint64 centerSourceIndex =
         static_cast<qint64>(sourceHeight / 2) * static_cast<qint64>(sourceWidth) + (sourceWidth / 2);
     const qint64 anchorRelative =
-        binaryMode
-            ? (static_cast<qint64>(m_centerAnchorOffset) - static_cast<qint64>(m_previewBaseOffset)) * 8
-            : static_cast<qint64>(m_centerAnchorOffset) - static_cast<qint64>(m_previewBaseOffset);
+        m_dataOriginAtTopLeft
+            ? 0
+            : (binaryMode
+                   ? (static_cast<qint64>(m_centerAnchorOffset) -
+                      static_cast<qint64>(m_previewBaseOffset)) *
+                         8
+                   : static_cast<qint64>(m_centerAnchorOffset) -
+                         static_cast<qint64>(m_previewBaseOffset));
 
     int overlapIdx = 0;
 
-    for (int y = 0; y < h; ++y) {
-        QRgb* scan = reinterpret_cast<QRgb*>(m_cachedImage.scanLine(y));
-        for (int x = 0; x < w; ++x) {
+    for (int imageY = 0; imageY < clippedRect.height(); ++imageY) {
+        const int y = clippedRect.y() + imageY;
+        QRgb* scan = reinterpret_cast<QRgb*>(m_cachedImage.scanLine(imageY));
+        for (int imageX = 0; imageX < clippedRect.width(); ++imageX) {
+            const int x = clippedRect.x() + imageX;
             int r = 0;
             int g = 0;
             int b = 0;
 
             const int sx = static_cast<int>(qFloor((static_cast<double>(x - m_panDxPixels)) /
-                                                   static_cast<double>(m_zoom)));
+                                                   static_cast<double>(scale)));
             const int sy = static_cast<int>(qFloor((static_cast<double>(y - m_panDyPixels)) /
-                                                   static_cast<double>(m_zoom)));
+                                                   static_cast<double>(scale)));
             const qint64 sourcePixelIndex =
                 static_cast<qint64>(sy) * static_cast<qint64>(sourceWidth) + static_cast<qint64>(sx);
-            const qint64 deltaPixels = sourcePixelIndex - centerSourceIndex;
+            const qint64 deltaPixels =
+                m_dataOriginAtTopLeft ? sourcePixelIndex
+                                      : sourcePixelIndex - centerSourceIndex;
             const qint64 sourceIndex = anchorRelative + (deltaPixels * static_cast<qint64>(bytesPerPixel));
 
             quint64 absoluteByte0 = 0;
@@ -663,7 +734,7 @@ void BitmapViewWidget::rebuildImageIfNeeded() {
                 }
             }
 
-            scan[x] = qRgb(r, g, b);
+            scan[imageX] = qRgb(r, g, b);
         }
     }
 
@@ -677,14 +748,20 @@ void BitmapViewWidget::rebuildImageIfNeeded() {
 void BitmapViewWidget::paintEvent(QPaintEvent* event) {
     QWidget::paintEvent(event);
     QPainter painter(this);
-    painter.fillRect(rect(), palette().base());
-    rebuildImageIfNeeded();
+    const QRect paintRect = event->rect().intersected(rect());
+    painter.fillRect(paintRect, palette().base());
+    rebuildImageIfNeeded(paintRect);
     if (m_cachedImage.isNull() || m_bytes.isEmpty()) {
         painter.setPen(palette().text().color());
         painter.drawText(rect(), Qt::AlignCenter, QStringLiteral("Bitmap view"));
         return;
     }
-    painter.drawImage(rect(), m_cachedImage);
+    painter.drawImage(m_cachedRect.topLeft(), m_cachedImage);
+}
+
+void BitmapViewWidget::resizeEvent(QResizeEvent* event) {
+    QWidget::resizeEvent(event);
+    markDirty();
 }
 
 void BitmapViewWidget::wheelEvent(QWheelEvent* event) {
@@ -703,7 +780,7 @@ void BitmapViewWidget::wheelEvent(QWheelEvent* event) {
 }
 
 void BitmapViewWidget::mousePressEvent(QMouseEvent* event) {
-    if (event->button() == Qt::LeftButton) {
+    if (event->button() == m_panButton) {
         m_dragPanning = true;
         m_lastDragPos = event->pos();
         m_dragMoved = false;
@@ -715,7 +792,7 @@ void BitmapViewWidget::mousePressEvent(QMouseEvent* event) {
 }
 
 void BitmapViewWidget::mouseMoveEvent(QMouseEvent* event) {
-    if (m_dragPanning && (event->buttons() & Qt::LeftButton)) {
+    if (m_dragPanning && (event->buttons() & m_panButton)) {
         const QPoint delta = event->pos() - m_lastDragPos;
         if (!delta.isNull()) {
             m_panDxPixels += delta.x();
@@ -789,7 +866,7 @@ void BitmapViewWidget::mouseMoveEvent(QMouseEvent* event) {
 }
 
 void BitmapViewWidget::mouseReleaseEvent(QMouseEvent* event) {
-    if (event->button() == Qt::LeftButton) {
+    if (event->button() == m_panButton) {
         const bool dragged = m_dragMoved;
         if (m_dragPanning) {
             m_dragPanning = false;
@@ -809,7 +886,7 @@ void BitmapViewWidget::mouseReleaseEvent(QMouseEvent* event) {
                 markDirty();
                 update();
             }
-        } else {
+        } else if (m_panButton == Qt::LeftButton) {
             const std::optional<int> byteIndex = byteIndexAtPoint(event->pos());
             if (byteIndex.has_value()) {
                 const quint64 absoluteOffset =
@@ -818,6 +895,15 @@ void BitmapViewWidget::mouseReleaseEvent(QMouseEvent* event) {
             }
         }
 
+        event->accept();
+        return;
+    }
+    if (event->button() == Qt::LeftButton) {
+        const std::optional<int> byteIndex = byteIndexAtPoint(event->pos());
+        if (byteIndex.has_value()) {
+            emit byteClicked(m_previewBaseOffset +
+                             static_cast<quint64>(byteIndex.value()));
+        }
         event->accept();
         return;
     }

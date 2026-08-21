@@ -23,6 +23,7 @@ public:
     void clearExternalReadFds();
     bool hasExternalReadFd(const QString& filePath) const;
     std::optional<quint64> externalReadSize(const QString& filePath) const;
+    void closePath(const QString& filePath);
     void clearThreadLocal();
     void clearAll();
 

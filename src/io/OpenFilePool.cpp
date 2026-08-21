@@ -97,6 +97,16 @@ std::optional<quint64> OpenFilePool::externalReadSize(const QString& filePath) c
     return it->fileSize;
 }
 
+void OpenFilePool::closePath(const QString& filePath) {
+    if (filePath.isEmpty()) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(m_mutex);
+    for (auto bucket = m_buckets.begin(); bucket != m_buckets.end(); ++bucket) {
+        bucket->files.remove(filePath);
+    }
+}
+
 void OpenFilePool::clearThreadLocal() {
     std::lock_guard<std::mutex> lock(m_mutex);
     m_buckets.remove(currentThreadKey());

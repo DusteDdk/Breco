@@ -1,0 +1,39 @@
+language breco 0.1
+
+inputs { input data "Portable executable" { default } }
+
+record DosHeader {
+    identify { magic: u16le match magic == 0x5A4D else "not an MZ image" }
+    commit
+    reserved: region bytes(58) { raw remaining as bytes }
+    new_header_offset: u32le
+}
+
+record CoffHeader {
+    machine: u16le
+    section_count: u16le
+    timestamp: u32le
+    symbol_table_offset: u32le
+    symbol_count: u32le
+    optional_header_size: u16le
+    characteristics: u16le
+}
+
+record PortableHeader {
+    identify {
+        signature: u32le
+        match signature == 0x00004550 else "missing PE signature"
+    }
+    commit
+    coff: CoffHeader
+    optional_header: region bytes(coff.optional_header_size) {
+        magic: u16le
+        preserve remaining as bytes
+    }
+}
+
+entry PortableExecutable from data {
+    dos: DosHeader
+    header: PortableHeader from data at dos.new_header_offset
+}
+default entry PortableExecutable

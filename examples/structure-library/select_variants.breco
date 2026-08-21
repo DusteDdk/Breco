@@ -1,0 +1,59 @@
+language breco 0.1
+
+inputs { input data "Tagged message stream" { default } }
+
+enum PayloadKind: u8 {
+    Text = 1
+    Samples = 2
+}
+
+record TextPayload(byte_count: u64) {
+    text: region bytes(byte_count) { raw remaining as utf8_bytes }
+}
+
+record SamplePayload(byte_count: u64) {
+    samples: region bytes(byte_count) {
+        values: repeat byte_count / 2 { value: i16le }
+    }
+}
+
+record UnknownPayload(byte_count: u64) {
+    bytes: region bytes(byte_count) { raw remaining as data }
+}
+
+record TaggedMessage {
+    kind: PayloadKind
+    payload_size: u16le
+
+    // A boxed select keeps the selected payload under one variant-valued field.
+    payload: select kind {
+        PayloadKind.Text => TextPayload(payload_size)
+        PayloadKind.Samples => SamplePayload(payload_size)
+        default => UnknownPayload(payload_size)
+    }
+
+    // An inline select contributes its fields directly to TaggedMessage.
+    select kind {
+        PayloadKind.Text => { computed category: string = "text" }
+        PayloadKind.Samples => { computed category: string = "samples" }
+        default => { computed category: string = "unknown" }
+    }
+
+    // Separate inline selects may contribute to one ordered aggregate field.
+    select {
+        when kind == PayloadKind.Text => {
+            computed labels: string = "text"
+        }
+        else => { }
+    }
+    select {
+        when payload_size == 0 => {
+            computed labels: string = "empty"
+        }
+        else => { }
+    }
+    computed label_count: u64 = count(labels)
+}
+
+entry Message from data { message: TaggedMessage }
+default entry Message

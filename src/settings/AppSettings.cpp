@@ -1,18 +1,15 @@
 #include "settings/AppSettings.h"
 
-#include <QDir>
-#include <QFileInfo>
 #include <QSettings>
 #include <QVariant>
+
+#include <memory>
 
 namespace breco {
 
 namespace {
 constexpr const char* kOrg = "breco";
 constexpr const char* kApp = "breco";
-constexpr const char* kLastFilePathKey = "ui/lastFileDialogPath";
-constexpr const char* kLastDirPathKey = "ui/lastDirectoryDialogPath";
-constexpr const char* kLastBrowseDialogDirectoryKey = "ui/lastBrowseDialogDirectory";
 constexpr const char* kRememberedSingleFilePathKey = "ui/rememberedSingleFilePath";
 constexpr const char* kRememberedSingleFileOffsetKey =
     "ui/rememberedSingleFileOffset";
@@ -47,23 +44,17 @@ constexpr const char* kDataViewImageMaxResultsKey = "ui/dataViewImageMaxResults"
 constexpr const char* kDataViewImageJobsKey = "ui/dataViewImageJobs";
 constexpr const char* kDataViewByteAndBitmapSplitterSizesKey =
     "ui/dataViewByteAndBitmapSplitterSizes";
-constexpr const char* kDataViewStructuredSplitterSizesKey =
-    "ui/dataViewStructuredSplitterSizes";
+constexpr const char* kVisualizeModeIndexKey = "ui/visualizeModeIndex";
 constexpr const char* kViewScanLogVisibleKey = "ui/viewScanLogVisible";
 constexpr const char* kViewEditsVisibleKey = "ui/viewEditsVisible";
-constexpr const char* kLastStructDefinitionFilePathKey =
-    "ui/lastStructDefinitionFilePath";
-constexpr const char* kStructureLibraryDirectoryKey = "ui/structureLibraryDirectory";
-constexpr const char* kStructDeclarationTextKey = "ui/structDeclarationText";
-constexpr const char* kStructEntryNameKey = "ui/structEntryName";
-constexpr const char* kStructEntryCountKey = "ui/structEntryCount";
-constexpr const char* kStructPreviewEnabledKey = "ui/structPreviewEnabled";
-constexpr const char* kStructViewsVisibleKey = "ui/structViewsVisible";
-constexpr const char* kStructLanguageVisibleKey = "ui/structLanguageVisible";
+constexpr const char* kLastBrecoLangSchemaPathKey =
+    "ui/lastBrecoLangSchemaPath";
+constexpr const char* kBrecoLangLibraryDirectoryKey =
+    "ui/brecoLangLibraryDirectory";
 
 QList<int> readIntList(const char* key) {
-    QSettings settings(kOrg, kApp);
-    const QVariantList raw = settings.value(key).toList();
+    const auto settings = AppSettings::open();
+    const QVariantList raw = settings->value(key).toList();
     QList<int> sizes;
     sizes.reserve(raw.size());
     for (const QVariant& value : raw) {
@@ -73,158 +64,126 @@ QList<int> readIntList(const char* key) {
 }
 
 void writeIntList(const char* key, const QList<int>& values) {
-    QSettings settings(kOrg, kApp);
+    const auto settings = AppSettings::open();
     QVariantList raw;
     raw.reserve(values.size());
     for (const int value : values) {
         raw.push_back(value);
     }
-    settings.setValue(key, raw);
+    settings->setValue(key, raw);
 }
 
-QString directoryFromPath(const QString& path) {
-    if (path.isEmpty()) {
-        return QString();
-    }
-    const QFileInfo info(path);
-    if (info.isDir()) {
-        return info.absoluteFilePath();
-    }
-    return info.absolutePath();
+QString lastSelectedPathKey(const QString& activityKey) {
+    return QStringLiteral("ui/lastSelectedPath/%1").arg(activityKey);
+}
+
+QString& isolatedIniPath() {
+    static QString path;
+    return path;
 }
 }  // namespace
 
-QString AppSettings::lastFileDialogPath() {
-    QSettings settings(kOrg, kApp);
-    return settings.value(kLastFilePathKey, QDir::homePath()).toString();
+void AppSettings::useIsolatedIni(const QString& filePath) {
+    isolatedIniPath() = filePath;
 }
 
-QString AppSettings::lastDirectoryDialogPath() {
-    QSettings settings(kOrg, kApp);
-    return settings.value(kLastDirPathKey, QDir::homePath()).toString();
+std::unique_ptr<QSettings> AppSettings::open() {
+    if (!isolatedIniPath().isEmpty()) {
+        return std::make_unique<QSettings>(isolatedIniPath(), QSettings::IniFormat);
+    }
+    return std::make_unique<QSettings>(kOrg, kApp);
 }
 
-QString AppSettings::lastBrowseDialogDirectory() {
-    QSettings settings(kOrg, kApp);
-    if (settings.contains(kLastBrowseDialogDirectoryKey)) {
-        return settings.value(kLastBrowseDialogDirectoryKey, QDir::homePath()).toString();
-    }
-    const QString fromFilePath = directoryFromPath(
-        settings.value(kLastFilePathKey).toString());
-    if (!fromFilePath.isEmpty()) {
-        return fromFilePath;
-    }
-    const QString fromDirPath = settings.value(kLastDirPathKey).toString();
-    if (!fromDirPath.isEmpty()) {
-        return fromDirPath;
-    }
-    return QDir::homePath();
-}
-
-QString AppSettings::lastStructDefinitionDialogDirectory() {
-    const QString path = lastStructDefinitionFilePath();
-    const QString directory = directoryFromPath(path);
-    return directory.isEmpty() ? QDir::homePath() : directory;
+QString AppSettings::lastSelectedPath(const QString& activityKey) {
+    const auto settings = AppSettings::open();
+    return settings->value(lastSelectedPathKey(activityKey), QString()).toString();
 }
 
 QString AppSettings::rememberedSingleFilePath() {
-    QSettings settings(kOrg, kApp);
-    return settings.value(kRememberedSingleFilePathKey, QString()).toString();
+    const auto settings = AppSettings::open();
+    return settings->value(kRememberedSingleFilePathKey, QString()).toString();
 }
 
 quint64 AppSettings::rememberedSingleFileOffset() {
-    QSettings settings(kOrg, kApp);
-    return settings.value(kRememberedSingleFileOffsetKey, 0).toULongLong();
+    const auto settings = AppSettings::open();
+    return settings->value(kRememberedSingleFileOffsetKey, 0).toULongLong();
 }
 
-void AppSettings::setLastFileDialogPath(const QString& path) {
-    QSettings settings(kOrg, kApp);
-    settings.setValue(kLastFilePathKey, path);
-}
-
-void AppSettings::setLastDirectoryDialogPath(const QString& path) {
-    QSettings settings(kOrg, kApp);
-    settings.setValue(kLastDirPathKey, path);
-}
-
-void AppSettings::setLastBrowseDialogDirectory(const QString& path) {
-    const QString directory = directoryFromPath(path);
-    if (directory.isEmpty()) {
-        return;
-    }
-    QSettings settings(kOrg, kApp);
-    settings.setValue(kLastBrowseDialogDirectoryKey, directory);
+void AppSettings::setLastSelectedPath(const QString& activityKey,
+                                      const QString& path) {
+    const auto settings = AppSettings::open();
+    settings->setValue(lastSelectedPathKey(activityKey), path);
 }
 
 void AppSettings::setRememberedSingleFilePath(const QString& path) {
-    QSettings settings(kOrg, kApp);
-    settings.setValue(kRememberedSingleFilePathKey, path);
+    const auto settings = AppSettings::open();
+    settings->setValue(kRememberedSingleFilePathKey, path);
 }
 
 void AppSettings::setRememberedSingleFileOffset(quint64 offset) {
-    QSettings settings(kOrg, kApp);
-    settings.setValue(kRememberedSingleFileOffsetKey,
+    const auto settings = AppSettings::open();
+    settings->setValue(kRememberedSingleFileOffsetKey,
                       QVariant::fromValue<qulonglong>(offset));
 }
 
 void AppSettings::clearRememberedSingleFilePath() {
-    QSettings settings(kOrg, kApp);
-    settings.remove(kRememberedSingleFilePathKey);
+    const auto settings = AppSettings::open();
+    settings->remove(kRememberedSingleFilePathKey);
 }
 
 void AppSettings::clearRememberedSingleFileOffset() {
-    QSettings settings(kOrg, kApp);
-    settings.remove(kRememberedSingleFileOffsetKey);
+    const auto settings = AppSettings::open();
+    settings->remove(kRememberedSingleFileOffsetKey);
 }
 
 bool AppSettings::textByteModeEnabled() {
-    QSettings settings(kOrg, kApp);
-    return settings.value(kTextByteModeKey, false).toBool();
+    const auto settings = AppSettings::open();
+    return settings->value(kTextByteModeKey, false).toBool();
 }
 
 bool AppSettings::textWrapModeEnabled() {
-    QSettings settings(kOrg, kApp);
-    return settings.value(kTextWrapModeKey, true).toBool();
+    const auto settings = AppSettings::open();
+    return settings->value(kTextWrapModeKey, true).toBool();
 }
 
 bool AppSettings::textCollapseEnabled() {
-    QSettings settings(kOrg, kApp);
-    return settings.value(kTextCollapseKey, true).toBool();
+    const auto settings = AppSettings::open();
+    return settings->value(kTextCollapseKey, true).toBool();
 }
 
 bool AppSettings::textBreatheEnabled() {
-    QSettings settings(kOrg, kApp);
-    return settings.value(kTextBreatheKey, false).toBool();
+    const auto settings = AppSettings::open();
+    return settings->value(kTextBreatheKey, false).toBool();
 }
 
 bool AppSettings::textMonospaceEnabled() {
-    QSettings settings(kOrg, kApp);
-    return settings.value(kTextMonospaceKey, false).toBool();
+    const auto settings = AppSettings::open();
+    return settings->value(kTextMonospaceKey, false).toBool();
 }
 
 int AppSettings::textNewlineModeIndex() {
-    QSettings settings(kOrg, kApp);
-    return settings.value(kTextNewlineModeIndexKey, 1).toInt();
+    const auto settings = AppSettings::open();
+    return settings->value(kTextNewlineModeIndexKey, 1).toInt();
 }
 
 int AppSettings::textByteLineModeIndex() {
-    QSettings settings(kOrg, kApp);
-    return settings.value(kTextByteLineModeIndexKey, 1).toInt();
+    const auto settings = AppSettings::open();
+    return settings->value(kTextByteLineModeIndexKey, 1).toInt();
 }
 
 bool AppSettings::prefillOnMergeEnabled() {
-    QSettings settings(kOrg, kApp);
-    return settings.value(kPrefillOnMergeEnabledKey, true).toBool();
+    const auto settings = AppSettings::open();
+    return settings->value(kPrefillOnMergeEnabledKey, true).toBool();
 }
 
 int AppSettings::scanBlockSizeValue(int defaultValue) {
-    QSettings settings(kOrg, kApp);
-    return settings.value(kScanBlockSizeValueKey, defaultValue).toInt();
+    const auto settings = AppSettings::open();
+    return settings->value(kScanBlockSizeValueKey, defaultValue).toInt();
 }
 
 int AppSettings::scanBlockSizeUnitIndex() {
-    QSettings settings(kOrg, kApp);
-    return settings.value(kScanBlockSizeUnitIndexKey, 2).toInt();
+    const auto settings = AppSettings::open();
+    return settings->value(kScanBlockSizeUnitIndexKey, 2).toInt();
 }
 
 QList<int> AppSettings::contentSplitterSizes() {
@@ -236,202 +195,173 @@ QList<int> AppSettings::mainSplitterSizes() {
 }
 
 int AppSettings::textGutterFormatIndex() {
-    QSettings settings(kOrg, kApp);
-    return settings.value(kTextGutterFormatIndexKey, 1).toInt();
+    const auto settings = AppSettings::open();
+    return settings->value(kTextGutterFormatIndexKey, 1).toInt();
 }
 
 int AppSettings::textGutterWidth() {
-    QSettings settings(kOrg, kApp);
-    return settings.value(kTextGutterWidthKey, 110).toInt();
+    const auto settings = AppSettings::open();
+    return settings->value(kTextGutterWidthKey, 110).toInt();
 }
 
 int AppSettings::currentByteInfoNumberSystemIndex() {
-    QSettings settings(kOrg, kApp);
-    return settings.value(kCurrentByteInfoNumberSystemIndexKey, 0).toInt();
+    const auto settings = AppSettings::open();
+    return settings->value(kCurrentByteInfoNumberSystemIndexKey, 0).toInt();
 }
 
 bool AppSettings::currentByteInfoBigEndianEnabled() {
-    QSettings settings(kOrg, kApp);
-    return settings.value(kCurrentByteInfoBigEndianEnabledKey, true).toBool();
+    const auto settings = AppSettings::open();
+    return settings->value(kCurrentByteInfoBigEndianEnabledKey, true).toBool();
 }
 
 int AppSettings::hexShowAsIndex() {
-    QSettings settings(kOrg, kApp);
-    if (!settings.contains(kHexShowAsIndexKey)) {
-        if (settings.contains(kTextByteModeKey)) {
-            return settings.value(kTextByteModeKey).toBool() ? 0 : 1;
+    const auto settings = AppSettings::open();
+    if (!settings->contains(kHexShowAsIndexKey)) {
+        if (settings->contains(kTextByteModeKey)) {
+            return settings->value(kTextByteModeKey).toBool() ? 0 : 1;
         }
         return 4;
     }
-    return settings.value(kHexShowAsIndexKey, 0).toInt();
+    return settings->value(kHexShowAsIndexKey, 0).toInt();
 }
 
 bool AppSettings::hexBigEndianEnabled() {
-    QSettings settings(kOrg, kApp);
-    return settings.value(kHexBigEndianEnabledKey, false).toBool();
+    const auto settings = AppSettings::open();
+    return settings->value(kHexBigEndianEnabledKey, false).toBool();
 }
 
 bool AppSettings::hexStringsOnlyEnabled() {
-    QSettings settings(kOrg, kApp);
-    return settings.value(kHexStringsOnlyEnabledKey, false).toBool();
+    const auto settings = AppSettings::open();
+    return settings->value(kHexStringsOnlyEnabledKey, false).toBool();
 }
 
 bool AppSettings::hexHighlightResultEnabled() {
-    QSettings settings(kOrg, kApp);
-    return settings.value(kHexHighlightResultEnabledKey, true).toBool();
+    const auto settings = AppSettings::open();
+    return settings->value(kHexHighlightResultEnabledKey, true).toBool();
 }
 
 bool AppSettings::dataViewBigEndianEnabled() {
-    QSettings settings(kOrg, kApp);
-    return settings.value(kDataViewBigEndianEnabledKey, false).toBool();
+    const auto settings = AppSettings::open();
+    return settings->value(kDataViewBigEndianEnabledKey, false).toBool();
 }
 
 int AppSettings::dataViewTextModeIndex() {
-    QSettings settings(kOrg, kApp);
-    return settings.value(kDataViewTextModeIndexKey, 0).toInt();
+    const auto settings = AppSettings::open();
+    return settings->value(kDataViewTextModeIndexKey, 0).toInt();
 }
 
 int AppSettings::dataViewBitmapModeIndex() {
-    QSettings settings(kOrg, kApp);
-    return settings.value(kDataViewBitmapModeIndexKey, 0).toInt();
+    const auto settings = AppSettings::open();
+    return settings->value(kDataViewBitmapModeIndexKey, 0).toInt();
 }
 
 int AppSettings::dataViewBitmapZoom() {
-    QSettings settings(kOrg, kApp);
-    return settings.value(kDataViewBitmapZoomKey, 1).toInt();
+    const auto settings = AppSettings::open();
+    return settings->value(kDataViewBitmapZoomKey, 1).toInt();
 }
 
 int AppSettings::dataViewImageFormatMask(int defaultMask) {
-    QSettings settings(kOrg, kApp);
-    return settings.value(kDataViewImageFormatMaskKey, defaultMask).toInt();
+    const auto settings = AppSettings::open();
+    return settings->value(kDataViewImageFormatMaskKey, defaultMask).toInt();
 }
 
 int AppSettings::dataViewImageScopeIndex() {
-    QSettings settings(kOrg, kApp);
-    return settings.value(kDataViewImageScopeIndexKey, 0).toInt();
+    const auto settings = AppSettings::open();
+    return settings->value(kDataViewImageScopeIndexKey, 0).toInt();
 }
 
 int AppSettings::dataViewImageMaxPixelsK() {
-    QSettings settings(kOrg, kApp);
-    return settings.value(kDataViewImageMaxPixelsKKey, 4096).toInt();
+    const auto settings = AppSettings::open();
+    return settings->value(kDataViewImageMaxPixelsKKey, 4096).toInt();
 }
 
 int AppSettings::dataViewImageMaxResults() {
-    QSettings settings(kOrg, kApp);
-    return settings.value(kDataViewImageMaxResultsKey, 5).toInt();
+    const auto settings = AppSettings::open();
+    return settings->value(kDataViewImageMaxResultsKey, 5).toInt();
 }
 
 int AppSettings::dataViewImageJobs(int defaultValue) {
-    QSettings settings(kOrg, kApp);
-    return settings.value(kDataViewImageJobsKey, defaultValue).toInt();
+    const auto settings = AppSettings::open();
+    return settings->value(kDataViewImageJobsKey, defaultValue).toInt();
 }
 
 QList<int> AppSettings::dataViewByteAndBitmapSplitterSizes() {
     return readIntList(kDataViewByteAndBitmapSplitterSizesKey);
 }
 
-QList<int> AppSettings::dataViewStructuredSplitterSizes() {
-    return readIntList(kDataViewStructuredSplitterSizesKey);
+int AppSettings::visualizeModeIndex() {
+    const auto settings = AppSettings::open();
+    return settings->value(kVisualizeModeIndexKey, 0).toInt();
 }
 
 bool AppSettings::viewScanLogVisible() {
-    QSettings settings(kOrg, kApp);
-    return settings.value(kViewScanLogVisibleKey, false).toBool();
+    const auto settings = AppSettings::open();
+    return settings->value(kViewScanLogVisibleKey, false).toBool();
 }
 
 bool AppSettings::viewEditsVisible() {
-    QSettings settings(kOrg, kApp);
-    return settings.value(kViewEditsVisibleKey, false).toBool();
+    const auto settings = AppSettings::open();
+    return settings->value(kViewEditsVisibleKey, false).toBool();
 }
 
-QString AppSettings::lastStructDefinitionFilePath() {
-    QSettings settings(kOrg, kApp);
-    return settings.value(kLastStructDefinitionFilePathKey, QString()).toString();
+QString AppSettings::lastBrecoLangSchemaPath() {
+    const auto settings = AppSettings::open();
+    return settings->value(kLastBrecoLangSchemaPathKey, QString()).toString();
 }
 
-QString AppSettings::structureLibraryDirectory() {
-    QSettings settings(kOrg, kApp);
-    return settings.value(kStructureLibraryDirectoryKey, QString()).toString();
-}
-
-QString AppSettings::structDeclarationText() {
-    QSettings settings(kOrg, kApp);
-    return settings.value(kStructDeclarationTextKey, QString()).toString();
-}
-
-QString AppSettings::structEntryName() {
-    QSettings settings(kOrg, kApp);
-    return settings.value(kStructEntryNameKey, QString()).toString();
-}
-
-int AppSettings::structEntryCount() {
-    QSettings settings(kOrg, kApp);
-    return settings.value(kStructEntryCountKey, 1).toInt();
-}
-
-bool AppSettings::structPreviewEnabled() {
-    QSettings settings(kOrg, kApp);
-    return settings.value(kStructPreviewEnabledKey, true).toBool();
-}
-
-bool AppSettings::structViewsVisible() {
-    QSettings settings(kOrg, kApp);
-    return settings.value(kStructViewsVisibleKey, false).toBool();
-}
-
-bool AppSettings::structLanguageVisible() {
-    QSettings settings(kOrg, kApp);
-    return settings.value(kStructLanguageVisibleKey, false).toBool();
+QString AppSettings::brecoLangLibraryDirectory() {
+    const auto settings = AppSettings::open();
+    return settings->value(kBrecoLangLibraryDirectoryKey, QString()).toString();
 }
 
 void AppSettings::setTextByteModeEnabled(bool enabled) {
-    QSettings settings(kOrg, kApp);
-    settings.setValue(kTextByteModeKey, enabled);
+    const auto settings = AppSettings::open();
+    settings->setValue(kTextByteModeKey, enabled);
 }
 
 void AppSettings::setTextWrapModeEnabled(bool enabled) {
-    QSettings settings(kOrg, kApp);
-    settings.setValue(kTextWrapModeKey, enabled);
+    const auto settings = AppSettings::open();
+    settings->setValue(kTextWrapModeKey, enabled);
 }
 
 void AppSettings::setTextCollapseEnabled(bool enabled) {
-    QSettings settings(kOrg, kApp);
-    settings.setValue(kTextCollapseKey, enabled);
+    const auto settings = AppSettings::open();
+    settings->setValue(kTextCollapseKey, enabled);
 }
 
 void AppSettings::setTextBreatheEnabled(bool enabled) {
-    QSettings settings(kOrg, kApp);
-    settings.setValue(kTextBreatheKey, enabled);
+    const auto settings = AppSettings::open();
+    settings->setValue(kTextBreatheKey, enabled);
 }
 
 void AppSettings::setTextMonospaceEnabled(bool enabled) {
-    QSettings settings(kOrg, kApp);
-    settings.setValue(kTextMonospaceKey, enabled);
+    const auto settings = AppSettings::open();
+    settings->setValue(kTextMonospaceKey, enabled);
 }
 
 void AppSettings::setTextNewlineModeIndex(int index) {
-    QSettings settings(kOrg, kApp);
-    settings.setValue(kTextNewlineModeIndexKey, index);
+    const auto settings = AppSettings::open();
+    settings->setValue(kTextNewlineModeIndexKey, index);
 }
 
 void AppSettings::setTextByteLineModeIndex(int index) {
-    QSettings settings(kOrg, kApp);
-    settings.setValue(kTextByteLineModeIndexKey, index);
+    const auto settings = AppSettings::open();
+    settings->setValue(kTextByteLineModeIndexKey, index);
 }
 
 void AppSettings::setPrefillOnMergeEnabled(bool enabled) {
-    QSettings settings(kOrg, kApp);
-    settings.setValue(kPrefillOnMergeEnabledKey, enabled);
+    const auto settings = AppSettings::open();
+    settings->setValue(kPrefillOnMergeEnabledKey, enabled);
 }
 
 void AppSettings::setScanBlockSizeValue(int value) {
-    QSettings settings(kOrg, kApp);
-    settings.setValue(kScanBlockSizeValueKey, value);
+    const auto settings = AppSettings::open();
+    settings->setValue(kScanBlockSizeValueKey, value);
 }
 
 void AppSettings::setScanBlockSizeUnitIndex(int index) {
-    QSettings settings(kOrg, kApp);
-    settings.setValue(kScanBlockSizeUnitIndexKey, index);
+    const auto settings = AppSettings::open();
+    settings->setValue(kScanBlockSizeUnitIndexKey, index);
 }
 
 void AppSettings::setContentSplitterSizes(const QList<int>& sizes) {
@@ -443,146 +373,117 @@ void AppSettings::setMainSplitterSizes(const QList<int>& sizes) {
 }
 
 void AppSettings::setTextGutterFormatIndex(int index) {
-    QSettings settings(kOrg, kApp);
-    settings.setValue(kTextGutterFormatIndexKey, index);
+    const auto settings = AppSettings::open();
+    settings->setValue(kTextGutterFormatIndexKey, index);
 }
 
 void AppSettings::setTextGutterWidth(int width) {
-    QSettings settings(kOrg, kApp);
-    settings.setValue(kTextGutterWidthKey, width);
+    const auto settings = AppSettings::open();
+    settings->setValue(kTextGutterWidthKey, width);
 }
 
 void AppSettings::setCurrentByteInfoNumberSystemIndex(int index) {
-    QSettings settings(kOrg, kApp);
-    settings.setValue(kCurrentByteInfoNumberSystemIndexKey, index);
+    const auto settings = AppSettings::open();
+    settings->setValue(kCurrentByteInfoNumberSystemIndexKey, index);
 }
 
 void AppSettings::setCurrentByteInfoBigEndianEnabled(bool enabled) {
-    QSettings settings(kOrg, kApp);
-    settings.setValue(kCurrentByteInfoBigEndianEnabledKey, enabled);
+    const auto settings = AppSettings::open();
+    settings->setValue(kCurrentByteInfoBigEndianEnabledKey, enabled);
 }
 
 void AppSettings::setHexShowAsIndex(int index) {
-    QSettings settings(kOrg, kApp);
-    settings.setValue(kHexShowAsIndexKey, index);
+    const auto settings = AppSettings::open();
+    settings->setValue(kHexShowAsIndexKey, index);
 }
 
 void AppSettings::setHexBigEndianEnabled(bool enabled) {
-    QSettings settings(kOrg, kApp);
-    settings.setValue(kHexBigEndianEnabledKey, enabled);
+    const auto settings = AppSettings::open();
+    settings->setValue(kHexBigEndianEnabledKey, enabled);
 }
 
 void AppSettings::setHexStringsOnlyEnabled(bool enabled) {
-    QSettings settings(kOrg, kApp);
-    settings.setValue(kHexStringsOnlyEnabledKey, enabled);
+    const auto settings = AppSettings::open();
+    settings->setValue(kHexStringsOnlyEnabledKey, enabled);
 }
 
 void AppSettings::setHexHighlightResultEnabled(bool enabled) {
-    QSettings settings(kOrg, kApp);
-    settings.setValue(kHexHighlightResultEnabledKey, enabled);
+    const auto settings = AppSettings::open();
+    settings->setValue(kHexHighlightResultEnabledKey, enabled);
 }
 
 void AppSettings::setDataViewBigEndianEnabled(bool enabled) {
-    QSettings settings(kOrg, kApp);
-    settings.setValue(kDataViewBigEndianEnabledKey, enabled);
+    const auto settings = AppSettings::open();
+    settings->setValue(kDataViewBigEndianEnabledKey, enabled);
 }
 
 void AppSettings::setDataViewTextModeIndex(int index) {
-    QSettings settings(kOrg, kApp);
-    settings.setValue(kDataViewTextModeIndexKey, index);
+    const auto settings = AppSettings::open();
+    settings->setValue(kDataViewTextModeIndexKey, index);
 }
 
 void AppSettings::setDataViewBitmapModeIndex(int index) {
-    QSettings settings(kOrg, kApp);
-    settings.setValue(kDataViewBitmapModeIndexKey, index);
+    const auto settings = AppSettings::open();
+    settings->setValue(kDataViewBitmapModeIndexKey, index);
 }
 
 void AppSettings::setDataViewBitmapZoom(int zoom) {
-    QSettings settings(kOrg, kApp);
-    settings.setValue(kDataViewBitmapZoomKey, zoom);
+    const auto settings = AppSettings::open();
+    settings->setValue(kDataViewBitmapZoomKey, zoom);
 }
 
 void AppSettings::setDataViewImageFormatMask(int mask) {
-    QSettings settings(kOrg, kApp);
-    settings.setValue(kDataViewImageFormatMaskKey, mask);
+    const auto settings = AppSettings::open();
+    settings->setValue(kDataViewImageFormatMaskKey, mask);
 }
 
 void AppSettings::setDataViewImageScopeIndex(int index) {
-    QSettings settings(kOrg, kApp);
-    settings.setValue(kDataViewImageScopeIndexKey, index);
+    const auto settings = AppSettings::open();
+    settings->setValue(kDataViewImageScopeIndexKey, index);
 }
 
 void AppSettings::setDataViewImageMaxPixelsK(int value) {
-    QSettings settings(kOrg, kApp);
-    settings.setValue(kDataViewImageMaxPixelsKKey, value);
+    const auto settings = AppSettings::open();
+    settings->setValue(kDataViewImageMaxPixelsKKey, value);
 }
 
 void AppSettings::setDataViewImageMaxResults(int value) {
-    QSettings settings(kOrg, kApp);
-    settings.setValue(kDataViewImageMaxResultsKey, value);
+    const auto settings = AppSettings::open();
+    settings->setValue(kDataViewImageMaxResultsKey, value);
 }
 
 void AppSettings::setDataViewImageJobs(int value) {
-    QSettings settings(kOrg, kApp);
-    settings.setValue(kDataViewImageJobsKey, value);
+    const auto settings = AppSettings::open();
+    settings->setValue(kDataViewImageJobsKey, value);
 }
 
 void AppSettings::setDataViewByteAndBitmapSplitterSizes(const QList<int>& sizes) {
     writeIntList(kDataViewByteAndBitmapSplitterSizesKey, sizes);
 }
 
-void AppSettings::setDataViewStructuredSplitterSizes(const QList<int>& sizes) {
-    writeIntList(kDataViewStructuredSplitterSizesKey, sizes);
+void AppSettings::setVisualizeModeIndex(int index) {
+    const auto settings = AppSettings::open();
+    settings->setValue(kVisualizeModeIndexKey, index);
 }
 
 void AppSettings::setViewScanLogVisible(bool visible) {
-    QSettings settings(kOrg, kApp);
-    settings.setValue(kViewScanLogVisibleKey, visible);
+    const auto settings = AppSettings::open();
+    settings->setValue(kViewScanLogVisibleKey, visible);
 }
 
 void AppSettings::setViewEditsVisible(bool visible) {
-    QSettings settings(kOrg, kApp);
-    settings.setValue(kViewEditsVisibleKey, visible);
+    const auto settings = AppSettings::open();
+    settings->setValue(kViewEditsVisibleKey, visible);
 }
 
-void AppSettings::setLastStructDefinitionFilePath(const QString& path) {
-    QSettings settings(kOrg, kApp);
-    settings.setValue(kLastStructDefinitionFilePathKey, path);
+void AppSettings::setLastBrecoLangSchemaPath(const QString& path) {
+    const auto settings = AppSettings::open();
+    settings->setValue(kLastBrecoLangSchemaPathKey, path);
 }
 
-void AppSettings::setStructureLibraryDirectory(const QString& path) {
-    QSettings settings(kOrg, kApp);
-    settings.setValue(kStructureLibraryDirectoryKey, path);
-}
-
-void AppSettings::setStructDeclarationText(const QString& text) {
-    QSettings settings(kOrg, kApp);
-    settings.setValue(kStructDeclarationTextKey, text);
-}
-
-void AppSettings::setStructEntryName(const QString& name) {
-    QSettings settings(kOrg, kApp);
-    settings.setValue(kStructEntryNameKey, name);
-}
-
-void AppSettings::setStructEntryCount(int count) {
-    QSettings settings(kOrg, kApp);
-    settings.setValue(kStructEntryCountKey, count);
-}
-
-void AppSettings::setStructPreviewEnabled(bool enabled) {
-    QSettings settings(kOrg, kApp);
-    settings.setValue(kStructPreviewEnabledKey, enabled);
-}
-
-void AppSettings::setStructViewsVisible(bool visible) {
-    QSettings settings(kOrg, kApp);
-    settings.setValue(kStructViewsVisibleKey, visible);
-}
-
-void AppSettings::setStructLanguageVisible(bool visible) {
-    QSettings settings(kOrg, kApp);
-    settings.setValue(kStructLanguageVisibleKey, visible);
+void AppSettings::setBrecoLangLibraryDirectory(const QString& path) {
+    const auto settings = AppSettings::open();
+    settings->setValue(kBrecoLangLibraryDirectoryKey, path);
 }
 
 }  // namespace breco

@@ -1,0 +1,53 @@
+language breco 0.1
+
+inputs { input data "ELF file" { default } }
+
+record Elf64Header {
+    identify {
+        magic: u32le
+        class: u8
+        byte_order: u8
+        match magic == 0x464C457F && class == 2 else "not a 64-bit ELF file"
+    }
+    commit
+    ident_version: u8
+    abi: u8
+    abi_version: u8
+    ident_padding: region bytes(7) { raw remaining as bytes }
+    object_type: u16le
+    machine: u16le
+    version: u32le
+    entry_address: u64le
+    program_header_offset: u64le
+    section_header_offset: u64le
+    flags: u32le
+    header_size: u16le
+    program_header_size: u16le
+    program_header_count: u16le
+    section_header_size: u16le
+    section_header_count: u16le
+    section_name_index: u16le
+}
+
+record Elf64SectionHeader {
+    name_index: u32le
+    section_type: u32le
+    flags: u64le
+    virtual_address: u64le
+    file_offset: u64le
+    byte_size: u64le
+    link: u32le
+    info: u32le
+    alignment: u64le
+    entry_size: u64le
+}
+
+entry ELF64 from data {
+    header: Elf64Header
+    sections: repeat header.section_header_count {
+        section: Elf64SectionHeader from data at
+            header.section_header_offset + iteration * header.section_header_size
+            within bytes(header.section_header_size)
+    }
+}
+default entry ELF64

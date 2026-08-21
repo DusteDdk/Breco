@@ -9,17 +9,9 @@
 
 namespace breco {
 
-DataViewShellPanel::DataViewShellPanel(ControlMode mode, QWidget* parent)
-    : QWidget(parent), m_ui(std::make_unique<Ui::DataViewShell>()), m_mode(mode) {
+DataViewShellPanel::DataViewShellPanel(QWidget* parent)
+    : QWidget(parent), m_ui(std::make_unique<Ui::DataViewShell>()) {
     m_ui->setupUi(this);
-    const bool rawMode = mode == ControlMode::Raw;
-    m_ui->textInterpretationLabel->setVisible(rawMode);
-    m_ui->textInterpretationComboBox->setVisible(rawMode);
-    m_ui->bitmapModeLabel->setVisible(rawMode);
-    m_ui->bitmapModeComboBox->setVisible(rawMode);
-    m_ui->zoomOutButton->setVisible(rawMode);
-    m_ui->zoomLabel->setVisible(rawMode);
-    m_ui->zoomInButton->setVisible(rawMode);
 }
 
 DataViewShellPanel::~DataViewShellPanel() = default;
@@ -49,7 +41,5 @@ QLabel* DataViewShellPanel::zoomLabel() const { return m_ui->zoomLabel; }
 QToolButton* DataViewShellPanel::zoomInButton() const { return m_ui->zoomInButton; }
 
 QWidget* DataViewShellPanel::bodyHost() const { return m_ui->bodyHost; }
-
-DataViewShellPanel::ControlMode DataViewShellPanel::controlMode() const { return m_mode; }
 
 }  // namespace breco

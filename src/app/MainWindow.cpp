@@ -7,6 +7,7 @@
 #include <cstring>
 #include <iostream>
 #include <limits>
+#include <memory>
 #include <optional>
 
 #ifdef Q_OS_LINUX
@@ -28,7 +29,6 @@
 #include <QDoubleValidator>
 #include <QEventLoop>
 #include <QFile>
-#include <QFileDialog>
 #include <QFileInfo>
 #include <QHeaderView>
 #include <QHBoxLayout>
@@ -40,7 +40,11 @@
 #include <QMessageBox>
 #include <QMetaObject>
 #include <QPlainTextEdit>
+#include <QIODevice>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QProgressBar>
+#include <QProgressDialog>
 #include <QPushButton>
 #include <QRadioButton>
 #include <QSaveFile>
@@ -52,6 +56,7 @@
 #include <QStringDecoder>
 #include <QStringList>
 #include <QTableView>
+#include <QTabWidget>
 #include <QThread>
 #include <QTimer>
 #include <QToolButton>
@@ -66,23 +71,23 @@
 #include "panel/DataViewByteAndBitmapPanel.h"
 #include "panel/DataViewImagePanel.h"
 #include "panel/DataViewShellPanel.h"
-#include "panel/DataViewStructuredPanel.h"
+#include "brecolang/gui/BrecoLangPanel.h"
+#include "panel/EditsPanel.h"
 #include "panel/HexViewControlsPanel.h"
 #include "panel/MainTabsPanel.h"
 #include "panel/ResultsTablePanel.h"
 #include "panel/ScanControlsPanel.h"
-#include "panel/StructDataViewPanel.h"
-#include "panel/StructModeLeftPanel.h"
-#include "struct/StructVisualizer.h"
-#include "struct/VisualizedNode.h"
 #include "panel/TextViewPanel.h"
+#include "panel/VisualizePanel.h"
 #include "scan/ShiftTransform.h"
 #include "settings/AppSettings.h"
+#include "settings/PathSelect.h"
 #include "ui_AboutDialog.h"
 #include "ui_EditStack.h"
 #include "ui_MainWindow.h"
 #include "view/BitmapViewWidget.h"
 #include "view/TextViewWidget.h"
+#include "visualize/VisualizeData.h"
 
 namespace breco {
 
@@ -352,21 +357,6 @@ QString formatHexWindow8(const QByteArray& bytes, int start, bool bigEndian) {
         .arg(QStringList(parts.begin(), parts.end()).join(QLatin1Char(' ')));
 }
 
-void assignVisualizedSource(VisualizedNode& node, const QString& filePath,
-                            quint64 dataBaseOffset) {
-    node.sourceFilePath = filePath;
-    if (node.hasSourceOffset) {
-        if (node.sourceOffset <=
-            std::numeric_limits<quint64>::max() - dataBaseOffset) {
-            node.sourceOffset += dataBaseOffset;
-        } else {
-            node.hasSourceOffset = false;
-        }
-    }
-    for (VisualizedNode& child : node.children) {
-        assignVisualizedSource(child, filePath, dataBaseOffset);
-    }
-}
 }
 
 MainWindow::MainWindow(QWidget* parent)
@@ -376,14 +366,9 @@ MainWindow::MainWindow(QWidget* parent)
       m_filePool(),
       m_windowLoader(&m_filePool),
       m_scanController(&m_filePool, this) {
-    const QString rememberedStructDefinitionPath =
-        AppSettings::lastStructDefinitionFilePath();
-    const QString rememberedStructDeclaration =
-        AppSettings::structDeclarationText();
-    const QString rememberedStructEntryName =
-        AppSettings::structEntryName();
-    const int rememberedStructEntryCount =
-        AppSettings::structEntryCount();
+    const QString rememberedSchemaPath = AppSettings::lastBrecoLangSchemaPath();
+    const QString rememberedSchemaLibrary =
+        AppSettings::brecoLangLibraryDirectory();
     const QString rememberedSingleFile =
         AppSettings::rememberedSingleFilePath();
     const quint64 rememberedSingleFileOffset =
@@ -413,8 +398,8 @@ MainWindow::MainWindow(QWidget* parent)
     auto* rawDataHostLayout = new QVBoxLayout(m_mainTabsPanel->rawDataHost());
     rawDataHostLayout->setContentsMargins(0, 0, 0, 0);
     rawDataHostLayout->setSpacing(0);
-    m_rawDataViewShellPanel = new DataViewShellPanel(
-        DataViewShellPanel::ControlMode::Raw, m_mainTabsPanel->rawDataHost());
+    m_rawDataViewShellPanel =
+        new DataViewShellPanel(m_mainTabsPanel->rawDataHost());
     rawDataHostLayout->addWidget(m_rawDataViewShellPanel);
     auto* rawBodyLayout = new QVBoxLayout(m_rawDataViewShellPanel->bodyHost());
     rawBodyLayout->setContentsMargins(0, 0, 0, 0);
@@ -423,18 +408,28 @@ MainWindow::MainWindow(QWidget* parent)
         new DataViewByteAndBitmapPanel(m_rawDataViewShellPanel->bodyHost());
     rawBodyLayout->addWidget(m_dataViewByteAndBitmapPanel);
 
-    auto* structDataHostLayout = new QVBoxLayout(m_mainTabsPanel->structDataHost());
-    structDataHostLayout->setContentsMargins(0, 0, 0, 0);
-    structDataHostLayout->setSpacing(0);
-    m_structDataViewShellPanel = new DataViewShellPanel(
-        DataViewShellPanel::ControlMode::Struct, m_mainTabsPanel->structDataHost());
-    structDataHostLayout->addWidget(m_structDataViewShellPanel);
-    auto* structBodyLayout = new QVBoxLayout(m_structDataViewShellPanel->bodyHost());
-    structBodyLayout->setContentsMargins(0, 0, 0, 0);
-    structBodyLayout->setSpacing(0);
-    m_dataViewStructuredPanel =
-        new DataViewStructuredPanel(m_structDataViewShellPanel->bodyHost());
-    structBodyLayout->addWidget(m_dataViewStructuredPanel);
+    auto* brecoLangHostLayout =
+        new QVBoxLayout(m_mainTabsPanel->brecoLangHost());
+    brecoLangHostLayout->setContentsMargins(0, 0, 0, 0);
+    brecoLangHostLayout->setSpacing(0);
+    m_brecoLangPanel =
+        new lang::BrecoLangPanel(m_mainTabsPanel->brecoLangHost());
+    brecoLangHostLayout->addWidget(m_brecoLangPanel);
+
+    auto* visualizeHostLayout =
+        new QVBoxLayout(m_mainTabsPanel->visualizeHost());
+    visualizeHostLayout->setContentsMargins(0, 0, 0, 0);
+    visualizeHostLayout->setSpacing(0);
+    m_visualizePanel =
+        new VisualizePanel(m_mainTabsPanel->visualizeHost());
+    visualizeHostLayout->addWidget(m_visualizePanel);
+
+    auto* editsHostLayout = new QVBoxLayout(m_mainTabsPanel->editsHost());
+    editsHostLayout->setContentsMargins(0, 0, 0, 0);
+    editsHostLayout->setSpacing(0);
+    m_editsPanel = new EditsPanel(m_mainTabsPanel->editsHost());
+    m_editsPanel->setQueue(&m_editQueue);
+    editsHostLayout->addWidget(m_editsPanel);
 
     auto* imageDataHostLayout = new QVBoxLayout(m_mainTabsPanel->imageDataHost());
     imageDataHostLayout->setContentsMargins(0, 0, 0, 0);
@@ -479,20 +474,6 @@ MainWindow::MainWindow(QWidget* parent)
         bitmapChrome != nullptr) {
         bitmapChrome->setVisible(false);
     }
-
-    auto* structEditorLayout = new QVBoxLayout(m_dataViewStructuredPanel->structEditorHost());
-    structEditorLayout->setContentsMargins(0, 0, 0, 0);
-    structEditorLayout->setSpacing(0);
-    m_structModeLeftPanel =
-        new StructModeLeftPanel(m_dataViewStructuredPanel->structEditorHost());
-    m_structModeLeftPanel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
-    structEditorLayout->addWidget(m_structModeLeftPanel);
-
-    auto* structViewLayout = new QVBoxLayout(m_dataViewStructuredPanel->structViewHost());
-    structViewLayout->setContentsMargins(0, 0, 0, 0);
-    structViewLayout->setSpacing(0);
-    m_structDataViewPanel = new StructDataViewPanel(m_dataViewStructuredPanel->structViewHost());
-    structViewLayout->addWidget(m_structDataViewPanel);
 
     QTableView* resultsTable = m_resultsPanel->resultsTableView();
     resultsTable->setModel(&m_resultModel);
@@ -581,10 +562,63 @@ MainWindow::MainWindow(QWidget* parent)
         connect(edit, &QLineEdit::editingFinished, this,
                 [this]() { updateHexInfoPanel(); });
     }
-    connect(m_structModeLeftPanel, &StructModeLeftPanel::structureScanRequested,
-            this, &MainWindow::onStartStructureScan);
-    connect(m_structModeLeftPanel, &StructModeLeftPanel::structureScanStopRequested,
+    connect(m_brecoLangPanel, &lang::BrecoLangPanel::scanRequested,
+            this, &MainWindow::onStartBrecoLangScan);
+    connect(m_brecoLangPanel, &lang::BrecoLangPanel::scanStopRequested,
             this, &MainWindow::onStopScan);
+    connect(m_brecoLangPanel, &lang::BrecoLangPanel::inputFileActivated,
+            this, [this](const QString& path) {
+                selectSourcePath(path);
+            });
+    connect(m_brecoLangPanel, &lang::BrecoLangPanel::sourceLocationActivated,
+            this, &MainWindow::navigateToDecodedSource);
+    connect(m_brecoLangPanel, &lang::BrecoLangPanel::fieldEditCommitted, this,
+            [this](const QString& path, quint64 offset, const QByteArray&,
+                   const QByteArray& newBytes) {
+                queueFileEdit(path, offset, newBytes);
+            });
+    connect(m_brecoLangPanel, &lang::BrecoLangPanel::schemaFileLoaded,
+            this, [](const QString& path) {
+                AppSettings::setLastBrecoLangSchemaPath(path);
+            });
+    connect(m_brecoLangPanel, &lang::BrecoLangPanel::libraryDirectoryChanged,
+            this, [this](const QString& path) {
+                AppSettings::setBrecoLangLibraryDirectory(path);
+                m_visualizePanel->setProgramDirectory(path);
+            });
+    connect(m_visualizePanel, &VisualizePanel::configurationChanged, this,
+            [this]() {
+                AppSettings::setVisualizeModeIndex(
+                    static_cast<int>(m_visualizePanel->visualizationMode()));
+            });
+    connect(m_visualizePanel, &VisualizePanel::defaultWindowBytesChanged, this,
+            &MainWindow::refreshVisualization, Qt::QueuedConnection);
+    connect(m_visualizePanel, &VisualizePanel::inputWindowRequested, this,
+            [this](quint64 start, quint64 length) {
+                const std::optional<int> targetIndex = activePreviewTargetIndex();
+                if (!targetIndex.has_value() || targetIndex.value() < 0 ||
+                    targetIndex.value() >= m_scanTargets.size()) {
+                    return;
+                }
+                const ScanTarget& target = m_scanTargets.at(targetIndex.value());
+                const quint64 clampedStart =
+                    qMin(start, target.fileSize == 0 ? start : target.fileSize - 1);
+                const quint64 remaining =
+                    target.fileSize > clampedStart ? target.fileSize - clampedStart
+                                                   : 0;
+                const quint64 clampedLength = std::min(
+                    {qMax<quint64>(1, length), remaining,
+                     kMaximumVisualizationBytes});
+                applyVisualizationWindow(clampedStart, clampedLength,
+                                         length > clampedLength, target.fileSize);
+            });
+    connect(m_mainTabsPanel->mainTabWidget(), &QTabWidget::currentChanged,
+            this, [this](int index) {
+                if (m_mainTabsPanel->mainTabWidget()->widget(index) ==
+                    m_mainTabsPanel->visualizeTab()) {
+                    refreshVisualization();
+                }
+            });
     connect(resultsTable->selectionModel(), &QItemSelectionModel::currentRowChanged, this,
             [this](const QModelIndex& current, const QModelIndex&) { onResultActivated(current); });
     connect(m_hexControlsPanel->showAsComboBox(), qOverload<int>(&QComboBox::currentIndexChanged), this,
@@ -677,18 +711,6 @@ MainWindow::MainWindow(QWidget* parent)
                     setDataViewBigEndianEnabled(true);
                 }
             });
-    connect(m_structDataViewShellPanel->littleEndianRadioButton(), &QRadioButton::toggled, this,
-            [this](bool checked) {
-                if (checked) {
-                    setDataViewBigEndianEnabled(false);
-                }
-            });
-    connect(m_structDataViewShellPanel->bigEndianRadioButton(), &QRadioButton::toggled, this,
-            [this](bool checked) {
-                if (checked) {
-                    setDataViewBigEndianEnabled(true);
-                }
-            });
     connect(m_dataViewImagePanel, &DataViewImagePanel::scanRequested, this,
             &MainWindow::startImageScan);
     connect(m_dataViewImagePanel, &DataViewImagePanel::resultActivated, this,
@@ -759,23 +781,37 @@ MainWindow::MainWindow(QWidget* parent)
     connect(m_textView, &TextViewWidget::hoverLeft, this, &MainWindow::onHoverLeft);
     connect(m_textView, &TextViewWidget::selectionRangeChanged, this,
             [this](bool hasRange, quint64 start, quint64 end) {
-                if (!m_structNavigationInProgress) {
+                if (!m_decodedNavigationInProgress) {
                     if (!m_previewSyncInProgress) {
-                        clearStructSourceHighlight();
+                        clearDecodedSourceHighlight();
                     }
                 }
                 if (!hasRange) {
                     m_activeTextSelectionRange.reset();
                     m_bitmapView->setExternalSelectionRange(
-                        m_structSourceHighlightRange);
+                        m_decodedSourceHighlightRange);
                     updateHexInfoPanel();
                     refreshDataViewFromNavigator();
+                    if (m_brecoLangPanel != nullptr) {
+                        m_brecoLangPanel->clearSourceHighlight(
+                            lang::BrecoLangPanel::SourceHighlightMode::Selection);
+                    }
                     return;
                 }
                 m_activeTextSelectionRange = qMakePair(start, end);
                 m_bitmapView->setExternalSelectionRange(m_activeTextSelectionRange);
                 updateHexInfoPanel();
                 refreshDataViewFromNavigator();
+                if (!m_decodedNavigationInProgress && !m_previewSyncInProgress &&
+                    m_brecoLangPanel != nullptr) {
+                    const std::optional<int> target = activePreviewTargetIndex();
+                    const QString path =
+                        target.has_value() ? filePathForTarget(target.value()) : QString();
+                    m_brecoLangPanel->highlightSourceRange(
+                        path, start, end - start,
+                        lang::BrecoLangPanel::SourceHighlightMode::Selection);
+                }
+                return;
             });
     connect(m_textView, &TextViewWidget::viewportFirstByteOffsetChanged, this,
             [this](bool, quint64) {
@@ -820,48 +856,40 @@ MainWindow::MainWindow(QWidget* parent)
             &MainWindow::saveSelectedBinaryRange);
     connect(m_textView, &TextViewWidget::saveBinaryFromHereRequested, this,
             &MainWindow::saveBinaryFromHere);
+    connect(m_textView, &TextViewWidget::queuedByteEditCommitted, this,
+            &MainWindow::onQueuedByteEditCommitted);
+    connect(m_hexControlsPanel->allowEditingCheckBox(), &QCheckBox::toggled, this,
+            &MainWindow::setCurrentFileEditingEnabled);
+    connect(m_editsPanel, &EditsPanel::editActivated, this, [this](int index) {
+        if (index < 0 || index >= m_editQueue.size()) {
+            return;
+        }
+        const QueuedEdit& edit = m_editQueue.at(index);
+        if (!selectSourcePath(edit.filePath)) {
+            return;
+        }
+        const quint64 end = edit.offset + static_cast<quint64>(qMax(1, edit.newBytes.size()));
+        m_pendingHexSelectionRange = qMakePair(edit.offset, end);
+        jumpToAbsoluteOffset(strideAlignedOffset(edit.offset));
+        m_textView->setSelectionRange(edit.offset, end);
+    });
+    connect(m_editsPanel, &EditsPanel::deleteRequested, this,
+            &MainWindow::onEditsDeleteRequested);
+    connect(m_editsPanel, &EditsPanel::applyRequested, this, &MainWindow::onApplyQueuedEdits);
+    connect(m_editsPanel, &EditsPanel::saveAsRequested, this, &MainWindow::onSaveQueuedEditsAs);
+    connect(m_editsPanel, &EditsPanel::editValueChanged, this,
+            [this](int index, const QString& hex) {
+                if (index < 0 || index >= m_editQueue.size()) {
+                    return;
+                }
+                m_editQueue.setNewBytes(index, EditQueue::hexToBytes(hex));
+                m_editsPanel->refresh();
+                refreshQueuedEditOverlays();
+            });
     connect(m_bitmapView, &BitmapViewWidget::hoverAbsoluteOffsetChanged, this,
             &MainWindow::onBitmapHoverOffsetChanged);
     connect(m_bitmapView, &BitmapViewWidget::byteClicked, this, &MainWindow::onBitmapByteClicked);
     connect(m_bitmapView, &BitmapViewWidget::hoverLeft, this, &MainWindow::onHoverLeft);
-    connect(m_structModeLeftPanel, &StructModeLeftPanel::previewRequested, this, [this]() {
-        syncStructPreviewToControls();
-    });
-    connect(m_structModeLeftPanel, &StructModeLeftPanel::previewClearRequested,
-            this, &MainWindow::clearStructPreview);
-    connect(m_structModeLeftPanel, &StructModeLeftPanel::addViewRequested,
-            this, &MainWindow::addCurrentStructView);
-    connect(m_structModeLeftPanel, &StructModeLeftPanel::currentViewsRemoved,
-            this, &MainWindow::removeCurrentStructViews);
-    connect(m_structModeLeftPanel, &StructModeLeftPanel::currentViewChanged,
-            this, &MainWindow::updateCurrentStructView);
-    connect(m_structModeLeftPanel, &StructModeLeftPanel::sourceLocationActivated,
-            this, &MainWindow::navigateToStructSource);
-    connect(m_structDataViewPanel, &StructDataViewPanel::sourceLocationActivated,
-            this, &MainWindow::navigateToStructSource);
-    connect(m_structDataViewPanel,
-            &StructDataViewPanel::declarationLocationActivated,
-            m_structModeLeftPanel,
-            &StructModeLeftPanel::focusDeclarationRange);
-    connect(m_structModeLeftPanel, &StructModeLeftPanel::parseStateChanged, this, [this]() {
-        AppSettings::setStructDeclarationText(m_structModeLeftPanel->declarationText());
-        syncStructPreviewToControls();
-    });
-    connect(m_structModeLeftPanel, &StructModeLeftPanel::declarationFileLoaded,
-            this, [this](const QString& filePath) {
-                m_externalStructSourcePaths.clear();
-                AppSettings::setLastStructDefinitionFilePath(filePath);
-            });
-    connect(m_structModeLeftPanel->entryComboBox(), &QComboBox::currentTextChanged, this,
-            [this](const QString& text) {
-                AppSettings::setStructEntryName(text);
-                syncStructPreviewToControls();
-            });
-    connect(m_structModeLeftPanel->entryCountSpinBox(), qOverload<int>(&QSpinBox::valueChanged),
-            this, [this](int count) {
-                AppSettings::setStructEntryCount(count);
-                syncStructPreviewToControls();
-            });
     connect(m_currentByteInfoPanel->bigEndianCheckBox(), &QCheckBox::toggled, this, [this](bool checked) {
         AppSettings::setCurrentByteInfoBigEndianEnabled(checked);
         refreshCurrentByteInfoFromLastHover();
@@ -892,7 +920,7 @@ MainWindow::MainWindow(QWidget* parent)
             });
     auto syncViewMenuChecks = [this]() {
         m_ui->actionViewScanLog->setChecked(m_scanControlsPanel->lifecycleCard()->isVisible());
-        m_ui->actionViewEdits->setChecked(m_mainTabsPanel->editStack()->isVisible());
+        m_ui->actionViewEdits->setChecked(m_mainTabsPanel->isEditsTabVisible());
     };
     connect(m_ui->actionOpenFile, &QAction::triggered, this, [this]() { onOpenFile(); });
     connect(m_ui->actionOpenDirectory, &QAction::triggered, this, [this]() { onOpenDirectory(); });
@@ -907,7 +935,7 @@ MainWindow::MainWindow(QWidget* parent)
         syncViewMenuChecks();
     });
     connect(m_ui->actionViewEdits, &QAction::triggered, this, [this, syncViewMenuChecks](bool checked) {
-        m_mainTabsPanel->editStack()->setVisible(checked);
+        m_mainTabsPanel->setEditsTabVisible(checked);
         AppSettings::setViewEditsVisible(checked);
         syncViewMenuChecks();
     });
@@ -923,7 +951,10 @@ MainWindow::MainWindow(QWidget* parent)
         m_ui->actionViewScanLog->setChecked(false);
     });
     m_scanControlsPanel->lifecycleCard()->setVisible(false);
-    m_mainTabsPanel->editStack()->setVisible(AppSettings::viewEditsVisible());
+    m_mainTabsPanel->editStack()->setVisible(false);
+    if (AppSettings::viewEditsVisible()) {
+        m_mainTabsPanel->setEditsTabVisible(true);
+    }
     syncViewMenuChecks();
 
     connect(m_rawDataViewShellPanel->zoomOutButton(), &QToolButton::clicked, this, [this]() {
@@ -1081,6 +1112,7 @@ MainWindow::MainWindow(QWidget* parent)
         qBound(m_dataViewImagePanel->jobsSpinBox()->minimum(),
                AppSettings::dataViewImageJobs(threadCount),
                m_dataViewImagePanel->jobsSpinBox()->maximum());
+    const int visualizeMode = qBound(0, AppSettings::visualizeModeIndex(), 2);
     m_hexControlsPanel->showAsComboBox()->setCurrentIndex(hexShowAsIdx);
     m_hexControlsPanel->littleEndianRadioButton()->setChecked(!hexBigEndian);
     m_hexControlsPanel->bigEndianRadioButton()->setChecked(hexBigEndian);
@@ -1102,6 +1134,9 @@ MainWindow::MainWindow(QWidget* parent)
     m_dataViewImagePanel->maxPixelsKSpinBox()->setValue(dataViewImageMaxPixelsK);
     m_dataViewImagePanel->maxResultsSpinBox()->setValue(dataViewImageMaxResults);
     m_dataViewImagePanel->jobsSpinBox()->setValue(dataViewImageJobs);
+    m_visualizePanel->setProgramDirectory(rememberedSchemaLibrary);
+    m_visualizePanel->setVisualizationMode(
+        static_cast<VisualizationMode>(visualizeMode));
     m_scanControlsPanel->prefillOnMergeCheckBox()->setChecked(prefillOnMerge);
     m_textView->setDisplayMode(
         hexShowAsIdx == 0 ? TextDisplayMode::ByteMode
@@ -1139,32 +1174,13 @@ MainWindow::MainWindow(QWidget* parent)
     updateHexInfoPanel();
     clearCurrentByteInfo();
 
-    bool rememberedStructDefinitionLoaded = false;
-    if (!rememberedStructDefinitionPath.isEmpty() &&
-        QFileInfo(rememberedStructDefinitionPath).isFile()) {
-        rememberedStructDefinitionLoaded =
-            m_structModeLeftPanel->loadDeclarationFromFile(
-                rememberedStructDefinitionPath);
+    if (!rememberedSchemaLibrary.isEmpty()) {
+        m_brecoLangPanel->setLibraryDirectory(rememberedSchemaLibrary);
     }
-    if (!rememberedStructDefinitionLoaded) {
-        if (!rememberedStructDeclaration.isEmpty()) {
-            m_structModeLeftPanel->structDeclarationEdit()->setPlainText(
-                rememberedStructDeclaration);
-        }
-    }
-    if (m_structModeLeftPanel->structureGraph().defaultEntryName().isEmpty() &&
-        !rememberedStructEntryName.isEmpty()) {
-        const int entryIndex =
-            m_structModeLeftPanel->entryComboBox()->findText(
-                rememberedStructEntryName);
-        if (entryIndex >= 0) {
-            m_structModeLeftPanel->entryComboBox()->setCurrentIndex(entryIndex);
-        }
-    }
-    m_structModeLeftPanel->entryCountSpinBox()->setValue(
-        qBound(m_structModeLeftPanel->entryCountSpinBox()->minimum(),
-               rememberedStructEntryCount,
-               m_structModeLeftPanel->entryCountSpinBox()->maximum()));
+    const bool rememberedSchemaLoaded =
+        !rememberedSchemaPath.isEmpty() &&
+        QFileInfo(rememberedSchemaPath).isFile() &&
+        m_brecoLangPanel->loadSchemaFile(rememberedSchemaPath);
 
     m_resultModel.setScanTargets(&m_scanTargets);
     refreshSourceSummary();
@@ -1203,20 +1219,16 @@ MainWindow::MainWindow(QWidget* parent)
                                      rememberedAbsolutePath);
         }
     }
-    if (rememberedSourceLoaded &&
-        m_structModeLeftPanel->previewEnabled() &&
-        m_structModeLeftPanel->canPreview()) {
-        QMetaObject::invokeMethod(
-            this,
+    if (rememberedSourceLoaded && rememberedSchemaLoaded) {
+        QTimer::singleShot(
+            0, this,
             [this, restoredSourceOffset]() {
                 if (isSingleFileModeActive() &&
-                    !m_textHoverBuffer.data.isEmpty() &&
-                    m_structModeLeftPanel->previewEnabled() &&
-                    m_structModeLeftPanel->canPreview()) {
-                    createStructPreview(restoredSourceOffset);
+                    !m_textHoverBuffer.data.isEmpty()) {
+                    m_brecoLangPanel->setDecodeOffset(restoredSourceOffset);
+                    m_brecoLangPanel->decodeSelected();
                 }
-            },
-            Qt::QueuedConnection);
+            });
     }
 }
 
@@ -1499,6 +1511,9 @@ bool MainWindow::selectSingleFileSource(const QString& filePath) {
     m_sourceFiles = {absolutePath};
     m_sourceMode = SourceMode::SingleFile;
     m_selectedSourceDisplay = absolutePath;
+    if (m_brecoLangPanel != nullptr) {
+        m_brecoLangPanel->setSuggestedInputPath(absolutePath);
+    }
     buildScanTargets(m_sourceFiles);
     m_resultModel.clear();
     clearResultBufferCacheState();
@@ -1507,7 +1522,6 @@ bool MainWindow::selectSingleFileSource(const QString& filePath) {
     m_bitmapHoverBuffer = {};
     clearCurrentByteInfo();
 
-    AppSettings::setLastBrowseDialogDirectory(absolutePath);
     if (usesExternalReadFd) {
         AppSettings::clearRememberedSingleFilePath();
         AppSettings::clearRememberedSingleFileOffset();
@@ -1517,7 +1531,6 @@ bool MainWindow::selectSingleFileSource(const QString& filePath) {
     }
     refreshSourceSummary();
     loadNotEmptyPreview();
-    syncStructPreviewToControls();
     updateBufferStatusLine();
     syncSourcePathInputText(absolutePath);
     updateSourcePathFeedback(SourcePathFeedback::Open, kind, absolutePath);
@@ -1547,7 +1560,6 @@ bool MainWindow::selectDirectorySource(const QString& dirPath) {
     m_bitmapHoverBuffer = {};
     clearCurrentByteInfo();
 
-    AppSettings::setLastBrowseDialogDirectory(absolutePath);
     AppSettings::clearRememberedSingleFilePath();
     AppSettings::clearRememberedSingleFileOffset();
     refreshSourceSummary();
@@ -1575,8 +1587,9 @@ bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
 }
 
 void MainWindow::onOpenFile() {
-    const QString filePath = QFileDialog::getOpenFileName(
-        this, QStringLiteral("Select file"), AppSettings::lastBrowseDialogDirectory());
+    const QString filePath = promptForPath(
+        this, PathSelectActivity::OpenMainFile, PathSelectKind::OpenFile,
+        QStringLiteral("Select file"));
     if (filePath.isEmpty()) {
         return;
     }
@@ -1584,8 +1597,9 @@ void MainWindow::onOpenFile() {
 }
 
 void MainWindow::onOpenDirectory() {
-    const QString dir = QFileDialog::getExistingDirectory(
-        this, QStringLiteral("Select directory"), AppSettings::lastBrowseDialogDirectory());
+    const QString dir = promptForPath(
+        this, PathSelectActivity::OpenScanDir,
+        PathSelectKind::OpenDirectory, QStringLiteral("Select directory"));
     if (dir.isEmpty()) {
         return;
     }
@@ -1600,15 +1614,15 @@ void MainWindow::onStartScan() {
     startScan(ScanKind::Text);
 }
 
-void MainWindow::onStartStructureScan() {
+void MainWindow::onStartBrecoLangScan() {
     m_mainTabsPanel->activateScanTab();
     if (m_scanController.isRunning()) {
-        if (m_activeScanKind == ScanKind::Structure) {
+        if (m_activeScanKind == ScanKind::BrecoLang) {
             onStopScan();
         }
         return;
     }
-    startScan(ScanKind::Structure);
+    startScan(ScanKind::BrecoLang);
 }
 
 void MainWindow::startScan(ScanKind kind) {
@@ -1618,19 +1632,25 @@ void MainWindow::startScan(ScanKind kind) {
         return;
     }
 
-    const bool structureScan = kind == ScanKind::Structure;
-    const QByteArray term = structureScan
+    const bool schemaScan = kind == ScanKind::BrecoLang;
+    const QByteArray term = schemaScan
                                 ? QByteArray()
                                 : m_scanControlsPanel->searchTermLineEdit()->text().toUtf8();
-    if (!structureScan && term.isEmpty()) {
+    if (!schemaScan && term.isEmpty()) {
         QMessageBox::information(this, QStringLiteral("Breco"),
                                  QStringLiteral("Enter a search term."));
         return;
     }
-    if (structureScan && !m_structModeLeftPanel->canPreview()) {
-        QMessageBox::information(this, QStringLiteral("Breco"),
-                                 QStringLiteral("Select a valid structure entry first."));
-        return;
+    std::shared_ptr<const lang::ProbeScanPlan> probePlan;
+    if (schemaScan) {
+        QString error;
+        const std::optional<lang::ProbeScanPlan> plan =
+            m_brecoLangPanel->probeScanPlan(&error);
+        if (!plan.has_value()) {
+            QMessageBox::information(this, QStringLiteral("Breco"), error);
+            return;
+        }
+        probePlan = std::make_shared<const lang::ProbeScanPlan>(*plan);
     }
     const auto scanButtonPressedAt = std::chrono::steady_clock::now();
 
@@ -1643,38 +1663,24 @@ void MainWindow::startScan(ScanKind kind) {
     updateBufferStatusLine();
 
     m_scanControlsPanel->scanProgressBar()->setValue(0);
-    std::shared_ptr<const StructureGraph> scanGraph;
-    std::shared_ptr<const QHash<QString, VisualizationSource>> scanExternalSources;
-    QString scanEntry;
-    if (structureScan) {
-        scanGraph = std::make_shared<StructureGraph>(
-            m_structModeLeftPanel->structureGraph());
-        scanEntry = m_structModeLeftPanel->entryComboBox()->currentText();
-        auto externalSources = std::make_shared<QHash<QString, VisualizationSource>>();
-        if (!loadExternalStructSources(externalSources.get())) {
-            return;
-        }
-        scanExternalSources = std::move(externalSources);
-    }
     m_activeScanKind = kind;
     m_savedIgnoreCaseEnabled =
         m_scanControlsPanel->ignoreCaseCheckBox()->isEnabled();
     m_scanControlsPanel->ignoreCaseCheckBox()->setEnabled(false);
-    if (structureScan) {
-        m_savedStructureSearchTerm =
+    if (schemaScan) {
+        m_savedSchemaSearchTerm =
             m_scanControlsPanel->searchTermLineEdit()->text();
-        m_savedStructureTermEnabled =
+        m_savedSchemaTermEnabled =
             m_scanControlsPanel->searchTermLineEdit()->isEnabled();
         m_scanControlsPanel->searchTermLineEdit()->setText(
-            QStringLiteral("Structure: %1").arg(scanEntry));
+            QStringLiteral("BrecoLang: %1").arg(probePlan->entryName));
         m_scanControlsPanel->searchTermLineEdit()->setEnabled(false);
     }
     m_scanController.startScan(m_scanTargets, term, effectiveBlockSizeBytes(), selectedWorkerCount(),
                                selectedTextMode(),
                                m_scanControlsPanel->ignoreCaseCheckBox()->isChecked(),
                                m_scanControlsPanel->prefillOnMergeCheckBox()->isChecked(),
-                               scanButtonPressedAt, scanGraph, scanEntry,
-                               scanExternalSources);
+                               scanButtonPressedAt, probePlan);
 }
 
 void MainWindow::onStopScan() { m_scanController.requestStop(); }
@@ -1918,8 +1924,7 @@ bool MainWindow::dataViewBigEndianEnabled() const {
 
 void MainWindow::setDataViewBigEndianEnabled(bool enabled) {
     m_dataViewBigEndian = enabled;
-    for (DataViewShellPanel* shell :
-         {m_rawDataViewShellPanel, m_structDataViewShellPanel}) {
+    for (DataViewShellPanel* shell : {m_rawDataViewShellPanel}) {
         if (shell == nullptr) {
             continue;
         }
@@ -1937,7 +1942,6 @@ void MainWindow::setDataViewBigEndianEnabled(bool enabled) {
     AppSettings::setDataViewBigEndianEnabled(enabled);
     refreshCurrentByteInfoFromLastHover();
     refreshDataViewFromNavigator();
-    rebuildStructVisualization();
 }
 
 void MainWindow::updateTextModeControlVisibility() {
@@ -2189,21 +2193,76 @@ void MainWindow::refreshDataViewFromNavigator() {
     } else if (!m_lastHoverAbsoluteOffset.has_value()) {
         clearCurrentByteInfo();
     }
+    refreshVisualization();
+}
+
+void MainWindow::refreshVisualization() {
+    if (m_visualizePanel == nullptr || m_textView == nullptr) {
+        return;
+    }
+    const std::optional<int> targetIndex = activePreviewTargetIndex();
+    if (!targetIndex.has_value() || targetIndex.value() < 0 ||
+        targetIndex.value() >= m_scanTargets.size()) {
+        m_visualizePanel->clearData();
+        return;
+    }
+
+    const ScanTarget& target = m_scanTargets.at(targetIndex.value());
+    std::optional<QPair<quint64, quint64>> selection =
+        m_activeTextSelectionRange;
+    if (!selection.has_value()) {
+        selection = m_textView->selectionRangeOffsets();
+    }
+    const quint64 fallbackOffset =
+        m_textView->firstVisibleByteOffset().value_or(m_sharedCenterOffset);
+    const VisualizationWindow window = resolveVisualizationWindow(
+        selection, fallbackOffset, target.fileSize,
+        kMaximumVisualizationBytes, m_visualizePanel->defaultWindowBytes());
+    if (window.length == 0) {
+        m_visualizePanel->clearData();
+        return;
+    }
+    applyVisualizationWindow(window.start, window.length, window.truncated,
+                             target.fileSize);
+}
+
+void MainWindow::applyVisualizationWindow(quint64 start, quint64 length,
+                                          bool truncated, quint64 fileSize) {
+    const std::optional<int> targetIndex = activePreviewTargetIndex();
+    if (!targetIndex.has_value() || targetIndex.value() < 0 ||
+        targetIndex.value() >= m_scanTargets.size() || length == 0) {
+        m_visualizePanel->clearData();
+        return;
+    }
+    const ScanTarget& target = m_scanTargets.at(targetIndex.value());
+    const std::optional<QByteArray> bytes =
+        m_windowLoader.loadTransformedWindow(
+            target.filePath, target.fileSize, start, length,
+            currentShiftSettings());
+    if (!bytes.has_value()) {
+        m_visualizePanel->clearData();
+        m_visualizePanel->statusLabel()->setText(
+            QStringLiteral("Unable to load the selected byte range."));
+        return;
+    }
+    m_visualizePanel->setData(*bytes, start, truncated, fileSize);
 }
 
 void MainWindow::setScanButtonMode(bool running) {
     m_scanControlsPanel->startScanButton()->setText(running ? QStringLiteral("Stop")
                                                             : QStringLiteral("Scan"));
-    m_structModeLeftPanel->setScanState(
-        running, running && m_activeScanKind == ScanKind::Structure);
+    m_brecoLangPanel->setScanRunning(
+        running && m_activeScanKind == ScanKind::BrecoLang);
+    m_brecoLangPanel->scanButton()->setEnabled(
+        !running || m_activeScanKind == ScanKind::BrecoLang);
 }
 
 void MainWindow::restoreTransientScanUi() {
-    if (m_activeScanKind == ScanKind::Structure) {
+    if (m_activeScanKind == ScanKind::BrecoLang) {
         m_scanControlsPanel->searchTermLineEdit()->setText(
-            m_savedStructureSearchTerm);
+            m_savedSchemaSearchTerm);
         m_scanControlsPanel->searchTermLineEdit()->setEnabled(
-            m_savedStructureTermEnabled);
+            m_savedSchemaTermEnabled);
     }
     if (m_activeScanKind != ScanKind::None) {
         m_scanControlsPanel->ignoreCaseCheckBox()->setEnabled(
@@ -2733,8 +2792,7 @@ bool MainWindow::expandActivePreviewBuffer(int direction) {
 }
 
 void MainWindow::clearResultBufferCacheState() {
-    clearStructSourceHighlight();
-    clearStructPreview();
+    clearDecodedSourceHighlight();
     cancelImageScan();
     if (m_dataViewImagePanel != nullptr) {
         m_dataViewImagePanel->clearResults();
@@ -2762,6 +2820,9 @@ void MainWindow::clearResultBufferCacheState() {
     m_bitmapHoverBuffer = {};
     clearCurrentByteInfo();
     m_activeTextSelectionRange.reset();
+    if (m_visualizePanel != nullptr) {
+        m_visualizePanel->clearData();
+    }
     updateHexInfoPanel();
 }
 
@@ -3270,6 +3331,8 @@ void MainWindow::updateSharedPreviewNow() {
     updateHexInfoPanel();
     refreshDataViewFromNavigator();
     updateBufferStatusLine();
+    refreshQueuedEditOverlays();
+    syncCurrentFileEditingUi();
     BRECO_SELTRACE("updateSharedPreviewNow: hover buffers updated");
     BRECO_SELTRACE("updateSharedPreviewNow: done");
 }
@@ -3306,7 +3369,13 @@ void MainWindow::showMatchPreview(int row, const MatchRecord& match) {
         m_textExpandAfterBytes = 0;
     }
     m_activePreviewRow = row;
-    m_sharedCenterOffset = match.offset;
+    m_sharedCenterOffset = strideAlignedOffset(match.offset);
+    if (m_brecoLangPanel != nullptr &&
+        match.scanTargetIdx >= 0 &&
+        match.scanTargetIdx < m_scanTargets.size()) {
+        m_brecoLangPanel->setSuggestedInputPath(
+            m_scanTargets.at(match.scanTargetIdx).filePath);
+    }
     rememberActiveSingleFileOffset(match.offset);
     m_pendingCenterOffset.reset();
     BRECO_SELTRACE(QStringLiteral("showMatchPreview: updateSharedPreviewNow begin bufferIndex=%1").arg(bufferIndex));
@@ -3619,8 +3688,10 @@ void MainWindow::saveBinaryFromHere(quint64 startOffset) {
 
 void MainWindow::saveBinaryRangeWithDialogs(const ScanTarget& target,
                                             quint64 startOffset, quint64 length) {
-    const QString outputPath = QFileDialog::getSaveFileName(
-        this, QStringLiteral("Save File"), QString(), QStringLiteral("*.*"));
+    const QString outputPath = promptForPath(
+        this, PathSelectActivity::SaveBinaryRange,
+        PathSelectKind::SaveFile, QStringLiteral("Save File"),
+        QStringLiteral("*.*"));
     if (outputPath.isEmpty()) {
         return;
     }
@@ -4111,6 +4182,10 @@ void MainWindow::resetCurrentByteCaptionHighlights() {
 }
 
 void MainWindow::clearCurrentByteInfo() {
+    if (m_brecoLangPanel != nullptr) {
+        m_brecoLangPanel->clearSourceHighlight(
+            lang::BrecoLangPanel::SourceHighlightMode::Hover);
+    }
     if (m_currentByteInfoPanel == nullptr) {
         return;
     }
@@ -4142,6 +4217,13 @@ void MainWindow::onTextHoverOffsetChanged(quint64 absoluteOffset) {
     m_lastHoverAbsoluteOffset = absoluteOffset;
     m_textView->setHoverAnchorOffset(absoluteOffset);
     updateCurrentByteInfoFromHover(m_textHoverBuffer, absoluteOffset);
+    if (m_brecoLangPanel != nullptr) {
+        const std::optional<int> target = activePreviewTargetIndex();
+        const QString path =
+            target.has_value() ? filePathForTarget(target.value()) : QString();
+        m_brecoLangPanel->highlightSourceRange(
+            path, absoluteOffset, 1, lang::BrecoLangPanel::SourceHighlightMode::Hover);
+    }
 }
 
 void MainWindow::onTextCenterAnchorRequested(quint64 absoluteOffset) {
@@ -4156,42 +4238,48 @@ void MainWindow::onBitmapHoverOffsetChanged(quint64 absoluteOffset) {
     m_lastHoverAbsoluteOffset = absoluteOffset;
     m_textView->setHoverAnchorOffset(absoluteOffset);
     updateCurrentByteInfoFromHover(m_bitmapHoverBuffer, absoluteOffset);
+    if (m_brecoLangPanel != nullptr) {
+        const std::optional<int> target = activePreviewTargetIndex();
+        const QString path =
+            target.has_value() ? filePathForTarget(target.value()) : QString();
+        m_brecoLangPanel->highlightSourceRange(
+            path, absoluteOffset, 1, lang::BrecoLangPanel::SourceHighlightMode::Hover);
+    }
 }
 
 void MainWindow::onBitmapByteClicked(quint64 absoluteOffset) {
-    clearStructSourceHighlight();
-    clearStructPreview();
+    clearDecodedSourceHighlight();
     requestSharedCenter(absoluteOffset);
 }
 
 void MainWindow::onTextByteClicked(quint64 absoluteOffset) {
-    if (m_structModeLeftPanel->previewEnabled() &&
-        m_structModeLeftPanel->canPreview()) {
-        createStructPreview(absoluteOffset);
+    if (m_brecoLangPanel != nullptr && m_brecoLangPanel->program() != nullptr) {
+        m_brecoLangPanel->setDecodeOffset(absoluteOffset);
+        m_brecoLangPanel->decodeSelected();
     }
 }
 
-void MainWindow::setStructSourceHighlight(quint64 absoluteOffset,
-                                          quint64 byteLength) {
+void MainWindow::setDecodedSourceHighlight(quint64 absoluteOffset,
+                                           quint64 byteLength) {
     if (byteLength == 0) {
-        clearStructSourceHighlight();
+        clearDecodedSourceHighlight();
         return;
     }
     const quint64 rangeEnd =
         byteLength > std::numeric_limits<quint64>::max() - absoluteOffset
             ? std::numeric_limits<quint64>::max()
             : absoluteOffset + byteLength;
-    m_structSourceHighlightRange = qMakePair(absoluteOffset, rangeEnd);
+    m_decodedSourceHighlightRange = qMakePair(absoluteOffset, rangeEnd);
     if (m_textView != nullptr) {
-        m_textView->setExternalSelectionRange(m_structSourceHighlightRange);
+        m_textView->setExternalSelectionRange(m_decodedSourceHighlightRange);
     }
     if (m_bitmapView != nullptr) {
-        m_bitmapView->setExternalSelectionRange(m_structSourceHighlightRange);
+        m_bitmapView->setExternalSelectionRange(m_decodedSourceHighlightRange);
     }
 }
 
-void MainWindow::clearStructSourceHighlight() {
-    m_structSourceHighlightRange.reset();
+void MainWindow::clearDecodedSourceHighlight() {
+    m_decodedSourceHighlightRange.reset();
     if (m_textView != nullptr) {
         m_textView->setExternalSelectionRange(std::nullopt);
     }
@@ -4200,12 +4288,12 @@ void MainWindow::clearStructSourceHighlight() {
     }
 }
 
-void MainWindow::navigateToStructSource(const QString& filePath,
-                                        quint64 absoluteOffset,
-                                        quint64 byteLength) {
-    const bool wasNavigating = m_structNavigationInProgress;
-    m_structNavigationInProgress = true;
-    clearStructSourceHighlight();
+void MainWindow::navigateToDecodedSource(const QString& filePath,
+                                         quint64 absoluteOffset,
+                                         quint64 byteLength) {
+    const bool wasNavigating = m_decodedNavigationInProgress;
+    m_decodedNavigationInProgress = true;
+    clearDecodedSourceHighlight();
 
     bool sourceReady = true;
     if (!filePath.isEmpty()) {
@@ -4218,299 +4306,402 @@ void MainWindow::navigateToStructSource(const QString& filePath,
         }
     }
     if (sourceReady) {
-        jumpToAbsoluteOffset(absoluteOffset);
-        setStructSourceHighlight(absoluteOffset, byteLength);
-    }
-
-    m_structNavigationInProgress = wasNavigating;
-}
-
-quint64 MainWindow::structVisualizationStartOffset() const {
-    if (m_textView->selectionStartOffset().has_value()) {
-        return m_textView->selectionStartOffset().value();
-    }
-    if (m_textView->selectedOffset().has_value()) {
-        return m_textView->selectedOffset().value();
-    }
-    if (m_textView->firstVisibleByteOffset().has_value()) {
-        return m_textView->firstVisibleByteOffset().value();
-    }
-    return m_textHoverBuffer.baseOffset;
-}
-
-bool MainWindow::loadExternalStructSources(
-    QHash<QString, VisualizationSource>* sources) {
-    if (sources == nullptr) {
-        return false;
-    }
-    sources->clear();
-    for (const QString& role : m_structModeLeftPanel->structureGraph().externalRoles()) {
-        QString path = m_externalStructSourcePaths.value(role);
-        if (path.isEmpty() || !QFileInfo::exists(path)) {
-            path = QFileDialog::getOpenFileName(
-                this, QStringLiteral("Select external structure source: %1").arg(role),
-                AppSettings::lastBrowseDialogDirectory(),
-                QStringLiteral("All files (*)"));
-            if (path.isEmpty()) {
-                return false;
-            }
-            m_externalStructSourcePaths.insert(role, path);
+        std::optional<QPair<quint64, quint64>> selection;
+        if (byteLength > 0 &&
+            byteLength <=
+                std::numeric_limits<quint64>::max() - absoluteOffset) {
+            selection =
+                qMakePair(absoluteOffset, absoluteOffset + byteLength);
         }
-        QFile file(path);
-        if (!file.open(QIODevice::ReadOnly)) {
-            QMessageBox::warning(this, QStringLiteral("External source error"),
-                                 QStringLiteral("Could not read '%1': %2")
-                                     .arg(path, file.errorString()));
-            return false;
-        }
-        VisualizationSource source;
-        source.bytes = file.readAll();
-        source.filePath = QFileInfo(path).absoluteFilePath();
-        sources->insert(role, std::move(source));
-    }
-    return true;
-}
-
-bool MainWindow::decodeStructView(StructViewState& view, bool allowSourceReload) {
-    if (!m_structModeLeftPanel->isParseValid() ||
-        !m_structModeLeftPanel->structureGraph().isVisualizableEntryName(view.type)) {
-        view.reloadError = QStringLiteral("Struct type '%1' is not available").arg(view.type);
-        return false;
+        m_pendingHexSelectionRange = selection;
+        jumpToAbsoluteOffset(strideAlignedOffset(absoluteOffset));
+        setDecodedSourceHighlight(absoluteOffset, byteLength);
     }
 
-    QByteArray data;
-    size_t dataStartOffset = 0;
-    quint64 dataBaseOffset = 0;
-    const auto loadSourceWindow = [&]() -> bool {
-        if (!allowSourceReload || view.filePath.isEmpty() || view.fileSize <= view.offset) {
-            return false;
-        }
-        const quint64 readSize =
-            qMin(kNotEmptyInitialBytes, view.fileSize - view.offset);
-        const std::optional<QByteArray> loaded =
-            m_windowLoader.loadTransformedWindow(view.filePath, view.fileSize,
-                                                  view.offset, readSize,
-                                                  currentShiftSettings());
-        if (!loaded.has_value()) {
-            return false;
-        }
-        data = *loaded;
-        dataStartOffset = 0;
-        dataBaseOffset = view.offset;
-        return true;
-    };
-    const quint64 hoverEnd =
-        m_textHoverBuffer.baseOffset +
-        static_cast<quint64>(m_textHoverBuffer.data.size());
-    if (view.filePath == m_textHoverBuffer.filePath &&
-        view.offset >= m_textHoverBuffer.baseOffset && view.offset < hoverEnd) {
-        const quint64 hoverSuffixBytes = hoverEnd - view.offset;
-        const quint64 desiredBytes =
-            view.fileSize > view.offset
-                ? qMin(kNotEmptyInitialBytes, view.fileSize - view.offset)
-                : hoverSuffixBytes;
-        if (!allowSourceReload || hoverSuffixBytes >= desiredBytes ||
-            !loadSourceWindow()) {
-            data = m_textHoverBuffer.data;
-            dataBaseOffset = m_textHoverBuffer.baseOffset;
-            dataStartOffset =
-                static_cast<size_t>(view.offset - m_textHoverBuffer.baseOffset);
-        }
-    } else {
-        loadSourceWindow();
-    }
-    if (data.isEmpty() || dataStartOffset >= static_cast<size_t>(data.size())) {
-        view.reloadError =
-            QStringLiteral("Could not load bytes at offset 0x%1")
-                .arg(view.offset, 0, 16);
-        return false;
-    }
-
-    QHash<QString, VisualizationSource> externalSources;
-    if (!loadExternalStructSources(&externalSources)) {
-        view.reloadError = QStringLiteral("External source selection was cancelled");
-        return false;
-    }
-    VisualizationSource primary{data, view.filePath, dataBaseOffset};
-    view.decodedRoot = visualize(
-        m_structModeLeftPanel->structureGraph(), view.type, primary,
-        dataStartOffset, view.repeat, externalSources,
-        dataViewBigEndianEnabled() ? Endianness::Big : Endianness::Little);
-    view.reloadError.clear();
-    return true;
-}
-
-void MainWindow::syncStructPreviewToControls() {
-    const quint64 absoluteOffset =
-        m_structPreview.has_value() ? m_structPreview->offset
-                                    : structVisualizationStartOffset();
-    clearStructPreview();
-    if (m_structModeLeftPanel->previewEnabled() &&
-        m_structModeLeftPanel->canPreview()) {
-        createStructPreview(absoluteOffset);
-    }
-}
-
-void MainWindow::createStructPreview(quint64 absoluteOffset) {
-    if (!m_structModeLeftPanel->previewEnabled() ||
-        !m_structModeLeftPanel->canPreview()) {
-        return;
-    }
-    StructViewState preview;
-    preview.type = m_structModeLeftPanel->entryComboBox()->currentText();
-    preview.repeat = m_structModeLeftPanel->entryCountSpinBox()->value();
-    preview.offset = absoluteOffset;
-    preview.filePath = m_textHoverBuffer.filePath;
-    for (const ScanTarget& target : m_scanTargets) {
-        if (target.filePath == preview.filePath) {
-            preview.fileSize = target.fileSize;
-            break;
-        }
-    }
-    if (preview.fileSize == 0) {
-        preview.fileSize =
-            m_filePool.externalReadSize(preview.filePath)
-                .value_or(m_textHoverBuffer.baseOffset +
-                          static_cast<quint64>(m_textHoverBuffer.data.size()));
-    }
-    if (!decodeStructView(preview, false)) {
-        return;
-    }
-    m_structPreview = preview;
-    m_structModeLeftPanel->setPreviewActive(true);
-    rebuildStructVisualization();
-    AppSettings::setStructDeclarationText(m_structModeLeftPanel->declarationText());
-    AppSettings::setStructEntryName(preview.type);
-    AppSettings::setStructEntryCount(preview.repeat);
-}
-
-void MainWindow::clearStructPreview() {
-    if (!m_structPreview.has_value() &&
-        (m_structModeLeftPanel == nullptr ||
-         !m_structModeLeftPanel->previewActive())) {
-        return;
-    }
-    clearStructSourceHighlight();
-    m_structPreview.reset();
-    if (m_structModeLeftPanel != nullptr) {
-        m_structModeLeftPanel->setPreviewActive(false);
-    }
-    rebuildStructVisualization();
-}
-
-void MainWindow::addCurrentStructView() {
-    if (!m_structPreview.has_value()) {
-        return;
-    }
-    StructViewState view = *m_structPreview;
-    view.id = m_nextStructViewId++;
-    view.name =
-        QStringLiteral("%1@0x%2")
-            .arg(view.type, QString::number(view.offset, 16).toUpper());
-    m_currentStructViews.push_back(view);
-    m_structModeLeftPanel->addCurrentView(
-        CurrentStructView{view.id, view.name, view.type, view.repeat,
-                          view.offset, view.decodedRoot.sourceLength,
-                          view.filePath});
-    rebuildStructVisualization();
-}
-
-void MainWindow::removeCurrentStructViews(const QVector<quint64>& ids) {
-    m_currentStructViews.erase(
-        std::remove_if(m_currentStructViews.begin(), m_currentStructViews.end(),
-                       [&ids](const StructViewState& view) {
-                           return ids.contains(view.id);
-                       }),
-        m_currentStructViews.end());
-    rebuildStructVisualization();
-}
-
-void MainWindow::updateCurrentStructView(quint64 id, const QString& name,
-                                         int repeat, quint64 offset) {
-    auto found =
-        std::find_if(m_currentStructViews.begin(), m_currentStructViews.end(),
-                     [id](const StructViewState& view) { return view.id == id; });
-    if (found == m_currentStructViews.end()) {
-        return;
-    }
-    const bool requiresDecode = found->repeat != repeat || found->offset != offset;
-    found->name = name;
-    if (requiresDecode) {
-        StructViewState updated = *found;
-        updated.repeat = repeat;
-        updated.offset = offset;
-        decodeStructView(updated, true);
-        *found = updated;
-        m_structModeLeftPanel->setCurrentViewByteLength(
-            found->id, found->decodedRoot.sourceLength);
-    }
-    rebuildStructVisualization();
-}
-
-void MainWindow::rebuildStructVisualization() {
-    if (m_structDataViewPanel == nullptr) {
-        return;
-    }
-    VisualizedNode root;
-    root.name = QStringLiteral("root");
-    m_structDataViewPanel->setSourceEndianness(
-        dataViewBigEndianEnabled() ? Endianness::Big : Endianness::Little);
-    const auto applyViewSource = [](VisualizedNode* node,
-                                    const StructViewState& view) {
-        node->sourceFilePath = view.filePath;
-        node->sourceOffset = view.offset;
-        node->sourceLength = view.decodedRoot.sourceLength;
-        node->hasSourceOffset = true;
-    };
-    const auto buildViewNode = [this, &applyViewSource](
-                                   const StructViewState& view,
-                                   const QString& viewName) {
-        VisualizedNode node;
-        node.name = viewName;
-        node.typeName = view.type;
-        node.declarationRange =
-            m_structModeLeftPanel->structureGraph().nameRangeForEntry(view.type);
-        node.valueKind = view.repeat == 1 ? VisualizedValueKind::Object
-                                         : VisualizedValueKind::Array;
-        applyViewSource(&node, view);
-        if (view.repeat == 1 && view.decodedRoot.children.size() == 1 &&
-            view.decodedRoot.children.first().valueKind ==
-                VisualizedValueKind::Object) {
-            node.children = view.decodedRoot.children.first().children;
-        } else {
-            node.children = view.decodedRoot.children;
-        }
-        if (!view.reloadError.isEmpty()) {
-            node.valid = false;
-            node.errorMessage = view.reloadError;
-        }
-        return node;
-    };
-    const auto appendView = [&root, &buildViewNode](const StructViewState& view,
-                                                    const QString& viewName) {
-        root.children.push_back(buildViewNode(view, viewName));
-    };
-    if (m_structPreview.has_value()) {
-        appendView(*m_structPreview, QStringLiteral("Preview"));
-    }
-    for (const StructViewState& view : m_currentStructViews) {
-        appendView(view, view.name);
-    }
-    if (root.children.isEmpty()) {
-        m_structDataViewPanel->setOutforms(
-            m_structModeLeftPanel->structureGraph().outforms());
-        m_structDataViewPanel->clearVisualization();
-    } else {
-        m_structDataViewPanel->setOutforms(
-            m_structModeLeftPanel->structureGraph().outforms());
-        m_structDataViewPanel->setVisualization(root);
-    }
+    m_decodedNavigationInProgress = wasNavigating;
 }
 
 void MainWindow::onHoverLeft() {
     m_bitmapView->setExternalHoverOffset(std::nullopt);
     m_textView->setHoverAnchorOffset(std::nullopt);
     clearCurrentByteInfo();
+}
+
+quint64 MainWindow::strideAlignedOffset(quint64 offset) const {
+    const int stride =
+        m_textView != nullptr ? qMax(1, m_textView->effectiveBytesPerLine()) : 16;
+    const quint64 step = static_cast<quint64>(stride);
+    return (offset / step) * step;
+}
+
+QString MainWindow::currentPreviewFilePath() const {
+    const std::optional<int> target = activePreviewTargetIndex();
+    if (!target.has_value()) {
+        return {};
+    }
+    return filePathForTarget(target.value());
+}
+
+void MainWindow::syncCurrentFileEditingUi() {
+    const QString path = currentPreviewFilePath();
+    const bool unlocked = !path.isEmpty() && m_unlockedEditPaths.contains(path);
+    if (m_hexControlsPanel != nullptr &&
+        m_hexControlsPanel->allowEditingCheckBox() != nullptr) {
+        const QSignalBlocker blocker(m_hexControlsPanel->allowEditingCheckBox());
+        m_hexControlsPanel->allowEditingCheckBox()->setChecked(unlocked);
+    }
+    if (m_textView != nullptr) {
+        m_textView->setEditingEnabled(unlocked);
+    }
+    if (m_brecoLangPanel != nullptr) {
+        m_brecoLangPanel->setFieldEditingEnabled(unlocked);
+    }
+}
+
+void MainWindow::setCurrentFileEditingEnabled(bool enabled) {
+    const QString path = currentPreviewFilePath();
+    if (path.isEmpty()) {
+        if (m_textView != nullptr) {
+            m_textView->setEditingEnabled(false);
+        }
+        if (m_brecoLangPanel != nullptr) {
+            m_brecoLangPanel->setFieldEditingEnabled(false);
+        }
+        return;
+    }
+    if (enabled) {
+        m_unlockedEditPaths.insert(path);
+    } else {
+        m_unlockedEditPaths.remove(path);
+    }
+    if (m_textView != nullptr) {
+        m_textView->setEditingEnabled(enabled);
+    }
+    if (m_brecoLangPanel != nullptr) {
+        m_brecoLangPanel->setFieldEditingEnabled(enabled);
+    }
+}
+
+void MainWindow::showEditsTabIfNeeded() {
+    if (m_mainTabsPanel == nullptr) {
+        return;
+    }
+    m_mainTabsPanel->setEditsTabVisible(true);
+    AppSettings::setViewEditsVisible(true);
+    if (m_ui != nullptr && m_ui->actionViewEdits != nullptr) {
+        m_ui->actionViewEdits->setChecked(true);
+    }
+}
+
+void MainWindow::refreshQueuedEditOverlays() {
+    if (m_textView == nullptr) {
+        return;
+    }
+    const QString path = currentPreviewFilePath();
+    QVector<QPair<quint64, quint64>> ranges;
+    QVector<bool> matches;
+    if (!path.isEmpty()) {
+        for (const QueuedEdit& edit : m_editQueue.edits()) {
+            if (edit.filePath != path || edit.newBytes.isEmpty()) {
+                continue;
+            }
+            ranges.push_back(qMakePair(
+                edit.offset,
+                edit.offset + static_cast<quint64>(edit.newBytes.size())));
+            matches.push_back(edit.matchesOriginal());
+        }
+    }
+    m_textView->setQueuedEditRanges(ranges, matches);
+}
+
+QByteArray MainWindow::readFileBytes(const QString& filePath, quint64 offset, int length) {
+    if (filePath.isEmpty() || length <= 0) {
+        return {};
+    }
+    const auto chunk =
+        m_filePool.readChunk(filePath, offset, static_cast<quint64>(length));
+    return chunk.value_or(QByteArray());
+}
+
+void MainWindow::queueFileEdit(const QString& filePath, quint64 offset,
+                               const QByteArray& newBytes, QByteArray originalBytes) {
+    if (filePath.isEmpty() || newBytes.isEmpty()) {
+        return;
+    }
+    if (!m_unlockedEditPaths.contains(filePath)) {
+        return;
+    }
+    QByteArray original = originalBytes;
+    const QByteArray fromFile = readFileBytes(filePath, offset, newBytes.size());
+    if (fromFile.size() == newBytes.size()) {
+        original = fromFile;
+    } else if (original.size() != newBytes.size()) {
+        original = QByteArray(newBytes.size(), '\0');
+    }
+    QueuedEdit edit;
+    edit.filePath = filePath;
+    edit.offset = offset;
+    edit.originalBytes = original;
+    edit.newBytes = newBytes;
+    m_editQueue.add(std::move(edit));
+    showEditsTabIfNeeded();
+    if (m_editsPanel != nullptr) {
+        m_editsPanel->refresh();
+    }
+    refreshQueuedEditOverlays();
+}
+
+void MainWindow::onQueuedByteEditCommitted(quint64 offset, const QByteArray& newBytes) {
+    queueFileEdit(currentPreviewFilePath(), offset, newBytes);
+}
+
+void MainWindow::onEditsDeleteRequested() {
+    if (m_editsPanel == nullptr) {
+        return;
+    }
+    m_editQueue.removeIndices(m_editsPanel->selectedRows());
+    m_editsPanel->refresh();
+    refreshQueuedEditOverlays();
+}
+
+void MainWindow::appendSidecarRecord(const QString& filePath, const QueuedEdit& edit) {
+    QFile sidecar(filePath + QStringLiteral(".brecoedits"));
+    if (!sidecar.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text)) {
+        return;
+    }
+    QJsonObject record;
+    record.insert(QStringLiteral("filename"), filePath);
+    record.insert(QStringLiteral("offset"), static_cast<qint64>(edit.offset));
+    record.insert(QStringLiteral("old"), EditQueue::bytesToHex(edit.originalBytes));
+    record.insert(QStringLiteral("new"), EditQueue::bytesToHex(edit.newBytes));
+    sidecar.write(QJsonDocument(record).toJson(QJsonDocument::Compact));
+    sidecar.write("\n");
+}
+
+void MainWindow::reloadBuffersForPath(const QString& filePath) {
+    if (filePath.isEmpty()) {
+        return;
+    }
+    for (int i = 0; i < m_resultBuffers.size(); ++i) {
+        ResultBuffer& buffer = m_resultBuffers[i];
+        if (buffer.scanTargetIdx < 0 || buffer.scanTargetIdx >= m_scanTargets.size()) {
+            continue;
+        }
+        ScanTarget& target = m_scanTargets[buffer.scanTargetIdx];
+        if (target.filePath != filePath) {
+            continue;
+        }
+        const QFileInfo info(filePath);
+        if (info.exists()) {
+            target.fileSize = static_cast<quint64>(qMax<qint64>(0, info.size()));
+        }
+        const quint64 windowSize = static_cast<quint64>(qMax(0, buffer.bytes.size()));
+        if (windowSize == 0) {
+            continue;
+        }
+        const auto raw = m_windowLoader.loadRawWindow(
+            filePath, target.fileSize, buffer.fileOffset, windowSize, ShiftSettings{});
+        if (!raw.has_value()) {
+            continue;
+        }
+        buffer.bytes = raw->bytes;
+        buffer.dirty = false;
+        applyShiftToBufferIfEnabled(i);
+    }
+    updateSharedPreviewNow();
+}
+
+bool MainWindow::applyQueuedEditsToPath(const QString& filePath,
+                                        const QString& destinationPath,
+                                        bool writeSidecar, QString* error,
+                                        bool showProgress) {
+    auto fail = [&](const QString& message) {
+        if (error != nullptr) {
+            *error = message;
+        }
+        return false;
+    };
+    if (filePath.isEmpty() || destinationPath.isEmpty()) {
+        return fail(QStringLiteral("Missing file path."));
+    }
+
+    m_filePool.closePath(filePath);
+    m_filePool.closePath(destinationPath);
+
+    QVector<const QueuedEdit*> pending;
+    quint64 totalBytes = 0;
+    for (const QueuedEdit& edit : m_editQueue.edits()) {
+        if (edit.filePath != filePath || edit.newBytes.isEmpty()) {
+            continue;
+        }
+        pending.push_back(&edit);
+        totalBytes += static_cast<quint64>(edit.newBytes.size());
+    }
+    if (pending.isEmpty()) {
+        return true;
+    }
+
+    QFile file(destinationPath);
+    if (!file.open(QIODevice::ReadWrite)) {
+        return fail(QStringLiteral("Could not open %1 for writing.").arg(destinationPath));
+    }
+
+    std::unique_ptr<QDialog> progressDialog;
+    QProgressBar* progressBar = nullptr;
+    quint64 written = 0;
+    const bool useProgress = showProgress && totalBytes >= (1024ULL * 1024ULL);
+    if (useProgress) {
+        progressDialog = std::make_unique<QDialog>(this);
+        progressDialog->setWindowTitle(QStringLiteral("Applying edits"));
+        progressDialog->setWindowModality(Qt::WindowModal);
+        progressDialog->setMinimumWidth(420);
+        auto* layout = new QVBoxLayout(progressDialog.get());
+        layout->addWidget(new QLabel(QStringLiteral("Writing queued edits..."),
+                                     progressDialog.get()));
+        progressBar = new QProgressBar(progressDialog.get());
+        progressBar->setRange(0, 1000);
+        layout->addWidget(progressBar);
+        progressDialog->show();
+        QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
+    }
+
+    for (const QueuedEdit* edit : pending) {
+        if (!file.seek(static_cast<qint64>(edit->offset))) {
+            return fail(QStringLiteral("Could not seek to offset %1 in %2.")
+                            .arg(edit->offset)
+                            .arg(destinationPath));
+        }
+        const qint64 wrote = file.write(edit->newBytes);
+        if (wrote != static_cast<qint64>(edit->newBytes.size())) {
+            return fail(QStringLiteral("Could not write queued bytes to %1.").arg(destinationPath));
+        }
+        if (writeSidecar) {
+            appendSidecarRecord(filePath, *edit);
+        }
+        written += static_cast<quint64>(edit->newBytes.size());
+        if (progressBar != nullptr && totalBytes > 0) {
+            progressBar->setValue(static_cast<int>(
+                (static_cast<long double>(written) * 1000.0L) /
+                static_cast<long double>(totalBytes)));
+            QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
+        }
+    }
+    file.flush();
+    return true;
+}
+
+void MainWindow::onApplyQueuedEdits() {
+    if (m_editQueue.isEmpty()) {
+        return;
+    }
+    const QVector<QString> files = m_editQueue.implicatedFiles();
+    for (const QString& path : files) {
+        QString error;
+        if (!applyQueuedEditsToPath(path, path, true, &error, true)) {
+            QMessageBox::warning(this, QStringLiteral("Apply edits"),
+                                 error.isEmpty()
+                                     ? QStringLiteral("Could not apply edits to %1.").arg(path)
+                                     : error);
+            return;
+        }
+        for (int i = 0; i < m_editQueue.size(); ++i) {
+            QueuedEdit& edit = m_editQueue.at(i);
+            if (edit.filePath != path) {
+                continue;
+            }
+            const QByteArray current =
+                readFileBytes(path, edit.offset, edit.newBytes.size());
+            if (current.size() == edit.newBytes.size()) {
+                edit.originalBytes = current;
+            }
+        }
+        reloadBuffersForPath(path);
+    }
+    if (m_editsPanel != nullptr) {
+        m_editsPanel->refresh();
+    }
+    refreshQueuedEditOverlays();
+}
+
+namespace {
+
+bool pathsReferToSameFile(const QString& left, const QString& right) {
+    const QFileInfo leftInfo(left);
+    const QFileInfo rightInfo(right);
+    if (leftInfo.exists() && rightInfo.exists()) {
+        return leftInfo.canonicalFilePath() == rightInfo.canonicalFilePath();
+    }
+    return leftInfo.absoluteFilePath() == rightInfo.absoluteFilePath();
+}
+
+}  // namespace
+
+void MainWindow::onSaveQueuedEditsAs() {
+    if (m_editQueue.isEmpty()) {
+        return;
+    }
+    const QVector<QString> files = m_editQueue.implicatedFiles();
+    QVector<QPair<QString, QString>> mapping;
+    mapping.reserve(files.size());
+    for (const QString& source : files) {
+        const QString destination = promptForPath(
+            this, PathSelectActivity::SaveQueuedEditsAs,
+            PathSelectKind::SaveFile, QStringLiteral("Save as new file"), {},
+            suggestedQueuedEditsSaveAsPath(source));
+        if (destination.isEmpty()) {
+            return;
+        }
+        if (pathsReferToSameFile(source, destination)) {
+            QMessageBox::warning(
+                this, QStringLiteral("Save as"),
+                QStringLiteral("Choose a different path than the original file."));
+            return;
+        }
+        mapping.push_back(qMakePair(source, destination));
+    }
+
+    for (const auto& pair : mapping) {
+        const QString& source = pair.first;
+        const QString& destination = pair.second;
+        m_filePool.closePath(source);
+        if (QFile::exists(destination) && !QFile::remove(destination)) {
+            QMessageBox::warning(
+                this, QStringLiteral("Save as"),
+                QStringLiteral("Could not replace %1.").arg(destination));
+            return;
+        }
+        if (!QFile::copy(source, destination)) {
+            QMessageBox::warning(
+                this, QStringLiteral("Save as"),
+                QStringLiteral("Could not copy %1 to %2.").arg(source, destination));
+            return;
+        }
+        QString error;
+        if (!applyQueuedEditsToPath(source, destination, false, &error, true)) {
+            QMessageBox::warning(this, QStringLiteral("Save as"),
+                                 error.isEmpty()
+                                     ? QStringLiteral("Could not write edits to %1.")
+                                           .arg(destination)
+                                     : error);
+            return;
+        }
+        m_editQueue.remapFilePath(source, destination);
+        for (int i = 0; i < m_editQueue.size(); ++i) {
+            QueuedEdit& edit = m_editQueue.at(i);
+            if (edit.filePath != destination) {
+                continue;
+            }
+            const QByteArray current =
+                readFileBytes(destination, edit.offset, edit.newBytes.size());
+            if (current.size() == edit.newBytes.size()) {
+                edit.originalBytes = current;
+            }
+        }
+    }
+    if (m_editsPanel != nullptr) {
+        m_editsPanel->refresh();
+    }
+    refreshQueuedEditOverlays();
 }
 
 }  // namespace breco

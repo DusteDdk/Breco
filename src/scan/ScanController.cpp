@@ -40,14 +40,12 @@ void ScanController::startScan(const QVector<ScanTarget>& targets, const QByteAr
                                quint32 blockSize, int workerCount, TextInterpretationMode mode,
                                bool ignoreCase, bool prefillOnMerge,
                                std::chrono::steady_clock::time_point scanButtonPressTime,
-                               std::shared_ptr<const StructureGraph> structureGraph,
-                               QString structureEntry,
-                               std::shared_ptr<const QHash<QString, VisualizationSource>> externalSources) {
+                               std::shared_ptr<const lang::ProbeScanPlan> probePlan) {
     if (m_running) {
         emit scanError(QStringLiteral("Scan already running"));
         return;
     }
-    if (searchTerm.isEmpty() && structureGraph == nullptr) {
+    if (searchTerm.isEmpty() && probePlan == nullptr) {
         emit scanError(QStringLiteral("Search term must not be empty"));
         return;
     }
@@ -70,13 +68,21 @@ void ScanController::startScan(const QVector<ScanTarget>& targets, const QByteAr
     }
 
     m_searchTerm = searchTerm;
-    m_structureGraph = std::move(structureGraph);
-    m_structureEntry = std::move(structureEntry);
-    m_externalSources = std::move(externalSources);
+    m_probePlan = std::move(probePlan);
     m_matchLength = 1;
-    if (m_structureGraph != nullptr) {
-        m_matchLength = static_cast<quint32>(qMax(
-            1, m_structureGraph->staticStructLayoutSizeBytes(m_structureEntry).value_or(1)));
+    if (m_probePlan != nullptr && m_probePlan->program != nullptr) {
+        for (const lang::EntryDesc& entry : m_probePlan->program->entries) {
+            if (m_probePlan->program->symbol(entry.name) != m_probePlan->entryName ||
+                entry.extent >=
+                    static_cast<quint32>(m_probePlan->program->extents.size())) {
+                continue;
+            }
+            const quint64 minimum =
+                qMax<quint64>(1, m_probePlan->program->extents.at(entry.extent).minBytes);
+            m_matchLength = static_cast<quint32>(qMin<quint64>(
+                minimum, std::numeric_limits<quint32>::max()));
+            break;
+        }
     }
     m_blockSize = qMax<quint32>(1, blockSize);
     m_textMode = mode;
@@ -152,9 +158,7 @@ void ScanController::startScan(const QVector<ScanTarget>& targets, const QByteAr
         m_workers.push_back(std::make_unique<ScanWorker>(i, m_searchTerm, m_textMode, m_ignoreCase,
                                                          &m_totalScanned,
                                                          m_scanStartTime,
-                                                         onJobComplete, m_structureGraph,
-                                                         m_structureEntry,
-                                                         m_externalSources));
+                                                         onJobComplete, m_probePlan));
     }
     for (const auto& worker : m_workers) {
         worker->start();
@@ -198,8 +202,8 @@ const QVector<ResultBuffer>& ScanController::resultBuffers() const { return m_re
 const QVector<int>& ScanController::matchBufferIndices() const { return m_matchBufferIndices; }
 
 quint32 ScanController::searchTermLength() const {
-    return m_structureGraph != nullptr ? m_matchLength
-                                       : static_cast<quint32>(qMax(1, m_searchTerm.size()));
+    return m_probePlan != nullptr ? m_matchLength
+                                  : static_cast<quint32>(qMax(1, m_searchTerm.size()));
 }
 
 void ScanController::onTick() {
@@ -310,13 +314,12 @@ void ScanController::joinReaderAndWorkers() {
 }
 
 void ScanController::readerLoop() {
-    const quint32 overlap = m_structureGraph != nullptr
-                                ? (m_structureGraph->staticStructLayoutSizeBytes(m_structureEntry)
-                                           .has_value()
-                                       ? m_matchLength - 1
-                                       : 64U * 1024U)
-                                : static_cast<quint32>(m_searchTerm.size() > 0
-                                                          ? m_searchTerm.size() - 1 : 0);
+    const quint32 overlap =
+        m_probePlan != nullptr
+            ? 0
+            : static_cast<quint32>(m_searchTerm.size() > 0
+                                       ? m_searchTerm.size() - 1
+                                       : 0);
     const int maxPendingBuffers = qMax(1, m_workerCount * 2);
 
     for (int targetIdx = 0; targetIdx < m_targets.size(); ++targetIdx) {
@@ -351,27 +354,31 @@ void ScanController::readerLoop() {
 
             const quint64 chunkId = m_chunkCounter.fetch_add(1, std::memory_order_acq_rel) + 1;
 
-            auto rawWindow = m_windowLoader->loadRawWindow(
-                target.filePath, target.fileSize, fileOffset, outputSize, ShiftSettings{});
-            if (!rawWindow.has_value()) {
-                std::cerr << "[scan][warn] read failed: targetIdx=" << targetIdx
-                          << " offset=" << fileOffset
-                          << " outputSize=" << outputSize << std::endl;
-                break;
-            }
-            m_totalRawBytesRead.fetch_add(static_cast<quint64>(rawWindow->bytes.size()),
-                                         std::memory_order_relaxed);
-            if (m_stopRequested.load(std::memory_order_acquire)) {
-                break;
-            }
-
             auto buffer = std::make_shared<ReadBuffer>();
             buffer->scanTargetIdx = targetIdx;
+            buffer->filePath = target.filePath;
             buffer->fileSize = target.fileSize;
             buffer->outputStart = fileOffset;
             buffer->outputSize = outputSize;
-            buffer->rawStart = rawWindow->plan.readStart;
-            buffer->rawBytes = std::move(rawWindow->bytes);
+            if (m_probePlan == nullptr) {
+                auto rawWindow = m_windowLoader->loadRawWindow(
+                    target.filePath, target.fileSize, fileOffset, outputSize,
+                    ShiftSettings{});
+                if (!rawWindow.has_value()) {
+                    std::cerr << "[scan][warn] read failed: targetIdx="
+                              << targetIdx << " offset=" << fileOffset
+                              << " outputSize=" << outputSize << std::endl;
+                    break;
+                }
+                m_totalRawBytesRead.fetch_add(
+                    static_cast<quint64>(rawWindow->bytes.size()),
+                    std::memory_order_relaxed);
+                buffer->rawStart = rawWindow->plan.readStart;
+                buffer->rawBytes = std::move(rawWindow->bytes);
+            }
+            if (m_stopRequested.load(std::memory_order_acquire)) {
+                break;
+            }
             const quint64 bufferToken = m_nextBufferToken.fetch_add(1, std::memory_order_acq_rel);
 
             const int jobTargetCount = qMax(1, m_workerCount * 2);

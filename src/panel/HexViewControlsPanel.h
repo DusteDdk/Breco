@@ -41,6 +41,7 @@ public:
     QCheckBox* wrapCheckBox() const;
     QCheckBox* breatheCheckBox() const;
     QCheckBox* collapseCheckBox() const;
+    QCheckBox* allowEditingCheckBox() const;
     QSpinBox* shiftBitsSpinBox() const;
 
 private:
