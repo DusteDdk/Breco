@@ -1,0 +1,16 @@
+language breco 0.1
+
+inputs {
+    input records "Record stream" { default }
+    input index "Offset index" { }
+}
+
+record IndexItem { record_offset: u32le record_length: u16le }
+record Payload { kind: u8 preserve remaining as bytes }
+
+entry IndexedRecord from records {
+    location: IndexItem from index at 0
+    payload: Payload from records at location.record_offset
+        within bytes(location.record_length)
+}
+default entry IndexedRecord

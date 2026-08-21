@@ -1,0 +1,23 @@
+language breco 0.1
+
+inputs { input data "Recoverable frame stream" { default } }
+
+record Frame {
+    identify {
+        marker: u16be
+        length: u16be
+        match marker == 0xA55A && length <= remaining else "not a frame"
+    }
+    commit
+    payload: region bytes(length) { preserve remaining as bytes }
+}
+
+entry RecoveredFrames from data {
+    frames: recover Frame {
+        sync one_of { bytes [0xA5, 0x5A] }
+        step 1 byte
+        max_probe 1_MiB
+        gaps as Noise
+    }
+}
+default entry RecoveredFrames

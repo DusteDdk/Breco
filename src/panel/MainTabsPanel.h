@@ -31,10 +31,10 @@ public:
     ScanControlsPanel* scanControlsPanel() const;
     QWidget* resultsPanelHost() const;
     QWidget* rawDataHost() const;
-    QWidget* structDataHost() const;
+    QWidget* brecoLangHost() const;
     QWidget* imageDataHost() const;
     QWidget* rawDataTab() const;
-    QWidget* structDataTab() const;
+    QWidget* brecoLangTab() const;
     QWidget* imageDataTab() const;
     QFrame* editStack() const;
     void activateScanTab();
@@ -55,6 +55,8 @@ private:
     };
     QHash<QWidget*, DetachedTab> m_detachedTabs;
     QHash<QWidget*, int> m_pageOrder;
+    QWidget* m_brecoLangTab = nullptr;
+    QWidget* m_brecoLangHost = nullptr;
     void reattachTab(QWidget* page);
 };
 

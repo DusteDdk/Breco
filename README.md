@@ -146,32 +146,29 @@ Hovering text or bitmap data updates:
 
 ## Data tabs
 
-`Raw`, `Struct`, and `Image` are top-level tabs alongside `Scan`. Right-click a
+`Raw`, `BrecoLang`, and `Image` are top-level tabs alongside `Scan`. Right-click a
 tab and choose `Detach view`, or double-click it, to move that tab into its own
 window. Closing the detached window returns the tab to its original position.
-The Struct tab's `Structure controls` and `Decoded structure` panes can also be
-floated independently.
 
-## Struct tab
+## BrecoLang tab
 
-Struct mode parses BrecoScript declarations and previews a selected entry at
-the active file offset. Its tree shows `Name`, `Type`, `Value`, `Bytes`, and
-`Valid`; the name column sizes itself to its content. Passing `/cond` rows are
-light green, while failed `/cond` and truncated rows are light red. Odd rows
-use darker variants of those colors; unqualified complete rows retain the
-normal alternating backgrounds. `Valid` reports `true`, `false`, the
-missing-byte count, or both when applicable. Condition diagnostics appear
-only on the failing member; containing struct rows keep their normal value.
+The BrecoLang tab compiles `.breco` schemas and decodes a selected entry at a
+decimal or hexadecimal byte offset. Bind every named input used by the entry;
+the currently selected source is suggested for the default input. The tree
+shows `Name`, `Type`, `Value`, `Input`, `Offset`, and `Length` without copying
+source byte ranges into every node.
 
 Clicking a decoded tree item centers the hex view on that item's first byte
-in natural file order and highlights its byte range. Clicking a row in the
-saved `Views` table centers on that view's starting offset and highlights the
-decoded view range.
+and highlights its byte range. The live schema editor recompiles after a short
+debounce and re-decodes a successful live view. `Pin View` keeps independent
+decoded views in closable tabs; only the first tree level expands automatically.
 
-Loading a declaration file remembers its path. On the next launch Breco
-reloads that file when it still exists; when both the declaration and the
-remembered single-file source are valid, it creates the struct preview
-automatically.
+The toolbar exports streaming JSON, lossless source-layout binary data, and
+declared text or binary outforms. `Scan for Entry` runs the selected entry in
+probe mode at candidate offsets through the normal asynchronous scan pipeline.
+The schema library loads `.breco` files only. Older schema files remain on disk
+and are listed in a migration notice; the application does not convert or
+delete them. See [BrecoLang 0.1](docs/BrecoLang.md).
 
 ## Image tab
 
@@ -220,8 +217,8 @@ Status bar is used for lifecycle and cache messages, for example:
 - scan block size value and unit
 - main splitter sizes
 - text gutter format and gutter width
-- Raw/Struct endian state, Raw text/bitmap options, and Image scan options including Jobs
-- Struct declaration text, last loaded declaration file, entry, and repeat count
+- Raw endian state, Raw text/bitmap options, and Image scan options including Jobs
+- last loaded BrecoLang schema and schema-library directory
 
 ## Current limits and caveats
 

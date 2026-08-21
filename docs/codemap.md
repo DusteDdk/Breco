@@ -1,181 +1,88 @@
-# Core Runtime Codemap (Current Implementation)
+# Core Runtime Codemap
 
-This map documents the runtime structure as implemented in the current codebase.
+## Entrypoints
 
-## Entrypoints and Executables
+- `src/main.cpp` starts the Qt desktop application and `MainWindow`.
+- `src/cli/brecodump.cpp` is the BrecoLang-only command-line decoder.
+- `CMakeLists.txt` defines compiler/runtime libraries, application targets,
+  tests, and benchmarks.
 
-- App entrypoint: `src/main.cpp`
-  - `main()` creates `BrecoApplication`, then `breco::MainWindow`, then enters `app.exec()`.
-  - `BrecoApplication::notify()` wraps Qt event dispatch and emits slow/in-progress trace logs when selection tracing is enabled.
-- Test and benchmark executables are built separately in `CMakeLists.txt` and are not part of runtime app flow:
-  - `breco_unit_tests` from `tests/unit_tests.cpp`
-  - `breco_text_analysis_benchmark` from `tests/text_analysis_benchmark.cpp`
-  - `breco_scan_primitives_benchmark` from `tests/scan_primitives_benchmark.cpp`
+## BrecoLang
 
-### Startup Path Diagram
+### Compiler
 
-```mermaid
-flowchart TD
-mainEntry["main.cpp"] --> brecoApp["BrecoApplication"]
-mainEntry --> mainWindow["MainWindow"]
-mainWindow --> appLoop["Qt event loop (app.exec)"]
-```
+- `src/brecolang/compiler/Lexer.*` tokenizes source and retains source spans.
+- `src/brecolang/compiler/Parser.*` produces a complete syntax tree with
+  recoverable, batched diagnostics.
+- `src/brecolang/compiler/Compiler.*` resolves names and types into immutable,
+  contiguous `BrecoProgram` tables and calculates extent/effect summaries.
+- `src/brecolang/ir/BrecoProgram.h` defines the resolved program layout.
 
-## Top-Level Runtime Modules
+### Runtime and rendering
 
-### `src/app`
+- `src/brecolang/runtime/ByteSource.*` supplies borrowed-window, paged-file,
+  sequential, and spooling sources with checked ranges.
+- `src/brecolang/runtime/Interpreter.*` executes tree, probe, and streaming
+  modes with transactional alternation, recovery, cursor regions, limits,
+  multi-input reads, and source-span storage layouts.
+- `src/brecolang/runtime/DecodedData.*` stores flat decoded trees and values in
+  contiguous arrays.
+- `src/brecolang/runtime/JsonWriter.*` writes JSON incrementally to a
+  `QIODevice`.
+- `src/brecolang/render/RenderStore.*` exposes decoded values, raw source spans,
+  and metadata including the declared input role.
+- `src/brecolang/render/OutformRenderer.*` executes text and binary outforms.
 
-- `MainWindow` is the orchestration hub for UI, scan lifecycle, result model updates, preview synchronization, and status output.
-- Owns/coordinates:
-  - `ResultModel` (`src/model`)
-  - `OpenFilePool` + `ShiftedWindowLoader` (`src/io`)
-  - `ScanController` (`src/scan`)
-  - View panels and widgets (`src/panel`, `src/view`)
-  - `AppSettings` interactions (`src/settings`)
+### Desktop surface
 
-### `src/scan`
+- `src/brecolang/gui/BrecoLangPanel.*` owns the live editor, schema/input/entry
+  controls, independent pinned views, JSON/binary/outform actions, source
+  navigation, and scan requests.
+- `src/brecolang/gui/DecodedTreeModel.*` adapts the flat decoded tree to Qt.
+- `src/brecolang/gui/BrecoLangLibrary.*` indexes `.breco` schemas and reports
+  older files requiring manual migration without modifying them.
 
-- `ScanController` owns scan lifecycle and worker topology.
-  - Starts/stops scan runs, launches reader thread and `ScanWorker` pool.
-  - Partitions buffers into jobs with overlap for boundary-safe matching.
-  - Merges worker-local matches, then builds `ResultBuffer` clusters or placeholders.
-- `ScanWorker` executes pattern matching over assigned `ScanJob` segments.
-- `MatchUtils` provides byte matching helpers.
-- `ShiftTransform` provides shifted output mapping and transform logic.
-- `ScanTypes` defines shared scan job/buffer types.
-- `SpscQueue` exists as a primitive utility (used by tests; not a central `ScanController` runtime queue).
+## Application orchestration
 
-### `src/io`
+- `src/app/MainWindow.*` coordinates sources, scans, results, raw previews,
+  image scanning, BrecoLang navigation, and persisted settings.
+- `src/panel/MainTabsPanel.*` owns `Scan`, `Raw`, `BrecoLang`, and `Image` tabs,
+  including detach/reattach behavior.
+- `src/settings/AppSettings.*` persists general UI state plus the last schema
+  and schema-library directory.
 
-- `FileEnumerator` converts user-selected file/dir input into candidate file lists.
-- `OpenFilePool` provides thread-local file handle reuse and bounded per-thread LRU.
-- `ShiftedWindowLoader` uses `OpenFilePool` and `ShiftTransform` to load transformed windows.
+## Scanning
 
-### `src/image`
+- `src/scan/ScanController.*` owns scan lifecycle, reader coordination, worker
+  scheduling, progress, merging, and result buffers.
+- `src/scan/ScanWorker.*` performs either text matching or BrecoLang probe-mode
+  decoding. Each schema-scan worker owns paged input sources; probe mode does
+  not construct decoded nodes.
+- `src/scan/MatchUtils.*` implements byte/text matching.
+- `src/scan/ShiftTransform.*` maps shifted logical byte streams.
+- `src/scan/ScanTypes.h` defines shared scan jobs and buffers.
 
-- `EmbeddedImageScanner` finds plausible embedded image starts, validates cheap header fields, and decodes bounded candidates through `QImageReader`.
-- `EmbeddedImageScanController` runs asynchronous Image-tab scans, streams progress/live results, and keeps source I/O on one coordinator while worker jobs scan shared immutable chunks.
+## Other runtime modules
 
-### `src/model`
+- `src/io/` contains file enumeration, protected opening, pooled reads, and
+  shifted-window loading.
+- `src/image/EmbeddedImageScanner.*` validates and decodes embedded image
+  candidates asynchronously.
+- `src/model/ResultModel.*` presents scan matches.
+- `src/view/` contains text and bitmap byte views.
+- `src/panel/` contains the remaining raw, scan, result, image, byte-info, and
+  tab wrappers.
+- `src/text/` contains text sequence classification and display rules.
 
-- `ResultModel` is a `QAbstractTableModel` wrapper over `QVector<MatchRecord>`.
-- Current columns are exactly:
-  - `Thread`
-  - `Filename`
-  - `Offset` (approximate humanized units)
-  - `Search time` (milliseconds)
+## Tests
 
-### `src/struct`
-
-- `StructDeclarationParser` and `StructureGraph` parse and retain BrecoScript declarations.
-- `StructVisualizer` decodes source bytes into `VisualizedNode` trees.
-- `StructVisualizedTreeModel` presents the visible `Name`, `Type`, `Value`, `Bytes`, and `Valid` columns and supplies condition/truncation row backgrounds.
-
-### `src/view`
-
-- `TextViewWidget` renders byte/text data and emits hover/center/selection/backing-scroll signals.
-- `BitmapViewWidget` renders bitmap modes and emits hover/byte-click signals.
-
-### `src/panel`
-
-- UI panel wrappers expose controls/widgets used by `MainWindow`:
-  - `ScanControlsPanel`
-  - `ResultsTablePanel`
-  - `TextViewPanel`
-  - `DataViewShellPanel`
-  - `DataViewByteAndBitmapPanel`
-  - `DataViewStructuredPanel`
-  - `StructModeLeftPanel`
-  - `StructDataViewPanel`
-  - `DataViewImagePanel`
-  - `CurrentByteInfoPanel`
-  - `BitmapViewPanel`
-
-### `src/text`
-
-- `TextSequenceAnalyzer` and `StringModeRules` implement text classification and sequence heuristics used by text-oriented rendering behavior.
-
-### `src/settings`
-
-- `AppSettings` is a static wrapper around `QSettings` for persisted UI preferences and dialog paths, including the last loaded struct declaration file used by startup preview restoration.
-
-### `src/debug`
-
-- `SelectionTrace` controls trace logging used by `MainWindow` and `BrecoApplication` for event/selection diagnostics.
-
-## Ownership and Dataflow Graph
-
-```mermaid
-flowchart TD
-mainEntry[main.cpp] --> brecoApp[BrecoApplication]
-mainEntry --> mainWindow[MainWindow]
-mainWindow --> scanController[ScanController]
-mainWindow --> resultModel[ResultModel]
-mainWindow --> filePool[OpenFilePool]
-mainWindow --> windowLoader[ShiftedWindowLoader]
-mainWindow --> imageScanner[EmbeddedImageScanController]
-mainWindow --> textWidget[TextViewWidget]
-mainWindow --> bitmapWidget[BitmapViewWidget]
-scanController --> readerLoop[readerLoop Thread]
-scanController --> workers[ScanWorker N]
-imageScanner --> imageCoordinator[Image coordinator thread]
-imageCoordinator --> imageJobs[Shared-chunk image jobs]
-imageCoordinator --> imageDecode[Serial QImageReader decode]
-readerLoop --> windowLoader
-windowLoader --> shiftTransform[ShiftTransform]
-workers --> matchUtils[MatchUtils]
-workers --> mergeResults[buildFinalResults]
-mergeResults --> resultBuffers[resultBuffers and matchBufferIndices]
-resultBuffers --> mainWindow
-mainWindow --> textWidget
-mainWindow --> bitmapWidget
-mainWindow --> appSettings[AppSettings]
-```
-
-## Critical Runtime Symbols by Concern
-
-- Startup/event tracing:
-  - `main()`, `BrecoApplication::notify()`, `BrecoApplication::startWatchdogIfNeeded()`
-- Scan lifecycle:
-  - `MainWindow::onStartScan()`, `MainWindow::onStopScan()`
-  - `ScanController::startScan()`, `ScanController::readerLoop()`, `ScanController::onTick()`
-- Result merge/storage:
-  - `ScanController::buildFinalResults()`, `ScanController::buildResultBuffers()`
-- UI result/preview:
-  - `MainWindow::onResultsBatchReady()`, `MainWindow::onResultActivated()`
-  - `MainWindow::updateSharedPreviewNow()`
-- Image-tab scan:
-  - `MainWindow::startImageScan()`, `MainWindow::finishImageScan()`
-  - `EmbeddedImageScanController::startScan()`, `scanEmbeddedImages()`
-- Cache/reload:
-  - `MainWindow::enforceBufferCacheBudget()`
-  - `MainWindow::evictOneBufferLargestFirstLeastUsed()`
-  - `MainWindow::ensureRowBufferLoaded()`
-- Persistence:
-  - `AppSettings::*`, called from `MainWindow` constructor and control-toggle handlers
-
-## UI Resource Mapping
-
-Qt UI resources are listed in `CMakeLists.txt` and materialized under `ui/`:
-
-- `ui/MainWindow.ui`
-- `ui/ScanControlsPanel.ui`
-- `ui/ResultsTablePanel.ui`
-- `ui/TextViewPanel.ui`
-- `ui/CurrentByteInfo.ui`
-- `ui/BitmapViewPanel.ui`
-- `ui/DataViewShell.ui`
-- `ui/DataViewByteAndBitmap.ui`
-- `ui/DataViewStructured.ui`
-- `ui/DataViewImage.ui`
-
-## UI Designer Naming Paradigm
-
-For Qt Designer `.ui` files, widget names indicate whether code should depend on them:
-
-- Designer-generated names (for example `label_3`, `label_5`) indicate widgets with no operational consequence.
-  - These can be replaced or regenerated without requiring source-code updates.
-  - Keep these generated names unchanged unless the widget later needs programmatic interaction.
-- Meaningful names begin with a type prefix and semantic identifier (for example `lblAsciiValue`).
-  - These names indicate widgets intended for code interaction (for example setting text/value, toggling visibility, wiring behavior).
-  - Treat these names as part of the UI-to-code contract.
+- `tests/brecolang_compiler_tests.cpp` covers the full grammar, recovery,
+  resolution, extent analysis, and every shipped `.breco` example.
+- `tests/brecolang_runtime_tests.cpp` covers tree/probe/streaming execution,
+  transactions, recovery, limits, byte sources, render metadata, and outforms.
+- `tests/brecodump_cli_tests.cpp` covers the sole CLI interface, stdin,
+  streaming JSON, binary/text outforms, diagnostics, and atomic output.
+- `tests/mainwindow_integration_tests.cpp` covers the desktop pipeline,
+  multi-view/export behavior, schema scanning, library migration notice, and
+  the raw/image workflows.
+- `tests/unit_tests.cpp` covers non-language runtime utilities.

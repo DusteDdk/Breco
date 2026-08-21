@@ -47,19 +47,12 @@ constexpr const char* kDataViewImageMaxResultsKey = "ui/dataViewImageMaxResults"
 constexpr const char* kDataViewImageJobsKey = "ui/dataViewImageJobs";
 constexpr const char* kDataViewByteAndBitmapSplitterSizesKey =
     "ui/dataViewByteAndBitmapSplitterSizes";
-constexpr const char* kDataViewStructuredSplitterSizesKey =
-    "ui/dataViewStructuredSplitterSizes";
 constexpr const char* kViewScanLogVisibleKey = "ui/viewScanLogVisible";
 constexpr const char* kViewEditsVisibleKey = "ui/viewEditsVisible";
-constexpr const char* kLastStructDefinitionFilePathKey =
-    "ui/lastStructDefinitionFilePath";
-constexpr const char* kStructureLibraryDirectoryKey = "ui/structureLibraryDirectory";
-constexpr const char* kStructDeclarationTextKey = "ui/structDeclarationText";
-constexpr const char* kStructEntryNameKey = "ui/structEntryName";
-constexpr const char* kStructEntryCountKey = "ui/structEntryCount";
-constexpr const char* kStructPreviewEnabledKey = "ui/structPreviewEnabled";
-constexpr const char* kStructViewsVisibleKey = "ui/structViewsVisible";
-constexpr const char* kStructLanguageVisibleKey = "ui/structLanguageVisible";
+constexpr const char* kLastBrecoLangSchemaPathKey =
+    "ui/lastBrecoLangSchemaPath";
+constexpr const char* kBrecoLangLibraryDirectoryKey =
+    "ui/brecoLangLibraryDirectory";
 
 QList<int> readIntList(const char* key) {
     QSettings settings(kOrg, kApp);
@@ -119,12 +112,6 @@ QString AppSettings::lastBrowseDialogDirectory() {
         return fromDirPath;
     }
     return QDir::homePath();
-}
-
-QString AppSettings::lastStructDefinitionDialogDirectory() {
-    const QString path = lastStructDefinitionFilePath();
-    const QString directory = directoryFromPath(path);
-    return directory.isEmpty() ? QDir::homePath() : directory;
 }
 
 QString AppSettings::rememberedSingleFilePath() {
@@ -330,10 +317,6 @@ QList<int> AppSettings::dataViewByteAndBitmapSplitterSizes() {
     return readIntList(kDataViewByteAndBitmapSplitterSizesKey);
 }
 
-QList<int> AppSettings::dataViewStructuredSplitterSizes() {
-    return readIntList(kDataViewStructuredSplitterSizesKey);
-}
-
 bool AppSettings::viewScanLogVisible() {
     QSettings settings(kOrg, kApp);
     return settings.value(kViewScanLogVisibleKey, false).toBool();
@@ -344,44 +327,14 @@ bool AppSettings::viewEditsVisible() {
     return settings.value(kViewEditsVisibleKey, false).toBool();
 }
 
-QString AppSettings::lastStructDefinitionFilePath() {
+QString AppSettings::lastBrecoLangSchemaPath() {
     QSettings settings(kOrg, kApp);
-    return settings.value(kLastStructDefinitionFilePathKey, QString()).toString();
+    return settings.value(kLastBrecoLangSchemaPathKey, QString()).toString();
 }
 
-QString AppSettings::structureLibraryDirectory() {
+QString AppSettings::brecoLangLibraryDirectory() {
     QSettings settings(kOrg, kApp);
-    return settings.value(kStructureLibraryDirectoryKey, QString()).toString();
-}
-
-QString AppSettings::structDeclarationText() {
-    QSettings settings(kOrg, kApp);
-    return settings.value(kStructDeclarationTextKey, QString()).toString();
-}
-
-QString AppSettings::structEntryName() {
-    QSettings settings(kOrg, kApp);
-    return settings.value(kStructEntryNameKey, QString()).toString();
-}
-
-int AppSettings::structEntryCount() {
-    QSettings settings(kOrg, kApp);
-    return settings.value(kStructEntryCountKey, 1).toInt();
-}
-
-bool AppSettings::structPreviewEnabled() {
-    QSettings settings(kOrg, kApp);
-    return settings.value(kStructPreviewEnabledKey, true).toBool();
-}
-
-bool AppSettings::structViewsVisible() {
-    QSettings settings(kOrg, kApp);
-    return settings.value(kStructViewsVisibleKey, false).toBool();
-}
-
-bool AppSettings::structLanguageVisible() {
-    QSettings settings(kOrg, kApp);
-    return settings.value(kStructLanguageVisibleKey, false).toBool();
+    return settings.value(kBrecoLangLibraryDirectoryKey, QString()).toString();
 }
 
 void AppSettings::setTextByteModeEnabled(bool enabled) {
@@ -531,10 +484,6 @@ void AppSettings::setDataViewByteAndBitmapSplitterSizes(const QList<int>& sizes)
     writeIntList(kDataViewByteAndBitmapSplitterSizesKey, sizes);
 }
 
-void AppSettings::setDataViewStructuredSplitterSizes(const QList<int>& sizes) {
-    writeIntList(kDataViewStructuredSplitterSizesKey, sizes);
-}
-
 void AppSettings::setViewScanLogVisible(bool visible) {
     QSettings settings(kOrg, kApp);
     settings.setValue(kViewScanLogVisibleKey, visible);
@@ -545,44 +494,14 @@ void AppSettings::setViewEditsVisible(bool visible) {
     settings.setValue(kViewEditsVisibleKey, visible);
 }
 
-void AppSettings::setLastStructDefinitionFilePath(const QString& path) {
+void AppSettings::setLastBrecoLangSchemaPath(const QString& path) {
     QSettings settings(kOrg, kApp);
-    settings.setValue(kLastStructDefinitionFilePathKey, path);
+    settings.setValue(kLastBrecoLangSchemaPathKey, path);
 }
 
-void AppSettings::setStructureLibraryDirectory(const QString& path) {
+void AppSettings::setBrecoLangLibraryDirectory(const QString& path) {
     QSettings settings(kOrg, kApp);
-    settings.setValue(kStructureLibraryDirectoryKey, path);
-}
-
-void AppSettings::setStructDeclarationText(const QString& text) {
-    QSettings settings(kOrg, kApp);
-    settings.setValue(kStructDeclarationTextKey, text);
-}
-
-void AppSettings::setStructEntryName(const QString& name) {
-    QSettings settings(kOrg, kApp);
-    settings.setValue(kStructEntryNameKey, name);
-}
-
-void AppSettings::setStructEntryCount(int count) {
-    QSettings settings(kOrg, kApp);
-    settings.setValue(kStructEntryCountKey, count);
-}
-
-void AppSettings::setStructPreviewEnabled(bool enabled) {
-    QSettings settings(kOrg, kApp);
-    settings.setValue(kStructPreviewEnabledKey, enabled);
-}
-
-void AppSettings::setStructViewsVisible(bool visible) {
-    QSettings settings(kOrg, kApp);
-    settings.setValue(kStructViewsVisibleKey, visible);
-}
-
-void AppSettings::setStructLanguageVisible(bool visible) {
-    QSettings settings(kOrg, kApp);
-    settings.setValue(kStructLanguageVisibleKey, visible);
+    settings.setValue(kBrecoLangLibraryDirectoryKey, path);
 }
 
 }  // namespace breco

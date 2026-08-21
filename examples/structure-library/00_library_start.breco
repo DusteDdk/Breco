@@ -1,0 +1,15 @@
+language breco 0.1
+
+inputs { input data "Example packet" { default } }
+
+record Packet {
+    identify { magic: u16be match magic == 0xB10C else "not a packet" }
+    commit
+    version: u8
+    flags: bitfield u8 { compressed: bit 7 kind: bits 3..0 }
+    payload_length: u16le
+    payload: region bytes(payload_length) { preserve remaining as bytes }
+}
+
+entry PacketAtOffset from data { packet: Packet }
+default entry PacketAtOffset

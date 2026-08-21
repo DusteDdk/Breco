@@ -1,0 +1,38 @@
+language breco 0.1
+
+inputs { input data "PNG image" { default } }
+
+limits { max_loop_iterations 100000 max_nodes 2000000 }
+
+record PNGSignature {
+    identify {
+        signature: u64be
+        match signature == 0x89504E470D0A1A0A else "not a PNG image"
+    }
+    commit
+}
+
+record PNGChunk {
+    identify {
+        data_length: u32be
+        chunk_type: u32be
+        match data_length + 4 <= remaining else "truncated PNG chunk"
+    }
+    commit
+    data: region bytes(data_length) { raw remaining as bytes }
+    crc: u32be
+}
+
+entry PNG from data {
+    signature: PNGSignature
+    chunks: many PNGChunk
+    preserve remaining as trailing_bytes
+}
+default entry PNG
+
+outform ChunkList(root: PNG) text {
+    emit "offset,type,length\n"
+    for chunk in root.chunks {
+        emit "${chunk.@offset},${hex(chunk.chunk_type)},${chunk.data_length}\n"
+    }
+}

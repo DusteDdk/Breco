@@ -53,11 +53,11 @@ Notable startup behavior:
 - The Image tab defaults to all supported formats enabled, `From start of file`, main-scan worker count for Jobs, `4096 K` max pixels, and `5` max results.
 - Shift defaults to bytes mode with value `0`.
 - If file context later becomes single-file, `loadNotEmptyPreview()` can synthesize an initial row to display preview bytes before scanning.
-- The last loaded struct declaration file is re-read when its path still names a file, so external declaration edits take effect on restart.
-- A valid `/default EntryName` file directive selects that entry in the Struct
-  dropdown when the declaration is parsed and takes precedence over a
-  remembered entry selection during startup.
-- After restoring a valid declaration and remembered single-file source, startup creates the selected struct preview automatically.
+- The last loaded `.breco` schema is re-read when its path still names a file,
+  so external schema edits take effect on restart.
+- A schema's `default entry` selects the initial entry.
+- After restoring a valid schema and remembered single-file source, startup
+  decodes the selected entry at the remembered offset.
 
 ## 3) Source Selection
 
@@ -153,71 +153,30 @@ Preview update path (`updateSharedPreviewNow()`):
 Deferred update behavior:
 - `scheduleSharedPreviewUpdate()` coalesces repeated triggers with `m_previewUpdateScheduled` and posts a queued lambda to avoid re-entrant immediate updates.
 
-## 7) Data Tabs and Struct Preview
+## 7) BrecoLang Decode and Scan
 
-`Raw`, `Struct`, and `Image` are independent top-level pages in
-`MainTabsPanel`. The existing tab context menu and double-click behavior can
-detach any page into a floating window; closing that window restores the page
-in stable `Scan`, `Raw`, `Struct`, `Image` order. Raw and Struct expose
-synchronized endian controls. The Struct page contains independently floatable
-`Structure controls` and `Decoded structure` dock widgets.
+The BrecoLang page is the application's only structured-decoding surface. A
+debounced editor compiles source into an immutable program. The live view opens
+bound inputs as paged sources and runs tree mode at the requested offset; only
+the root level expands automatically. Pinned tabs retain their own program,
+tree, input sources, entry, and offset.
 
-`StructVisualizedTreeModel` exposes five columns: `Name`, `Type`, `Value`,
-`Bytes`, and `Valid`. `StructDataViewPanel` sizes `Name` to its contents and
-stretches `Value` into remaining space.
+Decoded nodes form a flat array with parent/child/sibling indices. The Qt model
+shows name, type, value, input role, absolute source offset, and byte length.
+Double-clicking a source-backed node selects its source range in the raw views.
 
-Struct/object and scalar rows display their decoded type in `Type`; struct
-rows keep `Value` empty. Repeat and array containers keep `Type` empty, while
-their children display the element type. Container `Value` is `(empty)`,
-`1 item`, or `N items`. Struct previews render as a top-level `Preview` row;
-saved views use their editable list name and default to
-`TypeName@0xHEX_OFFSET`. Single-repeat struct views hoist the synthetic
-`StructName[0]` entry so the view row contains the struct fields directly.
-Top-level views with multiple repeats remain containers over the typed
-`StructName[N]` entries.
+JSON export replays the active entry in streaming mode. Binary export follows
+the selected node's storage spans. Outforms use the active immutable tree and
+source bindings. GUI file exports use staged writes and commit only on success.
 
-The Struct editor's persisted `Enable` checkbox defaults on. It remains
-checked or unchecked while an invalid declaration disables the control.
-When checked and the declaration is valid, Breco maintains the preview for
-the selected entry. `Add previewed` is enabled exactly when those two
-conditions hold and copies the current preview into `Views`.
-Parse errors appear below the declaration editor as `Line N: message`, while
-the corresponding source line remains highlighted. The status remains visible
-without errors as `N lines, no errors`.
+Schema scans pass a compiled program and input bindings to the normal scan
+controller. Each worker substitutes the scan target for the entry's primary
+input and opens other inputs independently. It invokes probe mode at candidate
+offsets, so successful matches retain full language semantics without node
+construction.
 
-`Valid` is empty for ordinary complete nodes. It reports condition validity
-for `/cond` fields and `/assert` nodes, and missing-byte counts for truncated
-nodes, combining both when applicable. Passing conditional rows use light
-green; failed conditional or truncated rows use light red. Odd rows use darker
-variants of those colors, while unqualified complete rows retain the normal
-alternating backgrounds. A condition or assertion error is shown in the
-failing node's `Value` cell; containing struct rows keep an empty `Value`
-instead of repeating the child error.
-
-`/when` is evaluated before its field decodes. A false `/when` consumes zero
-bytes and emits no tree node; a true `/when` decodes the field normally.
-Bitfield members are display-only child rows under their scalar integer word
-and do not advance the byte cursor.
-
-Decoded nodes retain the absolute offset of their first byte, independent of
-decode endianness, together with the number of source bytes they cover.
-Clicking a tree item or saved `Views` row routes that source range through
-`MainWindow::jumpToAbsoluteOffset()`, loading the source when necessary,
-centering the hex view, and highlighting the range in the byte and bitmap
-views without clearing an active struct preview for same-source navigation.
-Clicking a decoded tree field also centers the Structure editor on its field
-declaration and highlights that full line. Repeated containers and elements
-map back to their repeated field line; top-level view rows map to the selected
-type declaration.
-Scrolling or reloading the hex viewport also preserves an active struct
-preview. While `Enable` is checked, clicking a byte in the hex view decodes
-or re-decodes the preview with the clicked byte as its new start offset.
-
-Successful declaration-file loads persist the absolute path through
-`AppSettings`. Startup prefers that file over the cached editor text when the
-file still exists. Automatic preview creation requires `Enable`, a valid
-restored declaration, and a successfully restored single-file source. The
-`Views` and `Language` section checkboxes are persisted as well.
+The schema library indexes `.breco` files. Older schema files are detected only
+to display a migration notice and are never loaded, changed, or removed.
 
 ## 8) Image Tab Scans
 

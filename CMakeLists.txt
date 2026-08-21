@@ -27,18 +27,17 @@ endif()
 set(BRECO_SOURCES
     src/main.cpp
     src/app/MainWindow.cpp
+    src/brecolang/gui/BrecoLangLibrary.cpp
+    src/brecolang/gui/BrecoLangPanel.cpp
+    src/brecolang/gui/DecodedTreeModel.cpp
     src/panel/BitmapViewPanel.cpp
     src/panel/CurrentByteInfoPanel.cpp
     src/panel/DataViewByteAndBitmapPanel.cpp
     src/panel/DataViewImagePanel.cpp
     src/panel/DataViewShellPanel.cpp
-    src/panel/DataViewStructuredPanel.cpp
     src/panel/HexViewControlsPanel.cpp
     src/panel/ResultsTablePanel.cpp
     src/panel/ScanControlsPanel.cpp
-    src/panel/StructDataViewPanel.cpp
-    src/panel/StructDeclarationPanel.cpp
-    src/panel/StructModeLeftPanel.cpp
     src/panel/TextViewPanel.cpp
     src/scan/ScanController.cpp
     src/scan/ScanProgress.cpp
@@ -57,13 +56,6 @@ set(BRECO_SOURCES
     src/settings/AppSettings.cpp
     src/text/TextSequenceAnalyzer.cpp
     src/text/StringModeRules.cpp
-    src/struct/StructureGraph.cpp
-    src/struct/StructureLibrary.cpp
-    src/struct/StructureScanner.cpp
-    src/struct/StructDeclarationParser.cpp
-    src/struct/StructExport.cpp
-    src/struct/StructVisualizer.cpp
-    src/struct/StructVisualizedTreeModel.cpp
 )
 
 if(BRECO_ENABLE_LINUX_PRIVILEGED_OPEN)
@@ -75,19 +67,18 @@ endif()
 
 set(BRECO_HEADERS
     src/app/MainWindow.h
+    src/brecolang/gui/BrecoLangLibrary.h
+    src/brecolang/gui/BrecoLangPanel.h
+    src/brecolang/gui/DecodedTreeModel.h
     src/panel/BitmapViewPanel.h
     src/panel/CurrentByteInfoPanel.h
     src/panel/DataViewByteAndBitmapPanel.h
     src/panel/DataViewImagePanel.h
     src/panel/DataViewShellPanel.h
-    src/panel/DataViewStructuredPanel.h
     src/panel/HexViewControlsPanel.h
     src/panel/MainTabsPanel.h
     src/panel/ResultsTablePanel.h
     src/panel/ScanControlsPanel.h
-    src/panel/StructDataViewPanel.h
-    src/panel/StructDeclarationPanel.h
-    src/panel/StructModeLeftPanel.h
     src/panel/TextViewPanel.h
     src/scan/ScanController.h
     src/scan/ScanProgress.h
@@ -108,15 +99,6 @@ set(BRECO_HEADERS
     src/settings/AppSettings.h
     src/text/TextSequenceAnalyzer.h
     src/text/StringModeRules.h
-    src/struct/StructTypes.h
-    src/struct/StructureGraph.h
-    src/struct/StructureLibrary.h
-    src/struct/StructureScanner.h
-    src/struct/VisualizedNode.h
-    src/struct/StructDeclarationParser.h
-    src/struct/StructExport.h
-    src/struct/StructVisualizer.h
-    src/struct/StructVisualizedTreeModel.h
 )
 
 if(BRECO_ENABLE_LINUX_PRIVILEGED_OPEN)
@@ -133,16 +115,12 @@ set(BRECO_UI
     ui/DataViewByteAndBitmap.ui
     ui/DataViewImage.ui
     ui/DataViewShell.ui
-    ui/DataViewStructured.ui
     ui/EditStack.ui
     ui/HexViewControlsPanel.ui
     ui/MainTabsPanel.ui
     ui/MainWindow.ui
     ui/ResultsTablePanel.ui
     ui/ScanControlsPanel.ui
-    ui/StructDataView.ui
-    ui/StructDeclaration.ui
-    ui/StructModeLeftPanel.ui
     ui/TextViewPanel.ui
 )
 
@@ -155,6 +133,38 @@ if(BRECO_ENABLE_LINUX_PRIVILEGED_OPEN)
     list(APPEND BRECO_QT_LIBS Qt6::DBus Qt6::Network)
 endif()
 
+add_library(brecolang_compiler STATIC
+    src/brecolang/compiler/Compiler.cpp
+    src/brecolang/compiler/Lexer.cpp
+    src/brecolang/compiler/Parser.cpp
+    src/brecolang/compiler/Compiler.h
+    src/brecolang/compiler/Lexer.h
+    src/brecolang/compiler/Parser.h
+    src/brecolang/compiler/Source.h
+    src/brecolang/compiler/Syntax.h
+    src/brecolang/ir/BrecoProgram.h
+)
+target_include_directories(brecolang_compiler PUBLIC src)
+target_link_libraries(brecolang_compiler PUBLIC Qt6::Core)
+
+add_library(brecolang_runtime STATIC
+    src/brecolang/render/OutformRenderer.cpp
+    src/brecolang/render/RenderStore.cpp
+    src/brecolang/runtime/ByteSource.cpp
+    src/brecolang/runtime/DecodedData.cpp
+    src/brecolang/runtime/Interpreter.cpp
+    src/brecolang/runtime/JsonWriter.cpp
+    src/brecolang/runtime/ByteSource.h
+    src/brecolang/runtime/DecodedData.h
+    src/brecolang/runtime/Interpreter.h
+    src/brecolang/runtime/JsonWriter.h
+    src/brecolang/runtime/ProbeScan.h
+    src/brecolang/render/OutformRenderer.h
+    src/brecolang/render/RenderStore.h
+)
+target_include_directories(brecolang_runtime PUBLIC src)
+target_link_libraries(brecolang_runtime PUBLIC brecolang_compiler Qt6::Core)
+
 qt_add_executable(breco
     ${BRECO_SOURCES}
     ${BRECO_HEADERS}
@@ -163,7 +173,7 @@ qt_add_executable(breco
 )
 
 target_include_directories(breco PRIVATE src)
-target_link_libraries(breco PRIVATE ${BRECO_QT_LIBS})
+target_link_libraries(breco PRIVATE ${BRECO_QT_LIBS} brecolang_runtime)
 
 if(WIN32)
     set_target_properties(breco PROPERTIES WIN32_EXECUTABLE TRUE)
@@ -177,18 +187,9 @@ endif()
 
 add_executable(brecodump
     src/cli/brecodump.cpp
-    src/io/OpenFilePool.cpp
-    src/io/ShiftedWindowLoader.cpp
-    src/scan/ShiftTransform.cpp
-    src/struct/StructureGraph.cpp
-    src/struct/StructureLibrary.cpp
-    src/struct/StructureScanner.cpp
-    src/struct/StructDeclarationParser.cpp
-    src/struct/StructExport.cpp
-    src/struct/StructVisualizer.cpp
 )
 target_include_directories(brecodump PRIVATE src)
-target_link_libraries(brecodump PRIVATE Qt6::Core)
+target_link_libraries(brecodump PRIVATE Qt6::Core brecolang_runtime)
 
 if(WIN32)
     set_target_properties(brecodump PROPERTIES WIN32_EXECUTABLE FALSE)
@@ -307,6 +308,9 @@ endif()
 install(TARGETS breco brecodump
     RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
 )
+install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/examples/"
+    DESTINATION "examples"
+)
 
 if(BUILD_TESTING)
 find_package(Qt6 REQUIRED COMPONENTS Test)
@@ -327,7 +331,8 @@ target_include_directories(breco_ui_integration_tests PRIVATE src)
 target_compile_definitions(
     breco_ui_integration_tests PRIVATE BRECO_MAINWINDOW_TEST_ACCESS)
 target_link_libraries(
-    breco_ui_integration_tests PRIVATE ${BRECO_QT_LIBS} Qt6::Test)
+    breco_ui_integration_tests PRIVATE ${BRECO_QT_LIBS} Qt6::Test
+                                       brecolang_runtime)
 
 if(WIN32)
     set(BRECO_UI_TEST_REPORT
@@ -353,16 +358,6 @@ qt_add_executable(breco_unit_tests
     src/settings/AppSettings.cpp
     src/text/TextSequenceAnalyzer.cpp
     src/text/StringModeRules.cpp
-    src/struct/StructureGraph.cpp
-    src/struct/StructureLibrary.cpp
-    src/struct/StructureScanner.cpp
-    src/struct/StructDeclarationParser.cpp
-    src/struct/StructExport.cpp
-    src/struct/StructVisualizer.cpp
-    src/struct/StructVisualizedTreeModel.cpp
-    src/panel/StructModeLeftPanel.cpp
-    src/panel/StructModeLeftPanel.h
-    ui/StructModeLeftPanel.ui
     src/view/BitmapViewWidget.cpp
     src/view/BitmapViewWidget.h
     src/view/TextViewWidget.cpp
@@ -372,6 +367,22 @@ target_include_directories(breco_unit_tests PRIVATE src)
 target_link_libraries(breco_unit_tests PRIVATE Qt6::Core Qt6::Gui Qt6::Widgets)
 
 add_test(NAME breco_unit_tests COMMAND breco_unit_tests)
+
+qt_add_executable(brecolang_compiler_tests
+    tests/brecolang_compiler_tests.cpp
+)
+target_compile_definitions(
+    brecolang_compiler_tests PRIVATE BRECO_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+target_link_libraries(
+    brecolang_compiler_tests PRIVATE brecolang_compiler Qt6::Core Qt6::Test)
+add_test(NAME brecolang_compiler_tests COMMAND brecolang_compiler_tests)
+
+qt_add_executable(brecolang_runtime_tests
+    tests/brecolang_runtime_tests.cpp
+)
+target_link_libraries(
+    brecolang_runtime_tests PRIVATE brecolang_runtime Qt6::Core Qt6::Test)
+add_test(NAME brecolang_runtime_tests COMMAND brecolang_runtime_tests)
 
 qt_add_executable(brecodump_cli_tests
     tests/brecodump_cli_tests.cpp
@@ -408,6 +419,7 @@ else()
 
     set(DOC_PAGES
         "index|${CMAKE_SOURCE_DIR}/docs/html/index.md"
+        "BrecoLang|${CMAKE_SOURCE_DIR}/docs/BrecoLang.md"
         "codemap|${CMAKE_SOURCE_DIR}/docs/codemap.md"
         "runtime-behavior|${CMAKE_SOURCE_DIR}/docs/runtime-behavior.md"
         "scan-and-io-behavior|${CMAKE_SOURCE_DIR}/docs/scan-and-io-behavior.md"

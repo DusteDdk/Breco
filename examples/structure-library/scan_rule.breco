@@ -1,0 +1,17 @@
+language breco 0.1
+
+inputs { input data "Framed data" { default } }
+
+record Frame {
+    identify {
+        marker: u32be
+        payload_length: u16be
+        match marker == 0x4652414D && payload_length <= remaining
+            else "not a complete frame"
+    }
+    commit
+    payload: region bytes(payload_length) { raw remaining as bytes }
+}
+
+entry FrameAtOffset from data { frame: Frame }
+default entry FrameAtOffset

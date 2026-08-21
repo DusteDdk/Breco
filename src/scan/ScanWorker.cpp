@@ -2,18 +2,17 @@
 
 #include <chrono>
 
+#include "brecolang/runtime/Interpreter.h"
 #include "scan/MatchUtils.h"
-#include "struct/StructVisualizer.h"
 
 namespace breco {
 
-ScanWorker::ScanWorker(int workerId, QByteArray searchTerm, TextInterpretationMode mode,
-                       bool ignoreCase, std::atomic<quint64>* totalBytesScanned,
+ScanWorker::ScanWorker(int workerId, QByteArray searchTerm,
+                       TextInterpretationMode mode, bool ignoreCase,
+                       std::atomic<quint64>* totalBytesScanned,
                        std::chrono::steady_clock::time_point scanStartTime,
                        JobCompleteCallback onJobComplete,
-                       std::shared_ptr<const StructureGraph> structureGraph,
-                       QString structureEntry,
-                       std::shared_ptr<const QHash<QString, VisualizationSource>> externalSources)
+                       std::shared_ptr<const lang::ProbeScanPlan> probePlan)
     : m_workerId(workerId),
       m_totalBytesScanned(totalBytesScanned),
       m_searchTerm(std::move(searchTerm)),
@@ -21,9 +20,7 @@ ScanWorker::ScanWorker(int workerId, QByteArray searchTerm, TextInterpretationMo
       m_ignoreCase(ignoreCase),
       m_scanStartTime(scanStartTime),
       m_onJobComplete(std::move(onJobComplete)),
-      m_structureGraph(std::move(structureGraph)),
-      m_structureEntry(std::move(structureEntry)),
-      m_externalSources(std::move(externalSources)) {}
+      m_probePlan(std::move(probePlan)) {}
 
 ScanWorker::~ScanWorker() {
     requestStop();
@@ -49,11 +46,15 @@ void ScanWorker::assignJob(const ScanJob& job) {
     m_workProvided.release();
 }
 
-void ScanWorker::requestStop() { m_stopRequested.store(true, std::memory_order_release); }
+void ScanWorker::requestStop() {
+    m_stopRequested.store(true, std::memory_order_release);
+}
 
 void ScanWorker::wakeForStop() { m_workProvided.release(); }
 
-bool ScanWorker::isBusy() const { return m_busy.load(std::memory_order_acquire); }
+bool ScanWorker::isBusy() const {
+    return m_busy.load(std::memory_order_acquire);
+}
 
 void ScanWorker::runLoop() {
     for (;;) {
@@ -78,7 +79,6 @@ void ScanWorker::runLoop() {
         }
 
         ScanJobResult result = processJob(job);
-
         m_busy.store(false, std::memory_order_release);
         if (m_onJobComplete != nullptr) {
             m_onJobComplete(m_workerId, std::move(result));
@@ -92,42 +92,51 @@ ScanJobResult ScanWorker::processJob(const ScanJob& job) {
     result.bufferToken = job.bufferToken;
     const std::shared_ptr<ReadBuffer>& buffer = job.buffer;
     if (buffer == nullptr || job.size == 0 || job.reportLimit == 0 ||
-        (m_searchTerm.isEmpty() && m_structureGraph == nullptr)) {
+        (m_searchTerm.isEmpty() && m_probePlan == nullptr)) {
         return result;
     }
 
-    QByteArray transformed;
-    const qint64 localStart =
-        static_cast<qint64>(job.fileOffset) - static_cast<qint64>(buffer->rawStart);
-    const qint64 localEnd = localStart + static_cast<qint64>(job.size);
-    if (localStart >= 0 && localEnd >= localStart && localEnd <= buffer->rawBytes.size()) {
-        transformed = QByteArray::fromRawData(
-            buffer->rawBytes.constData() + static_cast<int>(localStart),
-            static_cast<int>(job.size));
-    } else {
-        return result;
-    }
+    if (m_probePlan != nullptr) {
+        if (m_probePlan->program == nullptr ||
+            m_probePlan->primaryInput >=
+                static_cast<lang::InputId>(m_probePlan->program->inputs.size())) {
+            return result;
+        }
+        if (m_probeTargetPath != buffer->filePath || m_probeInputs.isEmpty()) {
+            m_probeInputs.clear();
+            m_probeInputs.resize(m_probePlan->program->inputs.size());
+            for (lang::InputId input = 0;
+                 input < static_cast<lang::InputId>(m_probeInputs.size()); ++input) {
+                const QString path = input == m_probePlan->primaryInput
+                                         ? buffer->filePath
+                                         : m_probePlan->inputPaths.value(input);
+                if (path.isEmpty()) {
+                    m_probeInputs.clear();
+                    return result;
+                }
+                m_probeInputs[input] = lang::PagedFileSource::open(path);
+                if (!m_probeInputs[input]) {
+                    m_probeInputs.clear();
+                    return result;
+                }
+            }
+            m_probeTargetPath = buffer->filePath;
+        }
 
-    if (m_structureGraph != nullptr) {
         for (quint64 pos = 0; pos < job.reportLimit; ++pos) {
             if (m_stopRequested.load(std::memory_order_acquire)) {
                 break;
             }
             ++result.bytesScanned;
             const quint64 absolute = job.fileOffset + pos;
-            VisualizationSource primary{transformed, QString(), job.fileOffset};
-            const VisualizedNode root = visualize(
-                *m_structureGraph, m_structureEntry, primary,
-                static_cast<size_t>(pos), 1,
-                m_externalSources != nullptr
-                    ? *m_externalSources
-                    : QHash<QString, VisualizationSource>{});
-            if (root.children.isEmpty()) {
-                continue;
-            }
-            const VisualizedNode& candidate = root.children.first();
-            if (!candidate.valid || candidate.bytesMissing != 0 ||
-                !candidate.errorMessage.isEmpty() || candidate.sourceLength == 0) {
+            lang::DecodeRequest request;
+            request.program = m_probePlan->program;
+            request.entryName = m_probePlan->entryName;
+            request.inputs = m_probeInputs;
+            request.startOffset = absolute;
+            request.mode = lang::DecodeMode::Probe;
+            const lang::DecodeResult decoded = lang::decodeBrecoProgram(request);
+            if (!decoded.success() || decoded.endOffset <= absolute) {
                 continue;
             }
             MatchRecord match;
@@ -136,12 +145,27 @@ ScanJobResult ScanWorker::processJob(const ScanJob& job) {
             match.offset = absolute;
             match.searchTimeNs = static_cast<quint64>(
                 std::chrono::duration_cast<std::chrono::nanoseconds>(
-                    std::chrono::steady_clock::now() - m_scanStartTime).count());
+                    std::chrono::steady_clock::now() - m_scanStartTime)
+                    .count());
             result.matches.push_back(match);
         }
         if (m_totalBytesScanned != nullptr) {
-            m_totalBytesScanned->fetch_add(result.bytesScanned, std::memory_order_relaxed);
+            m_totalBytesScanned->fetch_add(result.bytesScanned,
+                                           std::memory_order_relaxed);
         }
+        return result;
+    }
+
+    QByteArray transformed;
+    const qint64 localStart = static_cast<qint64>(job.fileOffset) -
+                              static_cast<qint64>(buffer->rawStart);
+    const qint64 localEnd = localStart + static_cast<qint64>(job.size);
+    if (localStart >= 0 && localEnd >= localStart &&
+        localEnd <= buffer->rawBytes.size()) {
+        transformed = QByteArray::fromRawData(
+            buffer->rawBytes.constData() + static_cast<int>(localStart),
+            static_cast<int>(job.size));
+    } else {
         return result;
     }
 
@@ -150,12 +174,14 @@ ScanJobResult ScanWorker::processJob(const ScanJob& job) {
         if (m_stopRequested.load(std::memory_order_acquire)) {
             break;
         }
-        pos = MatchUtils::indexOf(transformed, m_searchTerm, pos, m_mode, m_ignoreCase);
+        pos = MatchUtils::indexOf(transformed, m_searchTerm, pos, m_mode,
+                                  m_ignoreCase);
         if (pos < 0) {
             result.bytesScanned = job.reportLimit;
             break;
         }
-        result.bytesScanned = qMin<quint64>(job.reportLimit, static_cast<quint64>(pos + 1));
+        result.bytesScanned =
+            qMin<quint64>(job.reportLimit, static_cast<quint64>(pos + 1));
         if (static_cast<quint32>(pos) < job.reportLimit) {
             MatchRecord match;
             match.scanTargetIdx = buffer->scanTargetIdx;
@@ -171,7 +197,8 @@ ScanJobResult ScanWorker::processJob(const ScanJob& job) {
     }
 
     if (m_totalBytesScanned != nullptr) {
-        m_totalBytesScanned->fetch_add(result.bytesScanned, std::memory_order_relaxed);
+        m_totalBytesScanned->fetch_add(result.bytesScanned,
+                                       std::memory_order_relaxed);
     }
     return result;
 }

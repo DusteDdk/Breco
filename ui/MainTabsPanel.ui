@@ -118,31 +118,6 @@
        </item>
       </layout>
      </widget>
-     <widget class="QWidget" name="structDataTab">
-      <attribute name="title">
-       <string>Struct</string>
-      </attribute>
-      <layout class="QVBoxLayout" name="structDataTabLayout">
-       <property name="spacing">
-        <number>0</number>
-       </property>
-       <property name="leftMargin">
-        <number>0</number>
-       </property>
-       <property name="topMargin">
-        <number>0</number>
-       </property>
-       <property name="rightMargin">
-        <number>0</number>
-       </property>
-       <property name="bottomMargin">
-        <number>0</number>
-       </property>
-       <item>
-        <widget class="QWidget" name="structDataHost" native="true"/>
-       </item>
-      </layout>
-     </widget>
      <widget class="QWidget" name="imageDataTab">
       <attribute name="title">
        <string>Image</string>

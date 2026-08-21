@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QByteArray>
+#include <QString>
 #include <QtGlobal>
 #include <memory>
 
@@ -10,6 +11,7 @@ namespace breco {
 
 struct ReadBuffer {
     int scanTargetIdx = -1;
+    QString filePath;
     quint64 fileSize = 0;
     quint64 outputStart = 0;
     quint64 outputSize = 0;

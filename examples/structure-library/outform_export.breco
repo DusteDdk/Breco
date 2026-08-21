@@ -1,0 +1,22 @@
+language breco 0.1
+
+inputs { input data "Sensor rows" { default } }
+
+record Row { timestamp: u32le channel: u16le magnitude: i16le }
+entry Rows from data { rows: many Row preserve remaining as tail }
+default entry Rows
+
+outform Csv(root: Rows) text {
+    emit "timestamp,channel,magnitude,input,offset\n"
+    for row in root.rows {
+        emit "${row.timestamp},${row.channel},${row.magnitude},${csv(row.@input)},${row.@offset}\n"
+    }
+}
+
+outform PackedRows(root: Rows) binary {
+    for row in root.rows {
+        emit u32le(row.timestamp)
+        emit u16le(row.channel)
+        emit i16le(row.magnitude)
+    }
+}

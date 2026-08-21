@@ -4,6 +4,7 @@ This is the generated documentation entrypoint for the core runtime docs.
 
 ## Runtime Docs
 
+- [BrecoLang 0.1](BrecoLang.html)
 - [Core Runtime Codemap](codemap.html)
 - [Runtime Behavior](runtime-behavior.html)
 - [Scan and I/O Behavior](scan-and-io-behavior.html)

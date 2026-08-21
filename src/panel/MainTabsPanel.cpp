@@ -13,6 +13,17 @@ namespace breco {
 MainTabsPanel::MainTabsPanel(QWidget* parent)
     : QWidget(parent), m_ui(std::make_unique<Ui::MainTabsPanel>()) {
     m_ui->setupUi(this);
+    m_brecoLangTab = new QWidget(m_ui->mainTabWidget);
+    m_brecoLangTab->setObjectName(QStringLiteral("brecoLangTab"));
+    auto* brecoLangLayout = new QVBoxLayout(m_brecoLangTab);
+    brecoLangLayout->setContentsMargins(0, 0, 0, 0);
+    brecoLangLayout->setSpacing(0);
+    m_brecoLangHost = new QWidget(m_brecoLangTab);
+    m_brecoLangHost->setObjectName(QStringLiteral("brecoLangHost"));
+    brecoLangLayout->addWidget(m_brecoLangHost);
+    const int imageIndex = m_ui->mainTabWidget->indexOf(m_ui->imageDataTab);
+    m_ui->mainTabWidget->insertTab(imageIndex, m_brecoLangTab,
+                                   QStringLiteral("BrecoLang"));
     for (int index = 0; index < m_ui->mainTabWidget->count(); ++index) {
         m_pageOrder.insert(m_ui->mainTabWidget->widget(index), index);
     }
@@ -57,13 +68,13 @@ QWidget* MainTabsPanel::resultsPanelHost() const { return m_ui->resultsPanelHost
 
 QWidget* MainTabsPanel::rawDataHost() const { return m_ui->rawDataHost; }
 
-QWidget* MainTabsPanel::structDataHost() const { return m_ui->structDataHost; }
+QWidget* MainTabsPanel::brecoLangHost() const { return m_brecoLangHost; }
 
 QWidget* MainTabsPanel::imageDataHost() const { return m_ui->imageDataHost; }
 
 QWidget* MainTabsPanel::rawDataTab() const { return m_ui->rawDataTab; }
 
-QWidget* MainTabsPanel::structDataTab() const { return m_ui->structDataTab; }
+QWidget* MainTabsPanel::brecoLangTab() const { return m_brecoLangTab; }
 
 QWidget* MainTabsPanel::imageDataTab() const { return m_ui->imageDataTab; }
 

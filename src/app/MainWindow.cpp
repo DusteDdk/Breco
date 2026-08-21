@@ -66,15 +66,11 @@
 #include "panel/DataViewByteAndBitmapPanel.h"
 #include "panel/DataViewImagePanel.h"
 #include "panel/DataViewShellPanel.h"
-#include "panel/DataViewStructuredPanel.h"
+#include "brecolang/gui/BrecoLangPanel.h"
 #include "panel/HexViewControlsPanel.h"
 #include "panel/MainTabsPanel.h"
 #include "panel/ResultsTablePanel.h"
 #include "panel/ScanControlsPanel.h"
-#include "panel/StructDataViewPanel.h"
-#include "panel/StructModeLeftPanel.h"
-#include "struct/StructVisualizer.h"
-#include "struct/VisualizedNode.h"
 #include "panel/TextViewPanel.h"
 #include "scan/ShiftTransform.h"
 #include "settings/AppSettings.h"
@@ -352,21 +348,6 @@ QString formatHexWindow8(const QByteArray& bytes, int start, bool bigEndian) {
         .arg(QStringList(parts.begin(), parts.end()).join(QLatin1Char(' ')));
 }
 
-void assignVisualizedSource(VisualizedNode& node, const QString& filePath,
-                            quint64 dataBaseOffset) {
-    node.sourceFilePath = filePath;
-    if (node.hasSourceOffset) {
-        if (node.sourceOffset <=
-            std::numeric_limits<quint64>::max() - dataBaseOffset) {
-            node.sourceOffset += dataBaseOffset;
-        } else {
-            node.hasSourceOffset = false;
-        }
-    }
-    for (VisualizedNode& child : node.children) {
-        assignVisualizedSource(child, filePath, dataBaseOffset);
-    }
-}
 }
 
 MainWindow::MainWindow(QWidget* parent)
@@ -376,14 +357,9 @@ MainWindow::MainWindow(QWidget* parent)
       m_filePool(),
       m_windowLoader(&m_filePool),
       m_scanController(&m_filePool, this) {
-    const QString rememberedStructDefinitionPath =
-        AppSettings::lastStructDefinitionFilePath();
-    const QString rememberedStructDeclaration =
-        AppSettings::structDeclarationText();
-    const QString rememberedStructEntryName =
-        AppSettings::structEntryName();
-    const int rememberedStructEntryCount =
-        AppSettings::structEntryCount();
+    const QString rememberedSchemaPath = AppSettings::lastBrecoLangSchemaPath();
+    const QString rememberedSchemaLibrary =
+        AppSettings::brecoLangLibraryDirectory();
     const QString rememberedSingleFile =
         AppSettings::rememberedSingleFilePath();
     const quint64 rememberedSingleFileOffset =
@@ -413,8 +389,8 @@ MainWindow::MainWindow(QWidget* parent)
     auto* rawDataHostLayout = new QVBoxLayout(m_mainTabsPanel->rawDataHost());
     rawDataHostLayout->setContentsMargins(0, 0, 0, 0);
     rawDataHostLayout->setSpacing(0);
-    m_rawDataViewShellPanel = new DataViewShellPanel(
-        DataViewShellPanel::ControlMode::Raw, m_mainTabsPanel->rawDataHost());
+    m_rawDataViewShellPanel =
+        new DataViewShellPanel(m_mainTabsPanel->rawDataHost());
     rawDataHostLayout->addWidget(m_rawDataViewShellPanel);
     auto* rawBodyLayout = new QVBoxLayout(m_rawDataViewShellPanel->bodyHost());
     rawBodyLayout->setContentsMargins(0, 0, 0, 0);
@@ -423,18 +399,13 @@ MainWindow::MainWindow(QWidget* parent)
         new DataViewByteAndBitmapPanel(m_rawDataViewShellPanel->bodyHost());
     rawBodyLayout->addWidget(m_dataViewByteAndBitmapPanel);
 
-    auto* structDataHostLayout = new QVBoxLayout(m_mainTabsPanel->structDataHost());
-    structDataHostLayout->setContentsMargins(0, 0, 0, 0);
-    structDataHostLayout->setSpacing(0);
-    m_structDataViewShellPanel = new DataViewShellPanel(
-        DataViewShellPanel::ControlMode::Struct, m_mainTabsPanel->structDataHost());
-    structDataHostLayout->addWidget(m_structDataViewShellPanel);
-    auto* structBodyLayout = new QVBoxLayout(m_structDataViewShellPanel->bodyHost());
-    structBodyLayout->setContentsMargins(0, 0, 0, 0);
-    structBodyLayout->setSpacing(0);
-    m_dataViewStructuredPanel =
-        new DataViewStructuredPanel(m_structDataViewShellPanel->bodyHost());
-    structBodyLayout->addWidget(m_dataViewStructuredPanel);
+    auto* brecoLangHostLayout =
+        new QVBoxLayout(m_mainTabsPanel->brecoLangHost());
+    brecoLangHostLayout->setContentsMargins(0, 0, 0, 0);
+    brecoLangHostLayout->setSpacing(0);
+    m_brecoLangPanel =
+        new lang::BrecoLangPanel(m_mainTabsPanel->brecoLangHost());
+    brecoLangHostLayout->addWidget(m_brecoLangPanel);
 
     auto* imageDataHostLayout = new QVBoxLayout(m_mainTabsPanel->imageDataHost());
     imageDataHostLayout->setContentsMargins(0, 0, 0, 0);
@@ -479,20 +450,6 @@ MainWindow::MainWindow(QWidget* parent)
         bitmapChrome != nullptr) {
         bitmapChrome->setVisible(false);
     }
-
-    auto* structEditorLayout = new QVBoxLayout(m_dataViewStructuredPanel->structEditorHost());
-    structEditorLayout->setContentsMargins(0, 0, 0, 0);
-    structEditorLayout->setSpacing(0);
-    m_structModeLeftPanel =
-        new StructModeLeftPanel(m_dataViewStructuredPanel->structEditorHost());
-    m_structModeLeftPanel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
-    structEditorLayout->addWidget(m_structModeLeftPanel);
-
-    auto* structViewLayout = new QVBoxLayout(m_dataViewStructuredPanel->structViewHost());
-    structViewLayout->setContentsMargins(0, 0, 0, 0);
-    structViewLayout->setSpacing(0);
-    m_structDataViewPanel = new StructDataViewPanel(m_dataViewStructuredPanel->structViewHost());
-    structViewLayout->addWidget(m_structDataViewPanel);
 
     QTableView* resultsTable = m_resultsPanel->resultsTableView();
     resultsTable->setModel(&m_resultModel);
@@ -581,10 +538,20 @@ MainWindow::MainWindow(QWidget* parent)
         connect(edit, &QLineEdit::editingFinished, this,
                 [this]() { updateHexInfoPanel(); });
     }
-    connect(m_structModeLeftPanel, &StructModeLeftPanel::structureScanRequested,
-            this, &MainWindow::onStartStructureScan);
-    connect(m_structModeLeftPanel, &StructModeLeftPanel::structureScanStopRequested,
+    connect(m_brecoLangPanel, &lang::BrecoLangPanel::scanRequested,
+            this, &MainWindow::onStartBrecoLangScan);
+    connect(m_brecoLangPanel, &lang::BrecoLangPanel::scanStopRequested,
             this, &MainWindow::onStopScan);
+    connect(m_brecoLangPanel, &lang::BrecoLangPanel::sourceLocationActivated,
+            this, &MainWindow::navigateToDecodedSource);
+    connect(m_brecoLangPanel, &lang::BrecoLangPanel::schemaFileLoaded,
+            this, [](const QString& path) {
+                AppSettings::setLastBrecoLangSchemaPath(path);
+            });
+    connect(m_brecoLangPanel, &lang::BrecoLangPanel::libraryDirectoryChanged,
+            this, [](const QString& path) {
+                AppSettings::setBrecoLangLibraryDirectory(path);
+            });
     connect(resultsTable->selectionModel(), &QItemSelectionModel::currentRowChanged, this,
             [this](const QModelIndex& current, const QModelIndex&) { onResultActivated(current); });
     connect(m_hexControlsPanel->showAsComboBox(), qOverload<int>(&QComboBox::currentIndexChanged), this,
@@ -677,18 +644,6 @@ MainWindow::MainWindow(QWidget* parent)
                     setDataViewBigEndianEnabled(true);
                 }
             });
-    connect(m_structDataViewShellPanel->littleEndianRadioButton(), &QRadioButton::toggled, this,
-            [this](bool checked) {
-                if (checked) {
-                    setDataViewBigEndianEnabled(false);
-                }
-            });
-    connect(m_structDataViewShellPanel->bigEndianRadioButton(), &QRadioButton::toggled, this,
-            [this](bool checked) {
-                if (checked) {
-                    setDataViewBigEndianEnabled(true);
-                }
-            });
     connect(m_dataViewImagePanel, &DataViewImagePanel::scanRequested, this,
             &MainWindow::startImageScan);
     connect(m_dataViewImagePanel, &DataViewImagePanel::resultActivated, this,
@@ -759,15 +714,15 @@ MainWindow::MainWindow(QWidget* parent)
     connect(m_textView, &TextViewWidget::hoverLeft, this, &MainWindow::onHoverLeft);
     connect(m_textView, &TextViewWidget::selectionRangeChanged, this,
             [this](bool hasRange, quint64 start, quint64 end) {
-                if (!m_structNavigationInProgress) {
+                if (!m_decodedNavigationInProgress) {
                     if (!m_previewSyncInProgress) {
-                        clearStructSourceHighlight();
+                        clearDecodedSourceHighlight();
                     }
                 }
                 if (!hasRange) {
                     m_activeTextSelectionRange.reset();
                     m_bitmapView->setExternalSelectionRange(
-                        m_structSourceHighlightRange);
+                        m_decodedSourceHighlightRange);
                     updateHexInfoPanel();
                     refreshDataViewFromNavigator();
                     return;
@@ -824,44 +779,6 @@ MainWindow::MainWindow(QWidget* parent)
             &MainWindow::onBitmapHoverOffsetChanged);
     connect(m_bitmapView, &BitmapViewWidget::byteClicked, this, &MainWindow::onBitmapByteClicked);
     connect(m_bitmapView, &BitmapViewWidget::hoverLeft, this, &MainWindow::onHoverLeft);
-    connect(m_structModeLeftPanel, &StructModeLeftPanel::previewRequested, this, [this]() {
-        syncStructPreviewToControls();
-    });
-    connect(m_structModeLeftPanel, &StructModeLeftPanel::previewClearRequested,
-            this, &MainWindow::clearStructPreview);
-    connect(m_structModeLeftPanel, &StructModeLeftPanel::addViewRequested,
-            this, &MainWindow::addCurrentStructView);
-    connect(m_structModeLeftPanel, &StructModeLeftPanel::currentViewsRemoved,
-            this, &MainWindow::removeCurrentStructViews);
-    connect(m_structModeLeftPanel, &StructModeLeftPanel::currentViewChanged,
-            this, &MainWindow::updateCurrentStructView);
-    connect(m_structModeLeftPanel, &StructModeLeftPanel::sourceLocationActivated,
-            this, &MainWindow::navigateToStructSource);
-    connect(m_structDataViewPanel, &StructDataViewPanel::sourceLocationActivated,
-            this, &MainWindow::navigateToStructSource);
-    connect(m_structDataViewPanel,
-            &StructDataViewPanel::declarationLocationActivated,
-            m_structModeLeftPanel,
-            &StructModeLeftPanel::focusDeclarationRange);
-    connect(m_structModeLeftPanel, &StructModeLeftPanel::parseStateChanged, this, [this]() {
-        AppSettings::setStructDeclarationText(m_structModeLeftPanel->declarationText());
-        syncStructPreviewToControls();
-    });
-    connect(m_structModeLeftPanel, &StructModeLeftPanel::declarationFileLoaded,
-            this, [this](const QString& filePath) {
-                m_externalStructSourcePaths.clear();
-                AppSettings::setLastStructDefinitionFilePath(filePath);
-            });
-    connect(m_structModeLeftPanel->entryComboBox(), &QComboBox::currentTextChanged, this,
-            [this](const QString& text) {
-                AppSettings::setStructEntryName(text);
-                syncStructPreviewToControls();
-            });
-    connect(m_structModeLeftPanel->entryCountSpinBox(), qOverload<int>(&QSpinBox::valueChanged),
-            this, [this](int count) {
-                AppSettings::setStructEntryCount(count);
-                syncStructPreviewToControls();
-            });
     connect(m_currentByteInfoPanel->bigEndianCheckBox(), &QCheckBox::toggled, this, [this](bool checked) {
         AppSettings::setCurrentByteInfoBigEndianEnabled(checked);
         refreshCurrentByteInfoFromLastHover();
@@ -1139,32 +1056,13 @@ MainWindow::MainWindow(QWidget* parent)
     updateHexInfoPanel();
     clearCurrentByteInfo();
 
-    bool rememberedStructDefinitionLoaded = false;
-    if (!rememberedStructDefinitionPath.isEmpty() &&
-        QFileInfo(rememberedStructDefinitionPath).isFile()) {
-        rememberedStructDefinitionLoaded =
-            m_structModeLeftPanel->loadDeclarationFromFile(
-                rememberedStructDefinitionPath);
+    if (!rememberedSchemaLibrary.isEmpty()) {
+        m_brecoLangPanel->setLibraryDirectory(rememberedSchemaLibrary);
     }
-    if (!rememberedStructDefinitionLoaded) {
-        if (!rememberedStructDeclaration.isEmpty()) {
-            m_structModeLeftPanel->structDeclarationEdit()->setPlainText(
-                rememberedStructDeclaration);
-        }
-    }
-    if (m_structModeLeftPanel->structureGraph().defaultEntryName().isEmpty() &&
-        !rememberedStructEntryName.isEmpty()) {
-        const int entryIndex =
-            m_structModeLeftPanel->entryComboBox()->findText(
-                rememberedStructEntryName);
-        if (entryIndex >= 0) {
-            m_structModeLeftPanel->entryComboBox()->setCurrentIndex(entryIndex);
-        }
-    }
-    m_structModeLeftPanel->entryCountSpinBox()->setValue(
-        qBound(m_structModeLeftPanel->entryCountSpinBox()->minimum(),
-               rememberedStructEntryCount,
-               m_structModeLeftPanel->entryCountSpinBox()->maximum()));
+    const bool rememberedSchemaLoaded =
+        !rememberedSchemaPath.isEmpty() &&
+        QFileInfo(rememberedSchemaPath).isFile() &&
+        m_brecoLangPanel->loadSchemaFile(rememberedSchemaPath);
 
     m_resultModel.setScanTargets(&m_scanTargets);
     refreshSourceSummary();
@@ -1203,17 +1101,14 @@ MainWindow::MainWindow(QWidget* parent)
                                      rememberedAbsolutePath);
         }
     }
-    if (rememberedSourceLoaded &&
-        m_structModeLeftPanel->previewEnabled() &&
-        m_structModeLeftPanel->canPreview()) {
+    if (rememberedSourceLoaded && rememberedSchemaLoaded) {
         QMetaObject::invokeMethod(
             this,
             [this, restoredSourceOffset]() {
                 if (isSingleFileModeActive() &&
-                    !m_textHoverBuffer.data.isEmpty() &&
-                    m_structModeLeftPanel->previewEnabled() &&
-                    m_structModeLeftPanel->canPreview()) {
-                    createStructPreview(restoredSourceOffset);
+                    !m_textHoverBuffer.data.isEmpty()) {
+                    m_brecoLangPanel->setDecodeOffset(restoredSourceOffset);
+                    m_brecoLangPanel->decodeSelected();
                 }
             },
             Qt::QueuedConnection);
@@ -1499,6 +1394,9 @@ bool MainWindow::selectSingleFileSource(const QString& filePath) {
     m_sourceFiles = {absolutePath};
     m_sourceMode = SourceMode::SingleFile;
     m_selectedSourceDisplay = absolutePath;
+    if (m_brecoLangPanel != nullptr) {
+        m_brecoLangPanel->setSuggestedInputPath(absolutePath);
+    }
     buildScanTargets(m_sourceFiles);
     m_resultModel.clear();
     clearResultBufferCacheState();
@@ -1517,7 +1415,6 @@ bool MainWindow::selectSingleFileSource(const QString& filePath) {
     }
     refreshSourceSummary();
     loadNotEmptyPreview();
-    syncStructPreviewToControls();
     updateBufferStatusLine();
     syncSourcePathInputText(absolutePath);
     updateSourcePathFeedback(SourcePathFeedback::Open, kind, absolutePath);
@@ -1600,15 +1497,15 @@ void MainWindow::onStartScan() {
     startScan(ScanKind::Text);
 }
 
-void MainWindow::onStartStructureScan() {
+void MainWindow::onStartBrecoLangScan() {
     m_mainTabsPanel->activateScanTab();
     if (m_scanController.isRunning()) {
-        if (m_activeScanKind == ScanKind::Structure) {
+        if (m_activeScanKind == ScanKind::BrecoLang) {
             onStopScan();
         }
         return;
     }
-    startScan(ScanKind::Structure);
+    startScan(ScanKind::BrecoLang);
 }
 
 void MainWindow::startScan(ScanKind kind) {
@@ -1618,19 +1515,25 @@ void MainWindow::startScan(ScanKind kind) {
         return;
     }
 
-    const bool structureScan = kind == ScanKind::Structure;
-    const QByteArray term = structureScan
+    const bool schemaScan = kind == ScanKind::BrecoLang;
+    const QByteArray term = schemaScan
                                 ? QByteArray()
                                 : m_scanControlsPanel->searchTermLineEdit()->text().toUtf8();
-    if (!structureScan && term.isEmpty()) {
+    if (!schemaScan && term.isEmpty()) {
         QMessageBox::information(this, QStringLiteral("Breco"),
                                  QStringLiteral("Enter a search term."));
         return;
     }
-    if (structureScan && !m_structModeLeftPanel->canPreview()) {
-        QMessageBox::information(this, QStringLiteral("Breco"),
-                                 QStringLiteral("Select a valid structure entry first."));
-        return;
+    std::shared_ptr<const lang::ProbeScanPlan> probePlan;
+    if (schemaScan) {
+        QString error;
+        const std::optional<lang::ProbeScanPlan> plan =
+            m_brecoLangPanel->probeScanPlan(&error);
+        if (!plan.has_value()) {
+            QMessageBox::information(this, QStringLiteral("Breco"), error);
+            return;
+        }
+        probePlan = std::make_shared<const lang::ProbeScanPlan>(*plan);
     }
     const auto scanButtonPressedAt = std::chrono::steady_clock::now();
 
@@ -1643,38 +1546,24 @@ void MainWindow::startScan(ScanKind kind) {
     updateBufferStatusLine();
 
     m_scanControlsPanel->scanProgressBar()->setValue(0);
-    std::shared_ptr<const StructureGraph> scanGraph;
-    std::shared_ptr<const QHash<QString, VisualizationSource>> scanExternalSources;
-    QString scanEntry;
-    if (structureScan) {
-        scanGraph = std::make_shared<StructureGraph>(
-            m_structModeLeftPanel->structureGraph());
-        scanEntry = m_structModeLeftPanel->entryComboBox()->currentText();
-        auto externalSources = std::make_shared<QHash<QString, VisualizationSource>>();
-        if (!loadExternalStructSources(externalSources.get())) {
-            return;
-        }
-        scanExternalSources = std::move(externalSources);
-    }
     m_activeScanKind = kind;
     m_savedIgnoreCaseEnabled =
         m_scanControlsPanel->ignoreCaseCheckBox()->isEnabled();
     m_scanControlsPanel->ignoreCaseCheckBox()->setEnabled(false);
-    if (structureScan) {
-        m_savedStructureSearchTerm =
+    if (schemaScan) {
+        m_savedSchemaSearchTerm =
             m_scanControlsPanel->searchTermLineEdit()->text();
-        m_savedStructureTermEnabled =
+        m_savedSchemaTermEnabled =
             m_scanControlsPanel->searchTermLineEdit()->isEnabled();
         m_scanControlsPanel->searchTermLineEdit()->setText(
-            QStringLiteral("Structure: %1").arg(scanEntry));
+            QStringLiteral("BrecoLang: %1").arg(probePlan->entryName));
         m_scanControlsPanel->searchTermLineEdit()->setEnabled(false);
     }
     m_scanController.startScan(m_scanTargets, term, effectiveBlockSizeBytes(), selectedWorkerCount(),
                                selectedTextMode(),
                                m_scanControlsPanel->ignoreCaseCheckBox()->isChecked(),
                                m_scanControlsPanel->prefillOnMergeCheckBox()->isChecked(),
-                               scanButtonPressedAt, scanGraph, scanEntry,
-                               scanExternalSources);
+                               scanButtonPressedAt, probePlan);
 }
 
 void MainWindow::onStopScan() { m_scanController.requestStop(); }
@@ -1918,8 +1807,7 @@ bool MainWindow::dataViewBigEndianEnabled() const {
 
 void MainWindow::setDataViewBigEndianEnabled(bool enabled) {
     m_dataViewBigEndian = enabled;
-    for (DataViewShellPanel* shell :
-         {m_rawDataViewShellPanel, m_structDataViewShellPanel}) {
+    for (DataViewShellPanel* shell : {m_rawDataViewShellPanel}) {
         if (shell == nullptr) {
             continue;
         }
@@ -1937,7 +1825,6 @@ void MainWindow::setDataViewBigEndianEnabled(bool enabled) {
     AppSettings::setDataViewBigEndianEnabled(enabled);
     refreshCurrentByteInfoFromLastHover();
     refreshDataViewFromNavigator();
-    rebuildStructVisualization();
 }
 
 void MainWindow::updateTextModeControlVisibility() {
@@ -2194,16 +2081,18 @@ void MainWindow::refreshDataViewFromNavigator() {
 void MainWindow::setScanButtonMode(bool running) {
     m_scanControlsPanel->startScanButton()->setText(running ? QStringLiteral("Stop")
                                                             : QStringLiteral("Scan"));
-    m_structModeLeftPanel->setScanState(
-        running, running && m_activeScanKind == ScanKind::Structure);
+    m_brecoLangPanel->setScanRunning(
+        running && m_activeScanKind == ScanKind::BrecoLang);
+    m_brecoLangPanel->scanButton()->setEnabled(
+        !running || m_activeScanKind == ScanKind::BrecoLang);
 }
 
 void MainWindow::restoreTransientScanUi() {
-    if (m_activeScanKind == ScanKind::Structure) {
+    if (m_activeScanKind == ScanKind::BrecoLang) {
         m_scanControlsPanel->searchTermLineEdit()->setText(
-            m_savedStructureSearchTerm);
+            m_savedSchemaSearchTerm);
         m_scanControlsPanel->searchTermLineEdit()->setEnabled(
-            m_savedStructureTermEnabled);
+            m_savedSchemaTermEnabled);
     }
     if (m_activeScanKind != ScanKind::None) {
         m_scanControlsPanel->ignoreCaseCheckBox()->setEnabled(
@@ -2733,8 +2622,7 @@ bool MainWindow::expandActivePreviewBuffer(int direction) {
 }
 
 void MainWindow::clearResultBufferCacheState() {
-    clearStructSourceHighlight();
-    clearStructPreview();
+    clearDecodedSourceHighlight();
     cancelImageScan();
     if (m_dataViewImagePanel != nullptr) {
         m_dataViewImagePanel->clearResults();
@@ -4159,39 +4047,38 @@ void MainWindow::onBitmapHoverOffsetChanged(quint64 absoluteOffset) {
 }
 
 void MainWindow::onBitmapByteClicked(quint64 absoluteOffset) {
-    clearStructSourceHighlight();
-    clearStructPreview();
+    clearDecodedSourceHighlight();
     requestSharedCenter(absoluteOffset);
 }
 
 void MainWindow::onTextByteClicked(quint64 absoluteOffset) {
-    if (m_structModeLeftPanel->previewEnabled() &&
-        m_structModeLeftPanel->canPreview()) {
-        createStructPreview(absoluteOffset);
+    if (m_brecoLangPanel != nullptr && m_brecoLangPanel->program() != nullptr) {
+        m_brecoLangPanel->setDecodeOffset(absoluteOffset);
+        m_brecoLangPanel->decodeSelected();
     }
 }
 
-void MainWindow::setStructSourceHighlight(quint64 absoluteOffset,
-                                          quint64 byteLength) {
+void MainWindow::setDecodedSourceHighlight(quint64 absoluteOffset,
+                                           quint64 byteLength) {
     if (byteLength == 0) {
-        clearStructSourceHighlight();
+        clearDecodedSourceHighlight();
         return;
     }
     const quint64 rangeEnd =
         byteLength > std::numeric_limits<quint64>::max() - absoluteOffset
             ? std::numeric_limits<quint64>::max()
             : absoluteOffset + byteLength;
-    m_structSourceHighlightRange = qMakePair(absoluteOffset, rangeEnd);
+    m_decodedSourceHighlightRange = qMakePair(absoluteOffset, rangeEnd);
     if (m_textView != nullptr) {
-        m_textView->setExternalSelectionRange(m_structSourceHighlightRange);
+        m_textView->setExternalSelectionRange(m_decodedSourceHighlightRange);
     }
     if (m_bitmapView != nullptr) {
-        m_bitmapView->setExternalSelectionRange(m_structSourceHighlightRange);
+        m_bitmapView->setExternalSelectionRange(m_decodedSourceHighlightRange);
     }
 }
 
-void MainWindow::clearStructSourceHighlight() {
-    m_structSourceHighlightRange.reset();
+void MainWindow::clearDecodedSourceHighlight() {
+    m_decodedSourceHighlightRange.reset();
     if (m_textView != nullptr) {
         m_textView->setExternalSelectionRange(std::nullopt);
     }
@@ -4200,12 +4087,12 @@ void MainWindow::clearStructSourceHighlight() {
     }
 }
 
-void MainWindow::navigateToStructSource(const QString& filePath,
-                                        quint64 absoluteOffset,
-                                        quint64 byteLength) {
-    const bool wasNavigating = m_structNavigationInProgress;
-    m_structNavigationInProgress = true;
-    clearStructSourceHighlight();
+void MainWindow::navigateToDecodedSource(const QString& filePath,
+                                         quint64 absoluteOffset,
+                                         quint64 byteLength) {
+    const bool wasNavigating = m_decodedNavigationInProgress;
+    m_decodedNavigationInProgress = true;
+    clearDecodedSourceHighlight();
 
     bool sourceReady = true;
     if (!filePath.isEmpty()) {
@@ -4219,292 +4106,10 @@ void MainWindow::navigateToStructSource(const QString& filePath,
     }
     if (sourceReady) {
         jumpToAbsoluteOffset(absoluteOffset);
-        setStructSourceHighlight(absoluteOffset, byteLength);
+        setDecodedSourceHighlight(absoluteOffset, byteLength);
     }
 
-    m_structNavigationInProgress = wasNavigating;
-}
-
-quint64 MainWindow::structVisualizationStartOffset() const {
-    if (m_textView->selectionStartOffset().has_value()) {
-        return m_textView->selectionStartOffset().value();
-    }
-    if (m_textView->selectedOffset().has_value()) {
-        return m_textView->selectedOffset().value();
-    }
-    if (m_textView->firstVisibleByteOffset().has_value()) {
-        return m_textView->firstVisibleByteOffset().value();
-    }
-    return m_textHoverBuffer.baseOffset;
-}
-
-bool MainWindow::loadExternalStructSources(
-    QHash<QString, VisualizationSource>* sources) {
-    if (sources == nullptr) {
-        return false;
-    }
-    sources->clear();
-    for (const QString& role : m_structModeLeftPanel->structureGraph().externalRoles()) {
-        QString path = m_externalStructSourcePaths.value(role);
-        if (path.isEmpty() || !QFileInfo::exists(path)) {
-            path = QFileDialog::getOpenFileName(
-                this, QStringLiteral("Select external structure source: %1").arg(role),
-                AppSettings::lastBrowseDialogDirectory(),
-                QStringLiteral("All files (*)"));
-            if (path.isEmpty()) {
-                return false;
-            }
-            m_externalStructSourcePaths.insert(role, path);
-        }
-        QFile file(path);
-        if (!file.open(QIODevice::ReadOnly)) {
-            QMessageBox::warning(this, QStringLiteral("External source error"),
-                                 QStringLiteral("Could not read '%1': %2")
-                                     .arg(path, file.errorString()));
-            return false;
-        }
-        VisualizationSource source;
-        source.bytes = file.readAll();
-        source.filePath = QFileInfo(path).absoluteFilePath();
-        sources->insert(role, std::move(source));
-    }
-    return true;
-}
-
-bool MainWindow::decodeStructView(StructViewState& view, bool allowSourceReload) {
-    if (!m_structModeLeftPanel->isParseValid() ||
-        !m_structModeLeftPanel->structureGraph().isVisualizableEntryName(view.type)) {
-        view.reloadError = QStringLiteral("Struct type '%1' is not available").arg(view.type);
-        return false;
-    }
-
-    QByteArray data;
-    size_t dataStartOffset = 0;
-    quint64 dataBaseOffset = 0;
-    const auto loadSourceWindow = [&]() -> bool {
-        if (!allowSourceReload || view.filePath.isEmpty() || view.fileSize <= view.offset) {
-            return false;
-        }
-        const quint64 readSize =
-            qMin(kNotEmptyInitialBytes, view.fileSize - view.offset);
-        const std::optional<QByteArray> loaded =
-            m_windowLoader.loadTransformedWindow(view.filePath, view.fileSize,
-                                                  view.offset, readSize,
-                                                  currentShiftSettings());
-        if (!loaded.has_value()) {
-            return false;
-        }
-        data = *loaded;
-        dataStartOffset = 0;
-        dataBaseOffset = view.offset;
-        return true;
-    };
-    const quint64 hoverEnd =
-        m_textHoverBuffer.baseOffset +
-        static_cast<quint64>(m_textHoverBuffer.data.size());
-    if (view.filePath == m_textHoverBuffer.filePath &&
-        view.offset >= m_textHoverBuffer.baseOffset && view.offset < hoverEnd) {
-        const quint64 hoverSuffixBytes = hoverEnd - view.offset;
-        const quint64 desiredBytes =
-            view.fileSize > view.offset
-                ? qMin(kNotEmptyInitialBytes, view.fileSize - view.offset)
-                : hoverSuffixBytes;
-        if (!allowSourceReload || hoverSuffixBytes >= desiredBytes ||
-            !loadSourceWindow()) {
-            data = m_textHoverBuffer.data;
-            dataBaseOffset = m_textHoverBuffer.baseOffset;
-            dataStartOffset =
-                static_cast<size_t>(view.offset - m_textHoverBuffer.baseOffset);
-        }
-    } else {
-        loadSourceWindow();
-    }
-    if (data.isEmpty() || dataStartOffset >= static_cast<size_t>(data.size())) {
-        view.reloadError =
-            QStringLiteral("Could not load bytes at offset 0x%1")
-                .arg(view.offset, 0, 16);
-        return false;
-    }
-
-    QHash<QString, VisualizationSource> externalSources;
-    if (!loadExternalStructSources(&externalSources)) {
-        view.reloadError = QStringLiteral("External source selection was cancelled");
-        return false;
-    }
-    VisualizationSource primary{data, view.filePath, dataBaseOffset};
-    view.decodedRoot = visualize(
-        m_structModeLeftPanel->structureGraph(), view.type, primary,
-        dataStartOffset, view.repeat, externalSources,
-        dataViewBigEndianEnabled() ? Endianness::Big : Endianness::Little);
-    view.reloadError.clear();
-    return true;
-}
-
-void MainWindow::syncStructPreviewToControls() {
-    const quint64 absoluteOffset =
-        m_structPreview.has_value() ? m_structPreview->offset
-                                    : structVisualizationStartOffset();
-    clearStructPreview();
-    if (m_structModeLeftPanel->previewEnabled() &&
-        m_structModeLeftPanel->canPreview()) {
-        createStructPreview(absoluteOffset);
-    }
-}
-
-void MainWindow::createStructPreview(quint64 absoluteOffset) {
-    if (!m_structModeLeftPanel->previewEnabled() ||
-        !m_structModeLeftPanel->canPreview()) {
-        return;
-    }
-    StructViewState preview;
-    preview.type = m_structModeLeftPanel->entryComboBox()->currentText();
-    preview.repeat = m_structModeLeftPanel->entryCountSpinBox()->value();
-    preview.offset = absoluteOffset;
-    preview.filePath = m_textHoverBuffer.filePath;
-    for (const ScanTarget& target : m_scanTargets) {
-        if (target.filePath == preview.filePath) {
-            preview.fileSize = target.fileSize;
-            break;
-        }
-    }
-    if (preview.fileSize == 0) {
-        preview.fileSize =
-            m_filePool.externalReadSize(preview.filePath)
-                .value_or(m_textHoverBuffer.baseOffset +
-                          static_cast<quint64>(m_textHoverBuffer.data.size()));
-    }
-    if (!decodeStructView(preview, false)) {
-        return;
-    }
-    m_structPreview = preview;
-    m_structModeLeftPanel->setPreviewActive(true);
-    rebuildStructVisualization();
-    AppSettings::setStructDeclarationText(m_structModeLeftPanel->declarationText());
-    AppSettings::setStructEntryName(preview.type);
-    AppSettings::setStructEntryCount(preview.repeat);
-}
-
-void MainWindow::clearStructPreview() {
-    if (!m_structPreview.has_value() &&
-        (m_structModeLeftPanel == nullptr ||
-         !m_structModeLeftPanel->previewActive())) {
-        return;
-    }
-    clearStructSourceHighlight();
-    m_structPreview.reset();
-    if (m_structModeLeftPanel != nullptr) {
-        m_structModeLeftPanel->setPreviewActive(false);
-    }
-    rebuildStructVisualization();
-}
-
-void MainWindow::addCurrentStructView() {
-    if (!m_structPreview.has_value()) {
-        return;
-    }
-    StructViewState view = *m_structPreview;
-    view.id = m_nextStructViewId++;
-    view.name =
-        QStringLiteral("%1@0x%2")
-            .arg(view.type, QString::number(view.offset, 16).toUpper());
-    m_currentStructViews.push_back(view);
-    m_structModeLeftPanel->addCurrentView(
-        CurrentStructView{view.id, view.name, view.type, view.repeat,
-                          view.offset, view.decodedRoot.sourceLength,
-                          view.filePath});
-    rebuildStructVisualization();
-}
-
-void MainWindow::removeCurrentStructViews(const QVector<quint64>& ids) {
-    m_currentStructViews.erase(
-        std::remove_if(m_currentStructViews.begin(), m_currentStructViews.end(),
-                       [&ids](const StructViewState& view) {
-                           return ids.contains(view.id);
-                       }),
-        m_currentStructViews.end());
-    rebuildStructVisualization();
-}
-
-void MainWindow::updateCurrentStructView(quint64 id, const QString& name,
-                                         int repeat, quint64 offset) {
-    auto found =
-        std::find_if(m_currentStructViews.begin(), m_currentStructViews.end(),
-                     [id](const StructViewState& view) { return view.id == id; });
-    if (found == m_currentStructViews.end()) {
-        return;
-    }
-    const bool requiresDecode = found->repeat != repeat || found->offset != offset;
-    found->name = name;
-    if (requiresDecode) {
-        StructViewState updated = *found;
-        updated.repeat = repeat;
-        updated.offset = offset;
-        decodeStructView(updated, true);
-        *found = updated;
-        m_structModeLeftPanel->setCurrentViewByteLength(
-            found->id, found->decodedRoot.sourceLength);
-    }
-    rebuildStructVisualization();
-}
-
-void MainWindow::rebuildStructVisualization() {
-    if (m_structDataViewPanel == nullptr) {
-        return;
-    }
-    VisualizedNode root;
-    root.name = QStringLiteral("root");
-    m_structDataViewPanel->setSourceEndianness(
-        dataViewBigEndianEnabled() ? Endianness::Big : Endianness::Little);
-    const auto applyViewSource = [](VisualizedNode* node,
-                                    const StructViewState& view) {
-        node->sourceFilePath = view.filePath;
-        node->sourceOffset = view.offset;
-        node->sourceLength = view.decodedRoot.sourceLength;
-        node->hasSourceOffset = true;
-    };
-    const auto buildViewNode = [this, &applyViewSource](
-                                   const StructViewState& view,
-                                   const QString& viewName) {
-        VisualizedNode node;
-        node.name = viewName;
-        node.typeName = view.type;
-        node.declarationRange =
-            m_structModeLeftPanel->structureGraph().nameRangeForEntry(view.type);
-        node.valueKind = view.repeat == 1 ? VisualizedValueKind::Object
-                                         : VisualizedValueKind::Array;
-        applyViewSource(&node, view);
-        if (view.repeat == 1 && view.decodedRoot.children.size() == 1 &&
-            view.decodedRoot.children.first().valueKind ==
-                VisualizedValueKind::Object) {
-            node.children = view.decodedRoot.children.first().children;
-        } else {
-            node.children = view.decodedRoot.children;
-        }
-        if (!view.reloadError.isEmpty()) {
-            node.valid = false;
-            node.errorMessage = view.reloadError;
-        }
-        return node;
-    };
-    const auto appendView = [&root, &buildViewNode](const StructViewState& view,
-                                                    const QString& viewName) {
-        root.children.push_back(buildViewNode(view, viewName));
-    };
-    if (m_structPreview.has_value()) {
-        appendView(*m_structPreview, QStringLiteral("Preview"));
-    }
-    for (const StructViewState& view : m_currentStructViews) {
-        appendView(view, view.name);
-    }
-    if (root.children.isEmpty()) {
-        m_structDataViewPanel->setOutforms(
-            m_structModeLeftPanel->structureGraph().outforms());
-        m_structDataViewPanel->clearVisualization();
-    } else {
-        m_structDataViewPanel->setOutforms(
-            m_structModeLeftPanel->structureGraph().outforms());
-        m_structDataViewPanel->setVisualization(root);
-    }
+    m_decodedNavigationInProgress = wasNavigating;
 }
 
 void MainWindow::onHoverLeft() {

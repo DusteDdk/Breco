@@ -7,7 +7,6 @@
 #include <QDir>
 #include <QDialog>
 #include <QDialogButtonBox>
-#include <QDockWidget>
 #include <QEnterEvent>
 #include <QFile>
 #include <QFileInfo>
@@ -50,37 +49,18 @@
 #include <utility>
 
 #include "app/MainWindow.h"
+#include "brecolang/gui/BrecoLangPanel.h"
+#include "brecolang/gui/DecodedTreeModel.h"
 #include "io/ProtectedSourceOpener.h"
 #include "panel/CurrentByteInfoPanel.h"
 #include "panel/DataViewByteAndBitmapPanel.h"
 #include "panel/DataViewImagePanel.h"
 #include "panel/DataViewShellPanel.h"
-#include "panel/DataViewStructuredPanel.h"
 #include "panel/HexViewControlsPanel.h"
 #include "panel/MainTabsPanel.h"
 #include "panel/ResultsTablePanel.h"
 #include "panel/ScanControlsPanel.h"
-#include "panel/StructDataViewPanel.h"
-#include "panel/StructModeLeftPanel.h"
-#include "struct/StructVisualizedTreeModel.h"
 #include "view/TextViewWidget.h"
-
-namespace breco {
-
-class StructDataViewPanelTestAccess {
-public:
-    static QMenu* addOutformMenu(StructDataViewPanel* panel, QMenu* parent,
-                                 const QVector<const VisualizedNode*>& nodes) {
-        panel->addOutformMenu(parent, nodes);
-        return parent->actions().last()->menu();
-    }
-
-    static void setSavePath(StructDataViewPanel* panel, const QString& path) {
-        panel->m_outformSavePathForTests = path;
-    }
-};
-
-}  // namespace breco
 
 namespace {
 
@@ -139,6 +119,7 @@ private slots:
     void lifecycleCardLogsAndResetsPerScan();
     void selectingResultRowUpdatesPreviewBuffers();
     void twoColumnCompositionAndDataViewToolbar();
+    void brecoLangPanelDecodesRealFileWithoutAutomaticExpandAll();
     void navigatorLabelsAndDataViewEndianFollowSelection();
     void hexViewDefaultsPersistAcrossWindows();
     void hexNavigatorEditsPreserveDeltaAndSelectionLength();
@@ -153,11 +134,9 @@ private slots:
 #ifdef Q_OS_UNIX
     void protectedSourceOpenElevatesAutomaticallyAndReportsFailures();
 #endif
-    void structModePanelPreviewViewsAndSnippets();
-    void outformContextSubmenuListsAndSavesDeclarations();
-    void structureRuleRunsThroughAsyncScanPipeline();
-    void structureScanStopRestoresTransientControls();
-    void restoresStructDefinitionAndPreviewOnStartup();
+    void brecoLangRuleRunsThroughAsyncScanPipeline();
+    void brecoLangScanStopRestoresTransientControls();
+    void brecoLangLibraryMigrationAndStartupRestore();
     void imageModeScansAndJumpsToResult();
     void imageModeStopPreservesPartialResults();
     void imagePanelAnimatesGifAndHighlightsHover();
@@ -177,105 +156,87 @@ void MainWindowIntegrationTests::initTestCase() {
     qputenv("QT_QPA_PLATFORM", QByteArray("offscreen"));
 }
 
-void MainWindowIntegrationTests::structureRuleRunsThroughAsyncScanPipeline() {
-    QTemporaryDir dir;
-    QVERIFY(dir.isValid());
-    const QString path = dir.filePath(QStringLiteral("structure-scan.bin"));
-    QFile file(path);
-    QVERIFY(file.open(QIODevice::WriteOnly));
-    QCOMPARE(file.write(QByteArray::fromHex("0042004200")), 5LL);
-    file.close();
+void MainWindowIntegrationTests::brecoLangRuleRunsThroughAsyncScanPipeline() {
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString inputPath = directory.filePath(QStringLiteral("schema-scan.bin"));
+    QFile input(inputPath);
+    QVERIFY(input.open(QIODevice::WriteOnly));
+    QCOMPARE(input.write(QByteArray::fromHex("0042004200")), 5LL);
+    input.close();
 
     breco::MainWindow window;
-    QVERIFY(window.selectSingleFileSource(path));
-    window.m_structModeLeftPanel->structDeclarationEdit()->setPlainText(
-        QStringLiteral("struct Hit { /cond(=0x42) uint8 magic; };"));
-    QVERIFY(window.m_structModeLeftPanel->canPreview());
-    QVERIFY(window.m_structModeLeftPanel->scanStructureButton()->isEnabled());
+    QVERIFY(window.selectSingleFileSource(inputPath));
+    const QString source = QStringLiteral(R"BRECO(
+language breco 0.1
+inputs { input data { default } }
+record Hit {
+    identify { magic: u8 match magic == 0x42 else "not a hit" }
+    commit
+}
+entry HitAt from data { hit: Hit }
+default entry HitAt
+)BRECO");
+    QVERIFY(window.m_brecoLangPanel->loadSchemaText(source));
+    QVERIFY(window.m_brecoLangPanel->setInputPath(u"data", inputPath));
     window.m_scanControlsPanel->searchTermLineEdit()->setText(
         QStringLiteral("remember me"));
-    window.m_mainTabsPanel->activateTab(window.m_mainTabsPanel->structDataTab());
-    QCOMPARE(window.m_mainTabsPanel->mainTabWidget()->currentWidget(),
-             window.m_mainTabsPanel->structDataTab());
-    window.m_structModeLeftPanel->scanStructureButton()->click();
+    window.m_mainTabsPanel->activateTab(window.m_mainTabsPanel->brecoLangTab());
+    window.m_brecoLangPanel->scanButton()->click();
     QVERIFY(window.m_scanController.isRunning());
     QCOMPARE(window.m_mainTabsPanel->mainTabWidget()->currentIndex(), 0);
     QCOMPARE(window.m_scanControlsPanel->searchTermLineEdit()->text(),
-             QStringLiteral("Structure: Hit"));
+             QStringLiteral("BrecoLang: HitAt"));
     QVERIFY(!window.m_scanControlsPanel->searchTermLineEdit()->isEnabled());
-    QVERIFY(!window.m_scanControlsPanel->ignoreCaseCheckBox()->isEnabled());
-    QCOMPARE(window.m_scanControlsPanel->startScanButton()->text(),
-             QStringLiteral("Stop"));
-    QCOMPARE(window.m_structModeLeftPanel->scanStructureButton()->text(),
-             QStringLiteral("Stop"));
+    QCOMPARE(window.m_brecoLangPanel->scanButton()->text(),
+             QStringLiteral("Stop Scan"));
     QTRY_VERIFY_WITH_TIMEOUT(!window.m_scanController.isRunning(), 10000);
     QCOMPARE(window.m_scanControlsPanel->searchTermLineEdit()->text(),
              QStringLiteral("remember me"));
     QVERIFY(window.m_scanControlsPanel->searchTermLineEdit()->isEnabled());
-    QVERIFY(window.m_scanControlsPanel->ignoreCaseCheckBox()->isEnabled());
-    QCOMPARE(window.m_structModeLeftPanel->scanStructureButton()->text(),
-             QStringLiteral("Scan"));
-    QCOMPARE(window.m_resultModel.rowCount(), 3);  // Includes the normal preview row.
+    QCOMPARE(window.m_brecoLangPanel->scanButton()->text(),
+             QStringLiteral("Scan for Entry"));
+    QCOMPARE(window.m_resultModel.rowCount(), 3);
     QCOMPARE(window.m_resultModel.matchAt(1)->offset, 1ULL);
     QCOMPARE(window.m_resultModel.matchAt(2)->offset, 3ULL);
-    const QString scanProgress = window.m_scanControlsPanel->scanProgressBar()->format();
-    QVERIFY(scanProgress.contains(QStringLiteral(" @ ")));
-    QVERIFY(scanProgress.contains(QStringLiteral("( Disk: ")));
-    QVERIFY(scanProgress.endsWith(QStringLiteral("100.00 %")));
 }
 
-void MainWindowIntegrationTests::structureScanStopRestoresTransientControls() {
-    QTemporaryDir dir;
-    QVERIFY(dir.isValid());
-    const QString path = dir.filePath(QStringLiteral("structure-stop.bin"));
-    QFile file(path);
-    QVERIFY(file.open(QIODevice::WriteOnly));
-    QByteArray data(4 * 1024 * 1024, '\0');
+void MainWindowIntegrationTests::brecoLangScanStopRestoresTransientControls() {
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString inputPath = directory.filePath(QStringLiteral("schema-stop.bin"));
+    QFile input(inputPath);
+    QVERIFY(input.open(QIODevice::WriteOnly));
+    QByteArray data(2 * 1024 * 1024, '\0');
     data[0] = 0x42;
-    QCOMPARE(file.write(data), data.size());
-    file.close();
+    QCOMPARE(input.write(data), data.size());
+    input.close();
 
     breco::MainWindow window;
-    QVERIFY(window.selectSingleFileSource(path));
-    window.m_structModeLeftPanel->structDeclarationEdit()->setPlainText(
-        QStringLiteral("struct Hit { /cond(=0x42) uint8 magic; };"));
+    QVERIFY(window.selectSingleFileSource(inputPath));
+    QVERIFY(window.m_brecoLangPanel->loadSchemaText(QStringLiteral(R"BRECO(
+language breco 0.1
+inputs { input data { default } }
+record Hit { identify { magic: u8 match magic == 0x42 else "no" } commit }
+entry HitAt from data { hit: Hit }
+default entry HitAt
+)BRECO")));
+    QVERIFY(window.m_brecoLangPanel->setInputPath(u"data", inputPath));
     window.m_scanControlsPanel->searchTermLineEdit()->setText(
         QStringLiteral("original"));
     window.m_scanControlsPanel->blockSizeSpin()->setValue(64);
     window.m_scanControlsPanel->blockSizeUnitCombo()->setCurrentIndex(1);
-    window.m_structModeLeftPanel->scanStructureButton()->click();
+    window.m_brecoLangPanel->scanButton()->click();
     QVERIFY(window.m_scanController.isRunning());
     QTRY_VERIFY_WITH_TIMEOUT(window.m_resultModel.rowCount() > 0, 10000);
-    window.m_structModeLeftPanel->scanStructureButton()->click();
+    window.m_brecoLangPanel->scanButton()->click();
     QTRY_VERIFY_WITH_TIMEOUT(!window.m_scanController.isRunning(), 10000);
     QCOMPARE(window.m_scanControlsPanel->searchTermLineEdit()->text(),
              QStringLiteral("original"));
     QVERIFY(window.m_scanControlsPanel->searchTermLineEdit()->isEnabled());
     QVERIFY(window.m_scanControlsPanel->ignoreCaseCheckBox()->isEnabled());
-    QCOMPARE(window.m_scanControlsPanel->startScanButton()->text(),
-             QStringLiteral("Scan"));
-    QCOMPARE(window.m_structModeLeftPanel->scanStructureButton()->text(),
-             QStringLiteral("Scan"));
-    QVERIFY(window.m_resultModel.rowCount() > 0);
-
-#ifndef Q_OS_WIN
-    // The zero-match text scan did not reliably stop within the timeout under
-    // Wine's headless Windows event loop. The structure-stop path above
-    // exercises the same ScanController cancellation and UI restoration.
-    window.m_scanControlsPanel->searchTermLineEdit()->setText(
-        QStringLiteral("needle"));
-    window.m_scanControlsPanel->startScanButton()->click();
-    QVERIFY(window.m_scanController.isRunning());
-    QCOMPARE(window.m_scanControlsPanel->searchTermLineEdit()->text(),
-             QStringLiteral("needle"));
-    QVERIFY(window.m_scanControlsPanel->searchTermLineEdit()->isEnabled());
-    QVERIFY(!window.m_scanControlsPanel->ignoreCaseCheckBox()->isEnabled());
-    QVERIFY(!window.m_structModeLeftPanel->scanStructureButton()->isEnabled());
-    window.m_scanControlsPanel->startScanButton()->click();
-    QTRY_VERIFY_WITH_TIMEOUT(!window.m_scanController.isRunning(), 10000);
-    QVERIFY(window.m_scanControlsPanel->ignoreCaseCheckBox()->isEnabled());
-    QVERIFY(window.m_structModeLeftPanel->scanStructureButton()->isEnabled());
-#endif
+    QCOMPARE(window.m_brecoLangPanel->scanButton()->text(),
+             QStringLiteral("Scan for Entry"));
 }
 
 void MainWindowIntegrationTests::lifecycleCardLogsAndResetsPerScan() {
@@ -406,45 +367,29 @@ void MainWindowIntegrationTests::twoColumnCompositionAndDataViewToolbar() {
     QVERIFY(window.m_hexControlsPanel != nullptr);
     QVERIFY(window.m_textView != nullptr);
     QVERIFY(window.m_rawDataViewShellPanel != nullptr);
-    QVERIFY(window.m_structDataViewShellPanel != nullptr);
     QVERIFY(window.m_dataViewByteAndBitmapPanel != nullptr);
-    QVERIFY(window.m_dataViewStructuredPanel != nullptr);
     QVERIFY(window.m_dataViewImagePanel != nullptr);
-    QVERIFY(window.m_structModeLeftPanel != nullptr);
+    QVERIFY(window.m_brecoLangPanel != nullptr);
     QTabWidget* tabs = window.m_mainTabsPanel->mainTabWidget();
     QCOMPARE(tabs->count(), 4);
     QCOMPARE(tabs->tabText(0), QStringLiteral("Scan"));
     QCOMPARE(tabs->tabText(1), QStringLiteral("Raw"));
-    QCOMPARE(tabs->tabText(2), QStringLiteral("Struct"));
+    QCOMPARE(tabs->tabText(2), QStringLiteral("BrecoLang"));
     QCOMPARE(tabs->tabText(3), QStringLiteral("Image"));
     QCOMPARE(tabs->indexOf(window.m_mainTabsPanel->rawDataTab()), 1);
-    QCOMPARE(tabs->indexOf(window.m_mainTabsPanel->structDataTab()), 2);
+    QCOMPARE(tabs->indexOf(window.m_mainTabsPanel->brecoLangTab()), 2);
     QCOMPARE(tabs->indexOf(window.m_mainTabsPanel->imageDataTab()), 3);
     QVERIFY(window.m_rawDataViewShellPanel->bodyHost()->isAncestorOf(
         window.m_dataViewByteAndBitmapPanel));
-    QVERIFY(window.m_structDataViewShellPanel->bodyHost()->isAncestorOf(
-        window.m_dataViewStructuredPanel));
+    QVERIFY(window.m_mainTabsPanel->brecoLangHost()->isAncestorOf(
+        window.m_brecoLangPanel));
     QVERIFY(window.m_mainTabsPanel->imageDataHost()->isAncestorOf(
         window.m_dataViewImagePanel));
-    QCOMPARE(window.m_rawDataViewShellPanel->controlMode(),
-             breco::DataViewShellPanel::ControlMode::Raw);
-    QCOMPARE(window.m_structDataViewShellPanel->controlMode(),
-             breco::DataViewShellPanel::ControlMode::Struct);
     QVERIFY(!window.m_rawDataViewShellPanel->bitmapModeComboBox()->isHidden());
     QVERIFY(!window.m_rawDataViewShellPanel->zoomInButton()->isHidden());
-    QVERIFY(window.m_structDataViewShellPanel->bitmapModeComboBox()->isHidden());
-    QVERIFY(window.m_structDataViewShellPanel->zoomInButton()->isHidden());
-    QVERIFY(!window.m_structDataViewShellPanel->littleEndianRadioButton()->isHidden());
-
-    window.m_structDataViewShellPanel->bigEndianRadioButton()->setChecked(true);
-    QCoreApplication::processEvents();
-    QVERIFY(window.m_rawDataViewShellPanel->bigEndianRadioButton()->isChecked());
-    window.m_rawDataViewShellPanel->littleEndianRadioButton()->setChecked(true);
-    QCoreApplication::processEvents();
-    QVERIFY(window.m_structDataViewShellPanel->littleEndianRadioButton()->isChecked());
 
     for (QWidget* page : {window.m_mainTabsPanel->rawDataTab(),
-                          window.m_mainTabsPanel->structDataTab(),
+                          window.m_mainTabsPanel->brecoLangTab(),
                           window.m_mainTabsPanel->imageDataTab()}) {
         QVERIFY(window.m_mainTabsPanel->detachTab(tabs->indexOf(page)));
         QVERIFY(window.m_mainTabsPanel->isTabDetached(page));
@@ -455,12 +400,12 @@ void MainWindowIntegrationTests::twoColumnCompositionAndDataViewToolbar() {
     QCoreApplication::processEvents();
     window.m_mainTabsPanel->detachedWindow(window.m_mainTabsPanel->rawDataTab())->close();
     QCoreApplication::processEvents();
-    window.m_mainTabsPanel->detachedWindow(window.m_mainTabsPanel->structDataTab())->close();
+    window.m_mainTabsPanel->detachedWindow(window.m_mainTabsPanel->brecoLangTab())->close();
     QCoreApplication::processEvents();
     QCOMPARE(tabs->count(), 4);
     QCOMPARE(tabs->tabText(0), QStringLiteral("Scan"));
     QCOMPARE(tabs->tabText(1), QStringLiteral("Raw"));
-    QCOMPARE(tabs->tabText(2), QStringLiteral("Struct"));
+    QCOMPARE(tabs->tabText(2), QStringLiteral("BrecoLang"));
     QCOMPARE(tabs->tabText(3), QStringLiteral("Image"));
 
     QCOMPARE(window.m_dataViewImagePanel->maxPixelsKSpinBox()->value(), 4096);
@@ -481,6 +426,75 @@ void MainWindowIntegrationTests::twoColumnCompositionAndDataViewToolbar() {
 
     QVERIFY(!window.m_rawDataViewShellPanel->bitmapModeComboBox()->isHidden());
     QVERIFY(!window.m_rawDataViewShellPanel->zoomInButton()->isHidden());
+}
+
+void MainWindowIntegrationTests::brecoLangPanelDecodesRealFileWithoutAutomaticExpandAll() {
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString schemaPath = directory.filePath(QStringLiteral("packet.breco"));
+    const QString inputPath = directory.filePath(QStringLiteral("packet.bin"));
+
+    QFile schema(schemaPath);
+    QVERIFY(schema.open(QIODevice::WriteOnly));
+    const QByteArray schemaText = R"BRECO(
+language breco 0.1
+inputs { input data { default } }
+record Packet { marker: u8 length: u16le }
+entry Inspect from data { packet: Packet preserve remaining as tail }
+default entry Inspect
+outform Summary(root: Inspect) text { emit "${root.packet.marker}" }
+)BRECO";
+    QCOMPARE(schema.write(schemaText), static_cast<qint64>(schemaText.size()));
+    schema.close();
+
+    QFile input(inputPath);
+    QVERIFY(input.open(QIODevice::WriteOnly));
+    QCOMPARE(input.write(QByteArray::fromHex("7e0400aabb")), 5LL);
+    input.close();
+
+    breco::MainWindow window;
+    QVERIFY(window.m_brecoLangPanel != nullptr);
+    QVERIFY(window.m_brecoLangPanel->loadSchemaFile(schemaPath));
+    QVERIFY(window.m_brecoLangPanel->setInputPath(u"data", inputPath));
+    QVERIFY(window.m_brecoLangPanel->selectEntry(u"Inspect"));
+    QVERIFY2(window.m_brecoLangPanel->decodeSelected(),
+             qPrintable(window.m_brecoLangPanel->statusText()));
+
+    auto* model = window.m_brecoLangPanel->treeModel();
+    QTreeView* view = window.m_brecoLangPanel->treeView();
+    QCOMPARE(model->rowCount(), 1);
+    const QModelIndex root = model->index(0, 0);
+    QVERIFY(root.isValid());
+    QVERIFY(view->isExpanded(root));
+    const QModelIndex packet = model->index(0, 0, root);
+    QVERIFY(packet.isValid());
+    QVERIFY(!view->isExpanded(packet));
+    window.m_brecoLangPanel->expandAllButton()->click();
+    QVERIFY(view->isExpanded(packet));
+    QVERIFY(window.m_brecoLangPanel->statusText().contains(
+        QStringLiteral("Decoded 5 bytes")));
+
+    QVERIFY(window.m_brecoLangPanel->pinCurrentView());
+    QCOMPARE(window.m_brecoLangPanel->viewTabs()->count(), 2);
+    QBuffer json;
+    QVERIFY(json.open(QIODevice::WriteOnly));
+    QString error;
+    QVERIFY2(window.m_brecoLangPanel->exportJson(&json, &error),
+             qPrintable(error));
+    QVERIFY(json.data().contains("\"marker\":126"));
+
+    QBuffer binary;
+    QVERIFY(binary.open(QIODevice::WriteOnly));
+    QVERIFY2(window.m_brecoLangPanel->exportBinary(&binary, &error),
+             qPrintable(error));
+    QCOMPARE(binary.data(), QByteArray::fromHex("7e0400aabb"));
+
+    QBuffer outform;
+    QVERIFY(outform.open(QIODevice::WriteOnly));
+    QVERIFY2(window.m_brecoLangPanel->renderOutform(u"Summary", &outform,
+                                                     &error),
+             qPrintable(error));
+    QCOMPARE(outform.data(), QByteArray("126"));
 }
 
 void MainWindowIntegrationTests::navigatorLabelsAndDataViewEndianFollowSelection() {
@@ -540,7 +554,6 @@ void MainWindowIntegrationTests::navigatorLabelsAndDataViewEndianFollowSelection
     window.m_rawDataViewShellPanel->bigEndianRadioButton()->setChecked(true);
     QCoreApplication::processEvents();
     QVERIFY(window.m_currentByteInfoPanel->bigEndianCheckBox()->isChecked());
-    QVERIFY(window.m_structDataViewShellPanel->bigEndianRadioButton()->isChecked());
 }
 
 void MainWindowIntegrationTests::hexViewDefaultsPersistAcrossWindows() {
@@ -1283,663 +1296,58 @@ void MainWindowIntegrationTests::protectedSourceOpenElevatesAutomaticallyAndRepo
 }
 #endif
 
-void MainWindowIntegrationTests::structModePanelPreviewViewsAndSnippets() {
-    SettingsValueGuard definitionPathGuard(
-        QStringLiteral("ui/lastStructDefinitionFilePath"));
-    SettingsValueGuard declarationTextGuard(
-        QStringLiteral("ui/structDeclarationText"));
-    SettingsValueGuard previewEnabledGuard(
-        QStringLiteral("ui/structPreviewEnabled"));
-    SettingsValueGuard viewsVisibleGuard(
-        QStringLiteral("ui/structViewsVisible"));
-    SettingsValueGuard languageVisibleGuard(
-        QStringLiteral("ui/structLanguageVisible"));
+void MainWindowIntegrationTests::brecoLangLibraryMigrationAndStartupRestore() {
+    SettingsValueGuard schemaGuard(QStringLiteral("ui/lastBrecoLangSchemaPath"));
+    SettingsValueGuard libraryGuard(
+        QStringLiteral("ui/brecoLangLibraryDirectory"));
     QSettings settings(QStringLiteral("breco"), QStringLiteral("breco"));
-    settings.remove(QStringLiteral("ui/lastStructDefinitionFilePath"));
-    settings.remove(QStringLiteral("ui/structDeclarationText"));
-    settings.remove(QStringLiteral("ui/structPreviewEnabled"));
-    settings.remove(QStringLiteral("ui/structViewsVisible"));
-    settings.remove(QStringLiteral("ui/structLanguageVisible"));
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-    const QString filePath = tempDir.filePath(QStringLiteral("struct-view.bin"));
-    QFile source(filePath);
-    QVERIFY(source.open(QIODevice::WriteOnly));
-    const QByteArray sourceBytes = QByteArray::fromHex("01020304");
-    QCOMPARE(source.write(sourceBytes), sourceBytes.size());
-    source.close();
-    const QString absolutePath = QFileInfo(filePath).absoluteFilePath();
+    settings.remove(QStringLiteral("ui/lastBrecoLangSchemaPath"));
+    settings.remove(QStringLiteral("ui/brecoLangLibraryDirectory"));
 
-    breco::MainWindow window;
-    window.show();
-    QCoreApplication::processEvents();
-    QVERIFY(window.selectSourcePath(absolutePath));
-    QCoreApplication::processEvents();
-    window.m_mainTabsPanel->activateTab(window.m_mainTabsPanel->structDataTab());
-    QCoreApplication::processEvents();
-
-    auto* panel = window.m_structModeLeftPanel;
-    QVERIFY(panel != nullptr);
-    QDockWidget* editorDock = window.m_dataViewStructuredPanel->structEditorDock();
-    QDockWidget* viewDock = window.m_dataViewStructuredPanel->structViewDock();
-    QVERIFY(editorDock != nullptr);
-    QVERIFY(viewDock != nullptr);
-    QVERIFY(!editorDock->isFloating());
-    QVERIFY(!viewDock->isFloating());
-    QCOMPARE(editorDock->widget(), window.m_dataViewStructuredPanel->structEditorHost());
-    QCOMPARE(viewDock->widget(), window.m_dataViewStructuredPanel->structViewHost());
-    editorDock->setFloating(true);
-    QCoreApplication::processEvents();
-    QVERIFY(editorDock->isFloating());
-    QVERIFY(panel->isVisible());
-    editorDock->setFloating(false);
-    QCoreApplication::processEvents();
-    QVERIFY(!editorDock->isFloating());
-    viewDock->setFloating(true);
-    QCoreApplication::processEvents();
-    QVERIFY(viewDock->isFloating());
-    QVERIFY(window.m_structDataViewPanel->isVisible());
-    viewDock->setFloating(false);
-    QCoreApplication::processEvents();
-    QVERIFY(!viewDock->isFloating());
-    QTabWidget* tabs = window.m_mainTabsPanel->mainTabWidget();
-    QVERIFY(window.m_mainTabsPanel->detachTab(
-        tabs->indexOf(window.m_mainTabsPanel->structDataTab())));
-    editorDock->setFloating(true);
-    QCoreApplication::processEvents();
-    QVERIFY(editorDock->isFloating());
-    QWidget* detachedStructWindow = window.m_mainTabsPanel->detachedWindow(
-        window.m_mainTabsPanel->structDataTab());
-    QVERIFY(detachedStructWindow != nullptr);
-    detachedStructWindow->close();
-    QCoreApplication::processEvents();
-    QCOMPARE(tabs->indexOf(window.m_mainTabsPanel->structDataTab()), 2);
-    QVERIFY(editorDock->isFloating());
-    editorDock->setFloating(false);
-    QCoreApplication::processEvents();
-    QVERIFY(!editorDock->isFloating());
-    QHBoxLayout* structControls = panel->findChild<QHBoxLayout*>(
-        QStringLiteral("structControlsLayout"));
-    QVERIFY(structControls != nullptr);
-    QCOMPARE(structControls->indexOf(panel->scanStructureButton()),
-             structControls->indexOf(panel->entryComboBox()) + 1);
-    auto* editorToggle =
-        panel->findChild<QCheckBox*>(QStringLiteral("editorCheckBox"));
-    auto* libraryToggle =
-        panel->findChild<QCheckBox*>(QStringLiteral("libraryCheckBox"));
-    auto* viewsToggle =
-        panel->findChild<QCheckBox*>(QStringLiteral("viewsCheckBox"));
-    auto* languageToggle =
-        panel->findChild<QCheckBox*>(QStringLiteral("languageCheckBox"));
-    auto* previewToggle = panel->previewEnabledCheckBox();
-    auto* statusLabel = panel->findChild<QLabel*>(
-        QStringLiteral("structDeclarationStatusLabel"));
-    auto* editorWidget =
-        panel->findChild<QWidget*>(QStringLiteral("structEditorWidgetPlaceholder"));
-    auto* libraryWidget =
-        panel->findChild<QWidget*>(QStringLiteral("structureLibraryWidget"));
-    auto* viewsWidget =
-        panel->findChild<QWidget*>(QStringLiteral("structViewEntriesWidget"));
-    auto* languageWidget =
-        panel->findChild<QWidget*>(QStringLiteral("languageReferenceWidget"));
-    QVERIFY(libraryToggle != nullptr);
-    QVERIFY(editorToggle != nullptr);
-    QVERIFY(viewsToggle != nullptr);
-    QVERIFY(languageToggle != nullptr);
-    QVERIFY(previewToggle != nullptr);
-    QVERIFY(libraryWidget != nullptr);
-    QVERIFY(statusLabel != nullptr);
-    QVERIFY(panel->structDeclarationLayout()->indexOf(
-                panel->structDeclarationEdit()) <
-            panel->structDeclarationLayout()->indexOf(statusLabel));
-    QVERIFY(!statusLabel->isHidden());
-    QCOMPARE(statusLabel->text(), QStringLiteral("0 lines, no errors"));
-    QVERIFY(libraryToggle->isChecked());
-    QVERIFY(editorToggle->isChecked());
-    QVERIFY(!viewsToggle->isChecked());
-    QVERIFY(!languageToggle->isChecked());
-    QVERIFY(previewToggle->isChecked());
-    QVERIFY(!previewToggle->isEnabled());
-    QVERIFY(!libraryWidget->isHidden());
-    QVERIFY(!editorWidget->isHidden());
-    QVERIFY(viewsWidget->isHidden());
-    QVERIFY(languageWidget->isHidden());
-    auto* sectionSplitter =
-        panel->findChild<QSplitter*>(QStringLiteral("structSectionsSplitter"));
-    QVERIFY(sectionSplitter != nullptr);
-    QCOMPARE(sectionSplitter->orientation(), Qt::Vertical);
-    QCOMPARE(sectionSplitter->count(), 4);
-    QCOMPARE(sectionSplitter->widget(0), libraryWidget);
-    QCOMPARE(sectionSplitter->widget(1), editorWidget);
-    QCOMPARE(sectionSplitter->widget(2), viewsWidget);
-    QCOMPARE(sectionSplitter->widget(3), languageWidget);
-    libraryToggle->setChecked(false);
-    QCoreApplication::processEvents();
-    QVERIFY(libraryWidget->isHidden());
-    libraryToggle->setChecked(true);
-    viewsToggle->setChecked(true);
-    languageToggle->setChecked(true);
-    QCoreApplication::processEvents();
-    QVERIFY(!viewsWidget->isHidden());
-    QVERIFY(!languageWidget->isHidden());
-    QCOMPARE(settings.value(QStringLiteral("ui/structViewsVisible")).toBool(),
-             true);
-    QCOMPARE(settings.value(QStringLiteral("ui/structLanguageVisible")).toBool(),
-             true);
-    breco::StructModeLeftPanel restoredSectionPanel;
-    QVERIFY(restoredSectionPanel
-                .findChild<QCheckBox*>(QStringLiteral("viewsCheckBox"))
-                ->isChecked());
-    QVERIFY(restoredSectionPanel
-                .findChild<QCheckBox*>(QStringLiteral("languageCheckBox"))
-                ->isChecked());
-
-    breco::ScanTarget target;
-    target.filePath = absolutePath;
-    target.fileSize = static_cast<quint64>(sourceBytes.size());
-    window.m_scanTargets = {target};
-    window.m_textHoverBuffer.filePath = absolutePath;
-    window.m_textHoverBuffer.baseOffset = 0;
-    window.m_textHoverBuffer.data = sourceBytes.left(2);
-    window.m_textView->setData(sourceBytes.left(2), 0, std::nullopt,
-                               static_cast<quint64>(sourceBytes.size()));
-    window.m_textView->setSelectedOffset(1, true);
-
-    panel->structDeclarationEdit()->setPlainText(
-        QStringLiteral("/default Second\n"
-                       "struct First { uint8 value; }\n"
-                       "struct Second { uint8 value; }"));
-    QCoreApplication::processEvents();
-    QVERIFY(panel->isParseValid());
-    QCOMPARE(panel->entryComboBox()->currentText(), QStringLiteral("Second"));
-
-    panel->structDeclarationEdit()->setPlainText(
-        QStringLiteral("struct S {\n  uint8 value;\n}"));
-    QCoreApplication::processEvents();
-    QVERIFY(panel->isParseValid());
-    QVERIFY(panel->canPreview());
-    QVERIFY(!panel->scanStructureButton()->isEnabled());
-    panel->structDeclarationEdit()->setPlainText(
-        QStringLiteral("struct Inner { /cond(=0x42) uint8 magic; }\n"
-                       "struct Outer { Inner inner; }"));
-    panel->entryComboBox()->setCurrentText(QStringLiteral("Outer"));
-    QVERIFY(!panel->scanStructureButton()->isEnabled());
-    panel->structDeclarationEdit()->setPlainText(
-        QStringLiteral("struct Inner { /cond(=0x42) uint8 magic; }\n"
-                       "struct Outer { /cond(true) Inner inner; }"));
-    panel->entryComboBox()->setCurrentText(QStringLiteral("Outer"));
-    QVERIFY(panel->scanStructureButton()->isEnabled());
-    panel->structDeclarationEdit()->setPlainText(
-        QStringLiteral("struct S {\n  uint8 value;\n}"));
-    QCoreApplication::processEvents();
-    QCOMPARE(statusLabel->text(), QStringLiteral("3 lines, no errors"));
-    QVERIFY(previewToggle->isEnabled());
-    QVERIFY(previewToggle->isChecked());
-    QCOMPARE(previewToggle->text(), QStringLiteral("Enable"));
-    QVERIFY(panel->previewActive());
-    QCOMPARE(panel->addViewButton()->text(), QStringLiteral("Add previewed"));
-    QVERIFY(panel->addViewButton()->isEnabled());
-    QTreeView* tree = window.m_structDataViewPanel->structDataTreeView();
-    QVERIFY(tree != nullptr);
-    QCOMPARE(tree->model()->rowCount(), 1);
-    const QModelIndex previewView = tree->model()->index(0, 0);
-    QCOMPARE(tree->model()->data(previewView).toString(),
-             QStringLiteral("Preview"));
-    QCOMPARE(tree->model()
-                 ->data(tree->model()->index(
-                     0, breco::StructVisualizedTreeModel::Type))
-                 .toString(),
-             QStringLiteral("S"));
-    QCOMPARE(tree->model()
-                 ->data(tree->model()->index(
-                     0, breco::StructVisualizedTreeModel::Value))
-                 .toString(),
-             QString());
-    QVERIFY(window.m_structPreview.has_value());
-    QCOMPARE(window.m_structPreview->offset, 1ULL);
-    QCOMPARE(window.m_structPreview->decodedRoot.children.first()
-                 .children.first()
-                 .rawBytes.toHex()
-                 .toUpper(),
-             QByteArray("02"));
-    const QModelIndex previewMember =
-        tree->model()->index(0, 0, previewView);
-    QCOMPARE(tree->model()->data(previewMember).toString(),
-             QStringLiteral("value"));
-    tree->clicked(previewView);
-    QCoreApplication::processEvents();
-    QCOMPARE(panel->structDeclarationEdit()->textCursor().block().text(),
-             QStringLiteral("struct S {"));
-    tree->clicked(previewMember);
-    QCoreApplication::processEvents();
-    QCOMPARE(panel->structDeclarationEdit()->textCursor().block().text().trimmed(),
-             QStringLiteral("uint8 value;"));
-    const QList<QTextEdit::ExtraSelection> declarationSelections =
-        panel->structDeclarationEdit()->extraSelections();
-    QVERIFY(!declarationSelections.isEmpty());
-    QCOMPARE(declarationSelections.first().cursor.block().text().trimmed(),
-             QStringLiteral("uint8 value;"));
-    QCOMPARE(
-        tree->model()
-            ->data(previewMember,
-                   breco::StructVisualizedTreeModel::SourceOffsetRole)
-            .toULongLong(),
-        1ULL);
-    QCOMPARE(
-        tree->model()
-            ->data(previewMember,
-                   breco::StructVisualizedTreeModel::SourceFilePathRole)
-            .toString(),
-        absolutePath);
-    QCOMPARE(
-        tree->model()
-            ->data(previewMember,
-                   breco::StructVisualizedTreeModel::SourceLengthRole)
-            .toULongLong(),
-        1ULL);
-    window.m_sharedCenterOffset = 0;
-    const QRect previewMemberRect = tree->visualRect(previewMember);
-    QVERIFY(previewMemberRect.isValid());
-    tree->clicked(previewMember);
-    QCoreApplication::processEvents();
-    QCOMPARE(window.m_sharedCenterOffset, 1ULL);
-    QVERIFY(window.m_structSourceHighlightRange.has_value());
-    QCOMPARE(window.m_structSourceHighlightRange->first, 1ULL);
-    QCOMPARE(window.m_structSourceHighlightRange->second, 2ULL);
-    QVERIFY(panel->previewActive());
-
-    panel->addViewButton()->click();
-    QCoreApplication::processEvents();
-    QVERIFY(panel->previewActive());
-    QCOMPARE(panel->currentViewsTableWidget()->rowCount(), 1);
-    QCOMPARE(tree->model()->rowCount(), 2);
-    previewToggle->setChecked(false);
-    QCoreApplication::processEvents();
-    QVERIFY(!panel->previewActive());
-    QVERIFY(!panel->addViewButton()->isEnabled());
-    QCOMPARE(settings.value(QStringLiteral("ui/structPreviewEnabled")).toBool(),
-             false);
-    QCOMPARE(tree->model()->rowCount(), 1);
-    const QModelIndex savedView = tree->model()->index(0, 0);
-    QCOMPARE(tree->model()->data(savedView).toString(),
-             QStringLiteral("S@0x1"));
-    QCOMPARE(tree->model()
-                 ->data(tree->model()->index(
-                     0, breco::StructVisualizedTreeModel::Type))
-                 .toString(),
-             QStringLiteral("S"));
-    QCOMPARE(tree->model()->rowCount(savedView), 1);
-    QCOMPARE(tree->model()
-                 ->data(tree->model()->index(0, 0, savedView))
-                 .toString(),
-             QStringLiteral("value"));
-
-    QTableWidget* views = panel->currentViewsTableWidget();
-    QCOMPARE(views->item(0, 0)->text(), QStringLiteral("S@0x1"));
-    QVERIFY((views->item(0, 1)->flags() & Qt::ItemIsEditable) == 0);
-    QCOMPARE(window.m_currentStructViews.first().offset, 1ULL);
-    window.m_sharedCenterOffset = 0;
-    const QRect viewNameRect = views->visualItemRect(views->item(0, 0));
-    QVERIFY(viewNameRect.isValid());
-    views->cellClicked(0, 0);
-    QCoreApplication::processEvents();
-    QCOMPARE(window.m_sharedCenterOffset, 1ULL);
-    QVERIFY(window.m_structSourceHighlightRange.has_value());
-    QCOMPARE(window.m_structSourceHighlightRange->first, 1ULL);
-    QCOMPARE(window.m_structSourceHighlightRange->second, 2ULL);
-    views->item(0, 0)->setText(QStringLiteral("Saved header"));
-    QCoreApplication::processEvents();
-    QCOMPARE(tree->model()->data(tree->model()->index(0, 0)).toString(),
-             QStringLiteral("Saved header"));
-
-    auto* repeatSpin = qobject_cast<QSpinBox*>(views->cellWidget(0, 2));
-    QVERIFY(repeatSpin != nullptr);
-    repeatSpin->setValue(3);
-    QCoreApplication::processEvents();
-    QCOMPARE(window.m_currentStructViews.first().repeat, 3);
-    QCOMPARE(window.m_currentStructViews.first().decodedRoot.children.size(), 3);
-    const QModelIndex repeatedView = tree->model()->index(0, 0);
-    QCOMPARE(tree->model()
-                 ->data(tree->model()->index(
-                     0, breco::StructVisualizedTreeModel::Type))
-                 .toString(),
-             QString());
-    QCOMPARE(tree->model()
-                 ->data(tree->model()->index(
-                     0, breco::StructVisualizedTreeModel::Value))
-                 .toString(),
-             QStringLiteral("3 items"));
-    const QModelIndex repeatedItem =
-        tree->model()->index(0, 0, repeatedView);
-    QCOMPARE(tree->model()->data(repeatedItem).toString(),
-             QStringLiteral("S[0]"));
-    QCOMPARE(tree->model()
-                 ->data(tree->model()->index(
-                     0, breco::StructVisualizedTreeModel::Type, repeatedView))
-                 .toString(),
-             QStringLiteral("S"));
-    views->cellClicked(0, 0);
-    QCoreApplication::processEvents();
-    QVERIFY(window.m_structSourceHighlightRange.has_value());
-    QCOMPARE(window.m_structSourceHighlightRange->first, 1ULL);
-    QCOMPARE(window.m_structSourceHighlightRange->second, 4ULL);
-    QCOMPARE(window.m_currentStructViews.first()
-                 .decodedRoot.children.last()
-                 .children.first()
-                 .rawBytes.toHex()
-                 .toUpper(),
-             QByteArray("04"));
-    repeatSpin->setValue(1);
-    QCoreApplication::processEvents();
-    QCOMPARE(tree->model()
-                 ->data(tree->model()->index(
-                     0, breco::StructVisualizedTreeModel::Type))
-                 .toString(),
-             QStringLiteral("S"));
-
-    views->item(0, 3)->setText(QStringLiteral("0x3"));
-    QCoreApplication::processEvents();
-    QCOMPARE(window.m_currentStructViews.first().offset, 3ULL);
-    QCOMPARE(window.m_currentStructViews.first()
-                 .decodedRoot.children.first()
-                 .children.first()
-                 .rawBytes.toHex()
-                 .toUpper(),
-             QByteArray("04"));
-
-    repeatSpin->setValue(2);
-    QCoreApplication::processEvents();
-    QCOMPARE(window.m_currentStructViews.first().repeat, 2);
-
-    views->selectRow(0);
-    QCoreApplication::processEvents();
-    QVERIFY(panel->removeViewButton()->isEnabled());
-    panel->removeViewButton()->click();
-    QCoreApplication::processEvents();
-    QCOMPARE(views->rowCount(), 0);
-    QVERIFY(!panel->removeViewButton()->isEnabled());
-    QCOMPARE(tree->model()->rowCount(), 0);
-
-    window.m_textView->setSelectedOffset(1, true);
-    previewToggle->setChecked(true);
-    QCoreApplication::processEvents();
-    QVERIFY(panel->previewActive());
-    window.m_textView->setSelectedOffset(0, true);
-    window.onTextByteClicked(0);
-    QCoreApplication::processEvents();
-    QVERIFY(panel->previewActive());
-    QVERIFY(window.m_structPreview.has_value());
-    QCOMPARE(window.m_structPreview->offset, 0ULL);
-    QCOMPARE(window.m_structPreview->decodedRoot.children.first()
-                 .children.first()
-                 .rawBytes.toHex()
-                 .toUpper(),
-             QByteArray("01"));
-
-    window.m_textView->setData(sourceBytes.left(2), 0, std::nullopt,
-                               static_cast<quint64>(sourceBytes.size()));
-    QCoreApplication::processEvents();
-    QVERIFY(panel->previewActive());
-    QVERIFY(window.m_structPreview.has_value());
-    QCOMPARE(window.m_structPreview->offset, 0ULL);
-
-    panel->structDeclarationEdit()->setPlainText(
-        QStringLiteral("struct S {\n  uint8 value;\n} // changed"));
-    QCoreApplication::processEvents();
-    QVERIFY(panel->previewActive());
-    panel->structDeclarationEdit()->setPlainText(
-        QStringLiteral("struct S {\n"
-                       "  uint8 value;\n"
-                       "  nope"));
-    QCoreApplication::processEvents();
-    QVERIFY(!panel->previewActive());
-    QVERIFY(!statusLabel->isHidden());
-    QVERIFY(statusLabel->text().startsWith(QStringLiteral("Line 3: ")));
-    QVERIFY(previewToggle->isChecked());
-    QVERIFY(!previewToggle->isEnabled());
-    QVERIFY(!panel->addViewButton()->isEnabled());
-    panel->structDeclarationEdit()->setPlainText(
-        QStringLiteral("struct S {\n  uint8 value;\n}"));
-    QCoreApplication::processEvents();
-    QVERIFY(panel->previewActive());
-    QVERIFY(previewToggle->isChecked());
-    QVERIFY(previewToggle->isEnabled());
-    QVERIFY(panel->addViewButton()->isEnabled());
-    window.clearStructPreview();
-    QCoreApplication::processEvents();
-    QVERIFY(!panel->previewActive());
-    QVERIFY(previewToggle->isChecked());
-    QVERIFY(panel->addViewButton()->isEnabled());
-    window.onTextByteClicked(1);
-    QCoreApplication::processEvents();
-    QVERIFY(panel->previewActive());
-    QVERIFY(window.m_structPreview.has_value());
-    QCOMPARE(window.m_structPreview->offset, 1ULL);
-    window.clearResultBufferCacheState();
-    QCoreApplication::processEvents();
-    QVERIFY(!panel->previewActive());
-    QVERIFY(previewToggle->isChecked());
-
-    panel->structDeclarationEdit()->setPlainText(
-        QStringLiteral("struct S {\n  uint8 value;\n}"));
-    const QString savedDeclaration =
-        tempDir.filePath(QStringLiteral("definition.struct"));
-    QVERIFY(panel->saveDeclarationToFile(savedDeclaration));
-    panel->structDeclarationEdit()->clear();
-    QVERIFY(panel->loadDeclarationFromFile(savedDeclaration));
-    QCOMPARE(panel->declarationText(),
-             QStringLiteral("struct S {\n  uint8 value;\n}"));
-    QCOMPARE(settings.value(QStringLiteral("ui/lastStructDefinitionFilePath"))
-                 .toString(),
-             QFileInfo(savedDeclaration).absoluteFilePath());
-
-    panel->structDeclarationEdit()->setPlainText(
-        QStringLiteral("uint8 first;\nuint8 second;"));
-    QTextCursor cursor(panel->structDeclarationEdit()->document());
-    cursor.setPosition(2);
-    panel->structDeclarationEdit()->setTextCursor(cursor);
-    panel->insertLanguageSnippet(QStringLiteral("int8 inserted;"));
-    QCOMPARE(panel->declarationText(),
-             QStringLiteral("uint8 first;\nint8 inserted;\nuint8 second;"));
-    const QList<QLabel*> languageLabels = languageWidget->findChildren<QLabel*>();
-    for (QLabel* label : languageLabels) {
-        const QString snippet =
-            breco::StructModeLeftPanel::languageSnippetForObjectName(
-                label->objectName());
-        QVERIFY2(!snippet.isEmpty(), qPrintable(label->objectName()));
-        panel->structDeclarationEdit()->setPlainText(snippet);
-        QVERIFY2(panel->isParseValid(), qPrintable(label->objectName()));
-    }
-}
-
-void MainWindowIntegrationTests::outformContextSubmenuListsAndSavesDeclarations() {
-    breco::StructDataViewPanel panel;
-    QMenu emptyScope;
-    QMenu* emptyMenu = breco::StructDataViewPanelTestAccess::addOutformMenu(
-        &panel, &emptyScope, {});
-    QCOMPARE(emptyScope.actions().size(), 1);
-    QCOMPARE(emptyScope.actions().first()->text(), QStringLiteral("outform..."));
-    QVERIFY(emptyScope.actions().first()->isEnabled());
-    QVERIFY(emptyMenu != nullptr);
-    QCOMPARE(emptyMenu->actions().size(), 1);
-    QCOMPARE(emptyMenu->actions().first()->text(),
-             QStringLiteral("no outforms declared"));
-    QVERIFY(!emptyMenu->actions().first()->isEnabled());
-
-    QVector<breco::OutformNode> outforms{
-        {QStringLiteral("shared"), breco::OutformMode::Text,
-         QStringLiteral("first {{name}}"), {},
-         QStringLiteral("/definitions/first.brecoscript")},
-        {QStringLiteral("shared"), breco::OutformMode::Binary,
-         QStringLiteral("second {{name}}"), {},
-         QStringLiteral("/other/second.brecostruct")},
-    };
-    panel.setOutforms(outforms);
-    breco::VisualizedNode node;
-    node.name = QStringLiteral("selected");
-    QVector<const breco::VisualizedNode*> nodes{&node};
-    QMenu populatedScope;
-    QMenu* populatedMenu = breco::StructDataViewPanelTestAccess::addOutformMenu(
-        &panel, &populatedScope, nodes);
-    QVERIFY(populatedMenu != nullptr);
-    QCOMPARE(populatedMenu->actions().size(), 2);
-    QCOMPARE(populatedMenu->actions().at(0)->text(),
-             QStringLiteral("first.brecoscript: shared"));
-    QCOMPARE(populatedMenu->actions().at(1)->text(),
-             QStringLiteral("second.brecostruct: shared"));
-
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-    const QString outputPath = tempDir.filePath(QStringLiteral("outform.txt"));
-    breco::StructDataViewPanelTestAccess::setSavePath(&panel, outputPath);
-    populatedMenu->actions().at(1)->trigger();
-    QFile output(outputPath);
-    QVERIFY(output.open(QIODevice::ReadOnly));
-    QCOMPARE(output.readAll(), QByteArray("second selected"));
-}
-
-void MainWindowIntegrationTests::restoresStructDefinitionAndPreviewOnStartup() {
-    SettingsValueGuard definitionPathGuard(
-        QStringLiteral("ui/lastStructDefinitionFilePath"));
-    SettingsValueGuard sourcePathGuard(
-        QStringLiteral("ui/rememberedSingleFilePath"));
-    SettingsValueGuard declarationTextGuard(
-        QStringLiteral("ui/structDeclarationText"));
-    SettingsValueGuard entryNameGuard(QStringLiteral("ui/structEntryName"));
-    SettingsValueGuard entryCountGuard(QStringLiteral("ui/structEntryCount"));
-    SettingsValueGuard previewEnabledGuard(
-        QStringLiteral("ui/structPreviewEnabled"));
-
-    QTemporaryDir tempDir;
-    QVERIFY(tempDir.isValid());
-    const QString definitionPath =
-        tempDir.filePath(QStringLiteral("startup.struct"));
-    QFile definition(definitionPath);
-    QVERIFY(definition.open(QIODevice::WriteOnly));
-    const QByteArray declaration(
-        "/default Restored\n"
-        "struct Remembered { uint8 value; }\n"
-        "struct Restored { /cond(=0x42) uint8 magic; uint8 tail; }");
-    QCOMPARE(definition.write(declaration), declaration.size());
-    definition.close();
-
-    const QString sourcePath = tempDir.filePath(QStringLiteral("startup.bin"));
-    QFile source(sourcePath);
-    QVERIFY(source.open(QIODevice::WriteOnly));
-    const QByteArray sourceBytes = QByteArray::fromHex("0099427F");
-    QCOMPARE(source.write(sourceBytes), sourceBytes.size());
-    source.close();
-
-    QSettings settings(QStringLiteral("breco"), QStringLiteral("breco"));
-    settings.setValue(QStringLiteral("ui/lastStructDefinitionFilePath"),
-                      definitionPath);
-    settings.setValue(QStringLiteral("ui/rememberedSingleFilePath"),
-                      sourcePath);
-    settings.setValue(QStringLiteral("ui/rememberedSingleFileOffset"), 2);
-    settings.setValue(QStringLiteral("ui/structDeclarationText"),
-                      QStringLiteral("uint8 stale;"));
-    settings.setValue(QStringLiteral("ui/structEntryName"),
-                      QStringLiteral("Remembered"));
-    settings.setValue(QStringLiteral("ui/structEntryCount"), 1);
-    settings.setValue(QStringLiteral("ui/structPreviewEnabled"), true);
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString schemaPath = directory.filePath(QStringLiteral("packet.breco"));
+    QFile schema(schemaPath);
+    QVERIFY(schema.open(QIODevice::WriteOnly));
+    const QByteArray source = QByteArrayLiteral(R"BRECO(
+language breco 0.1
+inputs { input data { default } }
+entry Inspect from data { value: u8 }
+default entry Inspect
+)BRECO");
+    QCOMPARE(schema.write(source), source.size());
+    schema.close();
+    const QString olderPath =
+        directory.filePath(QStringLiteral("needs-migration.breco") +
+                           QStringLiteral("struct"));
+    QFile older(olderPath);
+    QVERIFY(older.open(QIODevice::WriteOnly));
+    QCOMPARE(older.write("kept"), 4LL);
+    older.close();
 
     {
         breco::MainWindow window;
-        window.show();
-        QCoreApplication::processEvents();
-
-        QCOMPARE(window.m_structModeLeftPanel->declarationText(),
-                 QString::fromUtf8(declaration));
-        QVERIFY(window.m_structModeLeftPanel->isParseValid());
-        QVERIFY(window.m_structModeLeftPanel->previewEnabledCheckBox()
-                    ->isChecked());
-        QCOMPARE(window.m_structModeLeftPanel->entryComboBox()->currentText(),
-                 QStringLiteral("Restored"));
-        QVERIFY(window.m_structModeLeftPanel->canPreview());
-        QCOMPARE(window.m_textHoverBuffer.filePath,
-                 QFileInfo(sourcePath).absoluteFilePath());
-        QCOMPARE(window.m_textHoverBuffer.data, sourceBytes);
-        QCOMPARE(window.m_sharedCenterOffset, 2ULL);
-        QVERIFY(window.m_structModeLeftPanel->previewActive());
-        QVERIFY(window.m_structPreview.has_value());
-        QCOMPARE(window.m_structPreview->offset, 2ULL);
-        QCOMPARE(window.m_structPreview->filePath,
-                 QFileInfo(sourcePath).absoluteFilePath());
-        QCOMPARE(window.m_structPreview->decodedRoot.children.first()
-                     .children.first()
-                     .rawBytes.toHex()
-                     .toUpper(),
-                 QByteArray("42"));
-
-        QTreeView* tree =
-            window.m_structDataViewPanel->structDataTreeView();
-        QVERIFY(tree != nullptr);
-        QCOMPARE(tree->model()->columnCount(), 5);
-        QCOMPARE(
-            tree->header()->sectionResizeMode(
-                breco::StructVisualizedTreeModel::Name),
-            QHeaderView::ResizeToContents);
-        const QModelIndex restored = tree->model()->index(0, 0);
-        const QModelIndex conditionName = tree->model()->index(
-            0, breco::StructVisualizedTreeModel::Name, restored);
-        const QModelIndex conditionValid = tree->model()->index(
-            0, breco::StructVisualizedTreeModel::Valid, restored);
-        QCOMPARE(tree->model()->data(conditionName).toString(),
-                 QStringLiteral("magic"));
-        QCOMPARE(tree->model()->data(conditionValid).toString(),
-                 QStringLiteral("true"));
-        QCOMPARE(
-            tree->model()->data(conditionName, Qt::BackgroundRole).value<QColor>(),
-            QColor(235, 255, 235));
-        QCOMPARE(tree->model()
-                     ->data(conditionName,
-                            breco::StructVisualizedTreeModel::SourceOffsetRole)
-                     .toULongLong(),
-                 2ULL);
+        window.m_brecoLangPanel->setLibraryDirectory(directory.path());
+        QVERIFY(window.m_brecoLangPanel->migrationNoticeText().contains(
+            QStringLiteral("manual migration")));
+        QVERIFY(window.m_brecoLangPanel->migrationNoticeText().contains(
+            QStringLiteral("needs-migration.breco") + QStringLiteral("struct")));
+        QVERIFY(window.m_brecoLangPanel->loadSchemaFile(schemaPath));
     }
+    QVERIFY(QFileInfo::exists(olderPath));
+    QCOMPARE(settings.value(QStringLiteral("ui/lastBrecoLangSchemaPath"))
+                 .toString(),
+             QFileInfo(schemaPath).absoluteFilePath());
+    QCOMPARE(settings.value(QStringLiteral("ui/brecoLangLibraryDirectory"))
+                 .toString(),
+             QFileInfo(directory.path()).absoluteFilePath());
 
-    settings.setValue(QStringLiteral("ui/rememberedSingleFileOffset"), 999);
-    settings.setValue(QStringLiteral("ui/structPreviewEnabled"), false);
-    {
-        breco::MainWindow window;
-        QCoreApplication::processEvents();
-        QCOMPARE(window.m_sharedCenterOffset, 3ULL);
-        QVERIFY(!window.m_structModeLeftPanel->previewEnabledCheckBox()
-                     ->isChecked());
-        QVERIFY(!window.m_structPreview.has_value());
-        QCOMPARE(settings.value(QStringLiteral("ui/rememberedSingleFileOffset"))
-                     .toULongLong(),
-                 3ULL);
-    }
-
-    settings.setValue(QStringLiteral("ui/structPreviewEnabled"), true);
-    QVERIFY(QFile::remove(definitionPath));
-    {
-        breco::MainWindow window;
-        QCoreApplication::processEvents();
-        QVERIFY(window.m_structModeLeftPanel->isParseValid());
-        QVERIFY(window.m_structModeLeftPanel->previewActive());
-        QVERIFY(window.m_structPreview.has_value());
-        QCOMPARE(window.m_structPreview->offset, 3ULL);
-    }
-
-    QVERIFY(QFile::remove(sourcePath));
-    settings.setValue(QStringLiteral("ui/lastStructDefinitionFilePath"),
-                      definitionPath);
-    settings.setValue(QStringLiteral("ui/rememberedSingleFilePath"),
-                      sourcePath);
-    settings.setValue(QStringLiteral("ui/rememberedSingleFileOffset"), 999);
-    {
-        breco::MainWindow window;
-        QCoreApplication::processEvents();
-        QCOMPARE(window.m_scanControlsPanel->sourcePathLineEdit()->text(),
-                 sourcePath);
-        QCOMPARE(window.m_sourceMode, breco::MainWindow::SourceMode::None);
-        QVERIFY(!window.m_structPreview.has_value());
-        QCOMPARE(settings.value(QStringLiteral("ui/rememberedSingleFilePath"))
-                     .toString(),
-                 sourcePath);
-    }
+    breco::MainWindow restored;
+    QVERIFY(restored.m_brecoLangPanel->program() != nullptr);
+    QCOMPARE(restored.m_brecoLangPanel->libraryDirectory(),
+             QFileInfo(directory.path()).absoluteFilePath());
+    QVERIFY(restored.m_brecoLangPanel->migrationNoticeText().contains(
+        QStringLiteral("needs-migration.breco") + QStringLiteral("struct")));
 }
 
 void MainWindowIntegrationTests::imageModeScansAndJumpsToResult() {

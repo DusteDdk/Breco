@@ -20,12 +20,7 @@ class DataViewShellPanel : public QWidget {
     Q_OBJECT
 
 public:
-    enum class ControlMode {
-        Raw,
-        Struct,
-    };
-
-    explicit DataViewShellPanel(ControlMode mode, QWidget* parent = nullptr);
+    explicit DataViewShellPanel(QWidget* parent = nullptr);
     ~DataViewShellPanel() override;
 
     QRadioButton* littleEndianRadioButton() const;
@@ -39,11 +34,8 @@ public:
     QToolButton* zoomInButton() const;
     QWidget* bodyHost() const;
 
-    ControlMode controlMode() const;
-
 private:
     std::unique_ptr<Ui::DataViewShell> m_ui;
-    ControlMode m_mode;
 };
 
 }  // namespace breco
