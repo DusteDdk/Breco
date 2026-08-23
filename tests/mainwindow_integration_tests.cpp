@@ -600,6 +600,7 @@ void MainWindowIntegrationTests::hexNavigatorEditsPreserveDeltaAndSelectionLengt
     QCoreApplication::processEvents();
     window.m_hexControlsPanel->showAsComboBox()->setCurrentIndex(4);
     window.m_hexControlsPanel->bytesPerLineComboBox()->setCurrentIndex(1);
+    QCoreApplication::processEvents();
 
     breco::ScanTarget target;
     target.filePath = filePath;

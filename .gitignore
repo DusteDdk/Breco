@@ -1,2 +1,5 @@
 build/
+build-msvc-release/
 build-windows-mxe/
+dist/
+CMakeUserPresets.json

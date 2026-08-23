@@ -4,6 +4,9 @@ project(breco VERSION 0.1.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+if(MSVC)
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
+endif()
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 set(CMAKE_AUTOUIC ON)
@@ -226,17 +229,10 @@ if(WIN32)
 
     # comments/internal_name/original_filename differ per executable;
     # pass original_filename as "" to omit it from the string table.
-    function(breco_add_windows_executable_resources target icon_png comments internal_name original_filename)
-        get_filename_component(icon_basename "${icon_png}" NAME_WE)
+    function(breco_add_windows_executable_resources target icon_ico comments internal_name original_filename)
         set(icon_dir "${CMAKE_CURRENT_BINARY_DIR}/win-icons/${target}")
-        set(icon_ico "${icon_dir}/${icon_basename}.ico")
         set(icon_rc "${icon_dir}/${target}.rc")
-
-        find_program(BRECO_MAGICK_EXECUTABLE NAMES magick)
-        if(NOT BRECO_MAGICK_EXECUTABLE)
-            message(WARNING "ImageMagick (magick) not found; ${target} will be built without a custom icon.")
-            return()
-        endif()
+        set(icon_path "${CMAKE_CURRENT_SOURCE_DIR}/res/${icon_ico}")
 
         file(MAKE_DIRECTORY "${icon_dir}")
 
@@ -260,7 +256,10 @@ if(WIN32)
         string(JOIN "" version_strings_block ${version_strings})
 
         file(WRITE "${icon_rc}" "\
-IDI_ICON1 ICON DISCARDABLE \"${icon_ico}\"
+    #define IDI_ICON1 101
+    #define VS_VERSION_INFO 1
+
+    IDI_ICON1 ICON DISCARDABLE \"${icon_path}\"
 
 VS_VERSION_INFO VERSIONINFO
  FILEVERSION ${BRECO_VERSIONINFO_FILEVERSION_NUM}
@@ -284,25 +283,54 @@ ${version_strings_block}        END
 END
 ")
 
-        add_custom_command(
-            OUTPUT "${icon_ico}"
-            COMMAND "${BRECO_MAGICK_EXECUTABLE}"
-                    "${CMAKE_CURRENT_SOURCE_DIR}/res/${icon_png}"
-                    -define icon:auto-resize=256,128,64,48,32,16
-                    "${icon_ico}"
-            DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/res/${icon_png}"
-            COMMENT "Generating Windows icon ${icon_ico}"
-            VERBATIM
-        )
-
         target_sources(${target} PRIVATE "${icon_rc}")
-        set_source_files_properties("${icon_rc}" PROPERTIES OBJECT_DEPENDS "${icon_ico}")
+        set_source_files_properties("${icon_rc}" PROPERTIES OBJECT_DEPENDS "${icon_path}")
     endfunction()
 
-    breco_add_windows_executable_resources(breco breco-icon.png
+    breco_add_windows_executable_resources(breco breco-icon.ico
         "Breco - Graphical User Interface" "breco.exe" "")
-    breco_add_windows_executable_resources(brecodump brecodump-icon.png
+    breco_add_windows_executable_resources(brecodump brecodump-icon.ico
         "Breco - CLI for scripting" "BrecoDump" "brecodump.exe")
+
+    get_target_property(BRECO_QMAKE_EXECUTABLE Qt6::qmake IMPORTED_LOCATION)
+    get_filename_component(BRECO_QT_BIN_DIR "${BRECO_QMAKE_EXECUTABLE}" DIRECTORY)
+    find_program(BRECO_WINDEPLOYQT_EXECUTABLE
+        NAMES windeployqt
+        HINTS "${BRECO_QT_BIN_DIR}" "$ENV{QT_HOST_PATH}/bin"
+    )
+
+    if(BRECO_WINDEPLOYQT_EXECUTABLE)
+        set(BRECO_DIST_DIR "${CMAKE_CURRENT_SOURCE_DIR}/dist")
+        if(MSVC)
+            set(BRECO_DIST_SYMBOL_COMMANDS
+                COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                        "$<TARGET_PDB_FILE:breco>" "${BRECO_DIST_DIR}/breco.pdb"
+                COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                        "$<TARGET_PDB_FILE:brecodump>" "${BRECO_DIST_DIR}/brecodump.pdb"
+            )
+        endif()
+        add_custom_target(dist
+            COMMAND "${CMAKE_COMMAND}" -E rm -rf "${BRECO_DIST_DIR}"
+            COMMAND "${CMAKE_COMMAND}" -E make_directory "${BRECO_DIST_DIR}"
+            COMMAND "${CMAKE_COMMAND}" -E copy "$<TARGET_FILE:breco>" "${BRECO_DIST_DIR}/breco.exe"
+            COMMAND "${CMAKE_COMMAND}" -E copy "$<TARGET_FILE:brecodump>" "${BRECO_DIST_DIR}/brecodump.exe"
+            ${BRECO_DIST_SYMBOL_COMMANDS}
+            COMMAND "${CMAKE_COMMAND}" -E copy_directory
+                    "${CMAKE_CURRENT_SOURCE_DIR}/examples" "${BRECO_DIST_DIR}/examples"
+            COMMAND "${BRECO_WINDEPLOYQT_EXECUTABLE}"
+                    --dir "${BRECO_DIST_DIR}"
+                    --release
+                    --no-translations
+                    --compiler-runtime
+                    "${BRECO_DIST_DIR}/breco.exe"
+                    "${BRECO_DIST_DIR}/brecodump.exe"
+            DEPENDS breco brecodump
+            COMMENT "Staging Windows distribution in ${BRECO_DIST_DIR}"
+            VERBATIM
+        )
+    else()
+        message(WARNING "windeployqt not found; the dist target will not be available.")
+    endif()
 endif()
 
 install(TARGETS breco brecodump
@@ -388,7 +416,10 @@ qt_add_executable(brecodump_cli_tests
     tests/brecodump_cli_tests.cpp
 )
 target_compile_definitions(
-    brecodump_cli_tests PRIVATE BRECODUMP_PATH="$<TARGET_FILE:brecodump>")
+    brecodump_cli_tests PRIVATE
+    BRECODUMP_PATH="$<TARGET_FILE:brecodump>"
+    QT_TESTCASE_SOURCEDIR="${CMAKE_CURRENT_SOURCE_DIR}"
+)
 target_link_libraries(brecodump_cli_tests PRIVATE Qt6::Core Qt6::Test)
 add_dependencies(brecodump_cli_tests brecodump)
 
