@@ -3,9 +3,11 @@
 #include <QVector>
 
 #include <memory>
+#include <limits>
 
 #include "brecolang/runtime/ByteSource.h"
 #include "brecolang/runtime/DecodedData.h"
+#include "brecolang/runtime/DecodeTypes.h"
 
 QT_BEGIN_NAMESPACE
 class QIODevice;
@@ -17,12 +19,18 @@ enum class DecodeMode {
     Tree,
     Probe,
     Streaming,
+    ResolveShape,
+    MaterializePage,
+    ReferenceScan,
 };
 
 enum class DecodeStatus {
     Success,
+    Paused,
     NoMatch,
     Error,
+    Invalidated,
+    Cancelled,
 };
 
 struct RuntimeDiagnostic {
@@ -40,7 +48,16 @@ struct DecodeRequest {
     QVector<std::shared_ptr<ByteSource>> inputs;
     DecodeMode mode = DecodeMode::Tree;
     quint64 startOffset = 0;
+    std::optional<quint64> entryRootOffset;
+    MaterializationLocator root;
     QIODevice* output = nullptr;
+    quint64 documentGeneration = 1;
+    QVector<SequenceWindow> sequenceWindows;
+    std::shared_ptr<const ResolvedShapeSnapshot> resolvedShape;
+    quint64 maxMaterializedNodes = std::numeric_limits<quint64>::max();
+    WorkBudget workBudget;
+    ShapeScanOptions shapeOptions;
+    CancellationToken cancellation;
 };
 
 struct DecodeResult {
@@ -52,6 +69,12 @@ struct DecodeResult {
     quint64 startOffset = 0;
     quint64 endOffset = 0;
     quint64 constructedNodes = 0;
+    quint64 logicalNodes = 0;
+    DecodeDocumentHandle document;
+    std::shared_ptr<const ResolvedShapeSnapshot> shape;
+    QVector<SequenceWindow> appliedSequenceWindows;
+    QVector<ReferenceEvent> referenceEvents;
+    DecodeMetrics metrics;
 
     bool success() const { return status == DecodeStatus::Success; }
 };

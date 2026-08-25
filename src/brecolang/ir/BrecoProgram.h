@@ -44,6 +44,7 @@ enum class TypeKind {
     Variant,
     Node,
     Span,
+    Reference,
 };
 
 enum class Endianness {
@@ -58,6 +59,7 @@ struct TypeDesc {
     quint16 bitWidth = 0;
     Endianness endianness = Endianness::None;
     TypeId elementType = kInvalidId;
+    TypeId referenceKeyType = kInvalidId;
     IdRange fields;
     IdRange alternatives;
 };
@@ -119,11 +121,13 @@ struct ExtentSummary {
     bool mayFail = false;
     bool mayNoMatch = false;
     bool requiresRandomAccess = false;
+    bool hasReferenceEffects = false;
 };
 
 enum class StatementKind {
     Invalid,
     Field,
+    Reference,
     ComputedField,
     BitfieldField,
     Identify,
@@ -146,6 +150,57 @@ enum class StatementKind {
     Let,
     If,
     For,
+};
+
+enum class LoopScanPlan {
+    ExecuteItems,
+    BatchAdvance,
+};
+
+enum class ReferenceEffectScanPlan {
+    None,
+    ExecuteItems,
+};
+
+using ReferenceTemplateId = quint32;
+
+enum class AddressBaseKind {
+    Input,
+    EntryRoot,
+    ContainingEntity,
+};
+
+enum class ReferenceStrength {
+    Follow,
+    Weak,
+};
+
+enum class ReferenceCoverage {
+    DecodedStorage,
+    WholeRegion,
+};
+
+struct ReferenceAddressDesc {
+    InputId input = kInvalidId;
+    AddressBaseKind base = AddressBaseKind::Input;
+    ExpressionId displacement = kInvalidId;
+    ExpressionId regionLength = kInvalidId;
+};
+
+struct ReferenceRewriteDesc {
+    IdRange patchPath;
+    StatementId patchStatement = kInvalidId;
+    ExpressionId exportedValue = kInvalidId;
+};
+
+struct ReferenceDesc {
+    TypeId targetType = kInvalidId;
+    IdRange targetArguments;
+    ReferenceAddressDesc address;
+    IdRange keyExpressions;
+    ReferenceStrength strength = ReferenceStrength::Weak;
+    ReferenceCoverage coverage = ReferenceCoverage::DecodedStorage;
+    IdRange rewriteRules;
 };
 
 struct SelectCase {
@@ -195,6 +250,12 @@ struct Statement {
     IdRange bitMembers;
     IdRange bytePatterns;
     quint32 extent = kInvalidId;
+    quint32 itemExtent = kInvalidId;
+    quint32 staticItemTemplate = kInvalidId;
+    ReferenceTemplateId reference = kInvalidId;
+    LoopScanPlan loopScanPlan = LoopScanPlan::ExecuteItems;
+    ReferenceEffectScanPlan referenceEffectScanPlan =
+        ReferenceEffectScanPlan::None;
 };
 
 struct InputDesc {
@@ -295,6 +356,8 @@ public:
     QVector<Alternative> alternatives;
     QVector<BitMember> bitMembers;
     QVector<BytePattern> bytePatterns;
+    QVector<ReferenceDesc> references;
+    QVector<ReferenceRewriteDesc> referenceRewrites;
     QVector<ExtentSummary> extents;
 
     QVector<quint32> statementRefs;
@@ -303,6 +366,8 @@ public:
     QVector<quint32> fieldRefs;
     QVector<quint32> bitMemberRefs;
     QVector<quint32> bytePatternRefs;
+    QVector<quint32> referenceRewriteRefs;
+    QVector<SymbolId> symbolRefs;
     QVector<SymbolId> textPartSymbols;
 
     const QString& symbol(SymbolId id) const;

@@ -85,7 +85,8 @@ IdRange DecodedTree::appendSpans(
 DecodedTreeCheckpoint DecodedTree::checkpoint() const {
     return {nodes.size(),        values.size(),       fieldValues.size(),
             valueRefs.size(),    spans.size(),        storageLayouts.size(),
-            valueStrings.size(), ownedBytes.size()};
+            valueStrings.size(), ownedBytes.size(),   locators.size(),
+            references.size()};
 }
 
 void DecodedTree::rollback(const DecodedTreeCheckpoint& point) {
@@ -97,6 +98,8 @@ void DecodedTree::rollback(const DecodedTreeCheckpoint& point) {
     storageLayouts.resize(point.layouts);
     valueStrings.resize(point.valueStrings);
     ownedBytes.resize(point.ownedBytes);
+    locators.resize(point.locators);
+    references.resize(point.references);
 }
 
 void DecodedTree::finalizeTopology() {
@@ -197,7 +200,22 @@ QString DecodedTree::displayValue(DecodedValueId id,
         case DecodedValueKind::Object:
             return QStringLiteral("%1 fields").arg(value.fields.count);
         case DecodedValueKind::Sequence:
-            return QStringLiteral("%1 items").arg(value.elements.count);
+            return QStringLiteral("%1 items").arg(value.logicalCount);
+        case DecodedValueKind::Reference: {
+            if (value.payload >= static_cast<quint32>(references.size())) {
+                return QStringLiteral("invalid reference");
+            }
+            const ReferenceHandle& reference = references.at(value.payload);
+            if (reference.isNull) {
+                return QStringLiteral("null");
+            }
+            return QStringLiteral("%1 0x%2 +%3")
+                .arg(reference.strength == ReferenceStrength::Follow
+                         ? QStringLiteral("follow")
+                         : QStringLiteral("weak"))
+                .arg(reference.target.logicalOffset, 0, 16)
+                .arg(reference.target.regionLength);
+        }
         case DecodedValueKind::Invalid:
             break;
     }

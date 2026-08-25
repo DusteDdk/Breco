@@ -2,12 +2,14 @@
 
 #include "brecolang/runtime/JsonWriter.h"
 
+#include <QElapsedTimer>
 #include <QtEndian>
 
 #include <algorithm>
 #include <bit>
 #include <cmath>
 #include <cstring>
+#include <functional>
 #include <limits>
 #include <optional>
 
@@ -55,14 +57,136 @@ struct Frame {
     bool committed = false;
 };
 
+struct RuntimeValueMetadata {
+    bool present = false;
+    InputId input = kInvalidId;
+    quint64 offset = 0;
+    quint64 length = 0;
+    bool hasSourceSpan = false;
+    bool valid = true;
+    TypeId type = kInvalidId;
+    QString name;
+};
+
+struct RuntimeContinuationState final : OpaqueContinuationState {
+    StatementId statement = kInvalidId;
+    StatementKind kind = StatementKind::Invalid;
+    MaterializationLocator sequence;
+    quint64 boundaryItem = 0;
+    Cursor cursor;
+    QVector<DecodedValueId> frameValues;
+    bool frameCommitted = false;
+    std::shared_ptr<const DecodedTree> valueArena;
+    QVector<RuntimeValueMetadata> valueMetadata;
+    std::optional<quint64> repeatCount;
+    quint64 nextIteration = 0;
+    quint64 semanticItems = 0;
+    quint64 maxProbe = 0;
+};
+
 struct ProbeAnchor {
     InputId input = kInvalidId;
     quint64 position = 0;
     bool committed = false;
 };
 
+struct CompositeSpanAccumulator {
+    DecodedNodeId node = kInvalidId;
+    QVector<ByteSpanValue> childSpans;
+};
+
+struct TransactionCheckpoint {
+    DecodedTreeCheckpoint tree;
+    qsizetype accumulatorDepth = 0;
+    QVector<qsizetype> accumulatorSpanCounts;
+    qsizetype resolvedSequences = 0;
+    quint64 logicalNodes = 0;
+    qsizetype referenceEvents = 0;
+};
+
+template <typename T>
+class VectorAppendScope {
+public:
+    VectorAppendScope(QVector<T>* values, T value) : m_values(values) {
+        m_values->push_back(value);
+    }
+    ~VectorAppendScope() { m_values->removeLast(); }
+
+    VectorAppendScope(const VectorAppendScope&) = delete;
+    VectorAppendScope& operator=(const VectorAppendScope&) = delete;
+
+private:
+    QVector<T>* m_values;
+};
+
+class BooleanValueScope {
+public:
+    BooleanValueScope(bool* value, bool replacement)
+        : m_value(value), m_previous(*value) {
+        *m_value = replacement;
+    }
+    ~BooleanValueScope() { *m_value = m_previous; }
+
+    BooleanValueScope(const BooleanValueScope&) = delete;
+    BooleanValueScope& operator=(const BooleanValueScope&) = delete;
+
+private:
+    bool* m_value;
+    bool m_previous;
+};
+
+class ShapeSink {
+public:
+    explicit ShapeSink(QVector<ResolvedSequenceShape>* sequences)
+        : m_sequences(sequences) {}
+
+    void recordSequence(ResolvedSequenceShape sequence) {
+        m_sequences->push_back(std::move(sequence));
+    }
+
+private:
+    QVector<ResolvedSequenceShape>* m_sequences;
+};
+
+class MaterializationSink {
+public:
+    explicit MaterializationSink(const QVector<SequenceWindow>& windows)
+        : m_windows(windows) {}
+
+    std::optional<QPair<quint64, quint64>> requestedWindow(
+        const MaterializationLocator& locator, quint64 total) const {
+        for (const SequenceWindow& requested : m_windows) {
+            if (requested.sequence == locator) {
+                const quint64 first = qMin(requested.firstItem, total);
+                return QPair<quint64, quint64>{
+                    first, qMin(requested.itemCount, total - first)};
+            }
+        }
+        return std::nullopt;
+    }
+
+    std::optional<SequenceWindow> window(
+        const MaterializationLocator& locator) const {
+        for (const SequenceWindow& requested : m_windows) {
+            if (requested.sequence == locator) return requested;
+        }
+        return std::nullopt;
+    }
+
+private:
+    const QVector<SequenceWindow>& m_windows;
+};
+
 bool addWouldOverflow(quint64 left, quint64 right) {
     return right > std::numeric_limits<quint64>::max() - left;
+}
+
+bool multiplyWouldOverflow(quint64 left, quint64 right, quint64* result) {
+    if (left != 0 && right > std::numeric_limits<quint64>::max() / left) {
+        return true;
+    }
+    *result = left * right;
+    return false;
 }
 
 class Interpreter {
@@ -76,6 +200,8 @@ public:
     }
 
     DecodeResult run() {
+        QElapsedTimer timer;
+        timer.start();
         DecodeResult result;
         if (!m_request.program) {
             result.diagnostics.push_back(
@@ -115,10 +241,48 @@ public:
             return result;
         }
 
+        const bool targetDecode = m_request.root.isReferenceTarget();
         Cursor cursor;
-        cursor.input = entry->input;
-        cursor.position = m_request.startOffset;
-        cursor.end = source(entry->input)->size();
+        TypeId rootType = entry->resultType;
+        QString rootName = m_program.symbol(entry->name);
+        if (targetDecode) {
+            const ReferenceTargetKey& target =
+                *m_request.root.referenceTarget;
+            if (target.identity.documentGeneration !=
+                    m_request.documentGeneration ||
+                target.input >=
+                    static_cast<InputId>(m_request.inputs.size()) ||
+                source(target.input) == nullptr ||
+                addWouldOverflow(target.logicalOffset,
+                                 target.regionLength)) {
+                result.diagnostics.push_back(
+                    {DiagnosticSeverity::Error, QStringLiteral("BRR0007"),
+                     QStringLiteral("Invalid reference target locator"), {}, {},
+                     false});
+                return result;
+            }
+            const quint64 targetEnd =
+                target.logicalOffset + target.regionLength;
+            const auto sourceEnd = source(target.input)->size();
+            if (sourceEnd.has_value() && targetEnd > *sourceEnd) {
+                result.diagnostics.push_back(
+                    {DiagnosticSeverity::Error, QStringLiteral("BRR0008"),
+                     QStringLiteral("Reference target region exceeds its input"),
+                     {}, byteSpan(target.input, target.logicalOffset,
+                                  target.regionLength),
+                     true});
+                return result;
+            }
+            cursor.input = target.input;
+            cursor.position = target.logicalOffset;
+            cursor.end = targetEnd;
+            rootType = target.identity.targetType;
+            rootName = typeName(rootType);
+        } else {
+            cursor.input = entry->input;
+            cursor.position = m_request.startOffset;
+            cursor.end = source(entry->input)->size();
+        }
         if (cursor.end.has_value() && cursor.position > *cursor.end) {
             result.diagnostics.push_back(
                 {DiagnosticSeverity::Error, QStringLiteral("BRR0004"),
@@ -127,52 +291,116 @@ public:
             return result;
         }
 
+        const InputId rootInput = cursor.input;
         Frame frame;
         frame.values.resize(entry->slotCount, kInvalidId);
         DecodedNodeId rootNode = kInvalidId;
-        if (!createNode(DecodedNodeKind::Entry, kInvalidId,
-                        m_program.symbol(entry->name), entry->resultType,
+        if (!createNode(targetDecode ? nodeKindForType(rootType)
+                                     : DecodedNodeKind::Entry,
+                        kInvalidId, rootName, rootType,
                         kInvalidId, cursor.input, &rootNode)) {
             result.diagnostics = std::move(m_diagnostics);
             return result;
         }
         const quint64 start = cursor.position;
-        if (emitting() && !m_writer->beginObject()) {
-            result.diagnostics.push_back(writerDiagnostic(kInvalidId, cursor));
-            return result;
-        }
-        Outcome outcome = execBlock(entry->statements, frame, cursor, rootNode);
-        if (outcome.succeeded() && emitting() &&
-            (!m_writer->endObject() || !m_writer->finish())) {
-            outcome = writerFailure(kInvalidId, cursor);
+        m_entryRootOffset =
+            m_request.entryRootOffset.value_or(m_request.startOffset);
+        m_entityStartOffset = start;
+        Outcome outcome;
+        if (targetDecode) {
+            QVector<DecodedValueId> arguments;
+            for (const StableReferenceValue& argument :
+                 m_request.root.referenceTarget->identity.targetArguments.values) {
+                arguments.push_back(addStableValue(argument));
+            }
+            DecodedValueId rootValue = kInvalidId;
+            outcome = decodeType(rootType, arguments, frame, cursor, rootNode,
+                                 &rootValue, kInvalidId);
+            if (outcome.succeeded()) {
+                result.rootValue = rootValue;
+            }
+        } else {
+            beginComposite(rootNode);
+            if (emitting() && !m_writer->beginObject()) {
+                result.diagnostics.push_back(
+                    writerDiagnostic(kInvalidId, cursor));
+                return result;
+            }
+            outcome = execBlock(entry->statements, frame, cursor, rootNode);
+            if (outcome.succeeded() && emitting() &&
+                (!m_writer->endObject() || !m_writer->finish())) {
+                outcome = writerFailure(kInvalidId, cursor);
+            }
+            if (outcome.succeeded()) {
+                const DecodedValueId rootValue =
+                    buildObject(entry->resultType, frame, rootNode);
+                if (rootNode != kInvalidId) {
+                    m_store->nodes[rootNode].value = rootValue;
+                    finishCompositeLayout(rootNode, entry->resultType,
+                                          cursor.input, start,
+                                          cursor.position);
+                }
+                result.rootValue = rootValue;
+            }
         }
         if (outcome.succeeded()) {
-            const DecodedValueId rootValue =
-                buildObject(entry->resultType, frame, rootNode);
-            if (rootNode != kInvalidId) {
-                m_store->nodes[rootNode].value = rootValue;
-                setCompositeLayout(rootNode, entry->resultType, cursor.input,
-                                   start, cursor.position);
-            }
-            result.rootValue = rootValue;
-            result.status = DecodeStatus::Success;
+            result.status = m_paused ? DecodeStatus::Paused
+                                     : DecodeStatus::Success;
         } else {
-            result.status = outcome.flow == Flow::NoMatch
-                                ? DecodeStatus::NoMatch
-                                : DecodeStatus::Error;
+            result.status = m_cancelled
+                                ? DecodeStatus::Cancelled
+                                : (outcome.flow == Flow::NoMatch
+                                       ? DecodeStatus::NoMatch
+                                       : DecodeStatus::Error);
             if (outcome.hasDiagnostic) {
                 m_diagnostics.push_back(outcome.diagnostic);
             }
         }
-        if (m_request.mode == DecodeMode::Tree) {
+        if (treeBuilding()) {
             m_store->finalizeTopology();
             result.constructedNodes = static_cast<quint64>(m_store->nodes.size());
             result.tree = m_store;
         }
         result.diagnostics = std::move(m_diagnostics);
-        result.entryInput = entry->input;
+        result.entryInput = rootInput;
         result.startOffset = start;
         result.endOffset = cursor.position;
+        result.logicalNodes = qMax(m_logicalNodes, result.constructedNodes);
+        result.metrics = m_metrics;
+        result.appliedSequenceWindows = m_appliedSequenceWindows;
+        result.referenceEvents = m_referenceEvents;
+        result.metrics.shapeNodeCount = result.constructedNodes;
+        result.metrics.materializedNodes = result.constructedNodes;
+        result.metrics.materializedValues =
+            static_cast<quint64>(m_store->values.size());
+        result.metrics.materializedLayouts =
+            static_cast<quint64>(m_store->storageLayouts.size());
+        result.metrics.elapsedNanoseconds = timer.nsecsElapsed();
+        if (m_request.mode == DecodeMode::ResolveShape) {
+            auto shape = std::make_shared<ResolvedShapeSnapshot>();
+            shape->documentGeneration = m_request.documentGeneration;
+            shape->completeness = result.success() ? ShapeCompleteness::Complete
+                                                    : ShapeCompleteness::Failed;
+            shape->root = rootNode != kInvalidId &&
+                                  rootNode < static_cast<DecodedNodeId>(
+                                                 m_store->locators.size())
+                              ? m_store->locators.at(rootNode)
+                              : (m_request.root.isValid()
+                                     ? m_request.root
+                                     : MaterializationLocator{
+                                           InstanceLocator{
+                                               m_request.documentGeneration,
+                                               {}, {}}});
+            shape->entryInput = result.entryInput;
+            shape->startOffset = result.startOffset;
+            shape->endOffset = result.endOffset;
+            shape->logicalNodeCount = result.logicalNodes;
+            shape->shapeNodeCount = result.constructedNodes;
+            shape->usesLegacyEagerTree = m_usedLegacyEagerSequence;
+            shape->sequences = m_resolvedSequences;
+            shape->outline = result.tree;
+            result.shape = std::move(shape);
+        }
         return result;
     }
 
@@ -229,6 +457,28 @@ private:
 
     bool streaming() const {
         return m_request.mode == DecodeMode::Streaming;
+    }
+
+    bool treeBuilding() const {
+        return !m_suppressDurableOutput &&
+               (m_request.mode == DecodeMode::Tree ||
+                m_request.mode == DecodeMode::ResolveShape ||
+                m_request.mode == DecodeMode::MaterializePage);
+    }
+
+    bool cancelled() {
+        if (m_request.cancellation && m_request.cancellation->isCancelled()) {
+            m_cancelled = true;
+        }
+        return m_cancelled;
+    }
+
+    Outcome cancellationOutcome(const Cursor& cursor,
+                                SourceSpanId span = kInvalidId) {
+        m_cancelled = true;
+        return failure(QStringLiteral("BRR0006"),
+                       QStringLiteral("Decode request was cancelled"), span,
+                       cursor);
     }
 
     bool emitting() const {
@@ -294,6 +544,8 @@ private:
             case DecodedValueKind::Object:
             case DecodedValueKind::Sequence:
                 return false;
+            case DecodedValueKind::Reference:
+                return m_writer->nullValue();
         }
         return false;
     }
@@ -302,11 +554,30 @@ private:
                     const QString& name, TypeId type, SourceSpanId schema,
                     InputId input, DecodedNodeId* result) {
         *result = kInvalidId;
-        if (m_request.mode != DecodeMode::Tree) {
+        if (!treeBuilding()) {
+            if (m_suppressDurableOutput &&
+                (m_request.mode == DecodeMode::ResolveShape ||
+                 m_request.mode == DecodeMode::MaterializePage)) {
+                if (m_logicalNodes >= m_program.limits.maxNodes) {
+                    m_diagnostics.push_back(
+                        {DiagnosticSeverity::Error, QStringLiteral("BRR0100"),
+                         QStringLiteral("Decoded node limit exceeded"),
+                         schemaSpan(schema), {}, false});
+                    return false;
+                }
+                ++m_logicalNodes;
+            }
             return true;
         }
-        if (static_cast<quint64>(m_store->nodes.size()) >=
-            m_program.limits.maxNodes) {
+        quint64 requestLimit = m_program.limits.maxNodes;
+        if (m_request.mode == DecodeMode::MaterializePage) {
+            requestLimit = qMin(requestLimit,
+                                m_request.maxMaterializedNodes);
+        } else if (m_request.mode == DecodeMode::ResolveShape) {
+            requestLimit = qMin(requestLimit,
+                                m_request.shapeOptions.maxShapeNodes);
+        }
+        if (static_cast<quint64>(m_store->nodes.size()) >= requestLimit) {
             m_diagnostics.push_back(
                 {DiagnosticSeverity::Error, QStringLiteral("BRR0100"),
                  QStringLiteral("Decoded node limit exceeded"),
@@ -321,6 +592,17 @@ private:
         node.schemaSpan = schema;
         node.input = input;
         *result = m_store->addNode(std::move(node));
+        MaterializationLocator locator;
+        const MaterializationLocator& activeRoot =
+            m_activeRoot.has_value() ? *m_activeRoot : m_request.root;
+        if (activeRoot.isReferenceTarget()) {
+            locator = activeRoot;
+        }
+        locator.documentGeneration = m_request.documentGeneration;
+        locator.templatePath = m_locatorPath;
+        locator.sequenceIndexes = m_sequenceIndexes;
+        m_store->locators.push_back(std::move(locator));
+        ++m_logicalNodes;
         return true;
     }
 
@@ -355,6 +637,7 @@ private:
         layout.highBit = highBit;
         layout.lowBit = lowBit;
         decoded.storageLayout = m_store->addLayout(std::move(layout));
+        contributeNodeLayout(node);
     }
 
     void setComputedLayout(DecodedNodeId node, TypeId type) {
@@ -373,28 +656,78 @@ private:
             m_store->addLayout(std::move(layout));
     }
 
-    void setCompositeLayout(DecodedNodeId node, TypeId type, InputId input,
-                            quint64 start, quint64 end) {
+    void beginComposite(DecodedNodeId node) {
+        if (node != kInvalidId) {
+            m_spanAccumulators.push_back({node, {}});
+        }
+    }
+
+    static void appendCoalescedSpan(QVector<ByteSpanValue>* spans,
+                                    const ByteSpanValue& span) {
+        if (!spans->isEmpty()) {
+            ByteSpanValue& previous = spans->last();
+            if (previous.input == span.input &&
+                previous.offset <=
+                    std::numeric_limits<quint64>::max() - previous.length &&
+                previous.offset + previous.length == span.offset &&
+                span.length <=
+                    std::numeric_limits<quint64>::max() - previous.length) {
+                previous.length += span.length;
+                return;
+            }
+        }
+        spans->push_back(span);
+    }
+
+    void contributeNodeLayout(DecodedNodeId node) {
+        if (node == kInvalidId || m_spanAccumulators.isEmpty() ||
+            node >= static_cast<DecodedNodeId>(m_store->nodes.size())) {
+            return;
+        }
+        const DecodedNode& decoded = m_store->nodes.at(node);
+        if (decoded.storageLayout >=
+            static_cast<quint32>(m_store->storageLayouts.size())) {
+            return;
+        }
+        const StorageLayout& layout =
+            m_store->storageLayouts.at(decoded.storageLayout);
+        for (quint32 i = 0; i < layout.spans.count; ++i) {
+            appendCoalescedSpan(
+                &m_spanAccumulators.last().childSpans,
+                m_store->spans.at(layout.spans.first + i));
+        }
+    }
+
+    void finishCompositeLayout(DecodedNodeId node, TypeId type, InputId input,
+                               quint64 start, quint64 end) {
         if (node == kInvalidId) {
             return;
         }
         QVector<ByteSpanValue> childSpans;
+        const ByteSpanValue primarySpan = byteSpan(input, start, end - start);
         if (end > start) {
-            childSpans.push_back(byteSpan(input, start, end - start));
+            childSpans.push_back(primarySpan);
         }
-        for (const DecodedNode& child : std::as_const(m_store->nodes)) {
-            if (child.parent != node ||
-                child.storageLayout >=
-                    static_cast<quint32>(m_store->storageLayouts.size())) {
-                continue;
-            }
-            const StorageLayout& childLayout =
-                m_store->storageLayouts.at(child.storageLayout);
-            for (quint32 i = 0; i < childLayout.spans.count; ++i) {
-                const ByteSpanValue& childSpan =
-                    m_store->spans.at(childLayout.spans.first + i);
-                if (end == start || childSpan.input != input) {
-                    childSpans.push_back(childSpan);
+        if (!m_spanAccumulators.isEmpty() &&
+            m_spanAccumulators.last().node == node) {
+            CompositeSpanAccumulator accumulator =
+                std::move(m_spanAccumulators.last());
+            m_spanAccumulators.removeLast();
+            for (const ByteSpanValue& childSpan : accumulator.childSpans) {
+                const bool childEndOverflow =
+                    childSpan.length >
+                    std::numeric_limits<quint64>::max() - childSpan.offset;
+                const bool primaryEndOverflow =
+                    primarySpan.length >
+                    std::numeric_limits<quint64>::max() - primarySpan.offset;
+                const bool coveredByPrimary =
+                    end > start && childSpan.input == input &&
+                    !childEndOverflow && !primaryEndOverflow &&
+                    childSpan.offset >= primarySpan.offset &&
+                    childSpan.offset + childSpan.length <=
+                        primarySpan.offset + primarySpan.length;
+                if (!coveredByPrimary) {
+                    appendCoalescedSpan(&childSpans, childSpan);
                 }
             }
         }
@@ -413,6 +746,339 @@ private:
             decoded.length = end - start;
             decoded.hasSourceSpan = true;
         }
+        contributeNodeLayout(node);
+    }
+
+    TransactionCheckpoint transactionCheckpoint() const {
+        TransactionCheckpoint result;
+        result.tree = m_store->checkpoint();
+        result.accumulatorDepth = m_spanAccumulators.size();
+        result.accumulatorSpanCounts.reserve(m_spanAccumulators.size());
+        for (const CompositeSpanAccumulator& accumulator : m_spanAccumulators) {
+            result.accumulatorSpanCounts.push_back(
+                accumulator.childSpans.size());
+        }
+        result.resolvedSequences = m_resolvedSequences.size();
+        result.logicalNodes = m_logicalNodes;
+        result.referenceEvents = m_referenceEvents.size();
+        return result;
+    }
+
+    void rollbackTransaction(const TransactionCheckpoint& checkpoint) {
+        m_store->rollback(checkpoint.tree);
+        for (auto metadata = m_runtimeValueMetadata.begin();
+             metadata != m_runtimeValueMetadata.end();) {
+            if (metadata.key() >=
+                static_cast<DecodedValueId>(checkpoint.tree.values)) {
+                metadata = m_runtimeValueMetadata.erase(metadata);
+            } else {
+                ++metadata;
+            }
+        }
+        m_spanAccumulators.resize(checkpoint.accumulatorDepth);
+        for (qsizetype i = 0; i < m_spanAccumulators.size(); ++i) {
+            m_spanAccumulators[i].childSpans.resize(
+                checkpoint.accumulatorSpanCounts.value(i));
+        }
+        m_resolvedSequences.resize(checkpoint.resolvedSequences);
+        m_referenceEvents.resize(checkpoint.referenceEvents);
+        m_logicalNodes = checkpoint.logicalNodes;
+    }
+
+    void rollbackDiscardedOutput(const TransactionCheckpoint& checkpoint) {
+        const quint64 logicalNodes = m_logicalNodes;
+        rollbackTransaction(checkpoint);
+        m_logicalNodes = logicalNodes;
+    }
+
+    RuntimeValueMetadata valueMetadata(DecodedValueId value) const {
+        const auto restored = m_runtimeValueMetadata.constFind(value);
+        if (restored != m_runtimeValueMetadata.cend()) {
+            return restored.value();
+        }
+        RuntimeValueMetadata result;
+        if (value >= static_cast<DecodedValueId>(m_store->values.size())) {
+            return result;
+        }
+        const DecodedValue& decoded = m_store->values.at(value);
+        if (decoded.node == kInvalidId ||
+            decoded.node >= static_cast<DecodedNodeId>(m_store->nodes.size())) {
+            return result;
+        }
+        const DecodedNode& node = m_store->nodes.at(decoded.node);
+        result.present = true;
+        result.input = node.input;
+        result.offset = node.offset;
+        result.length = node.length;
+        result.hasSourceSpan = node.hasSourceSpan;
+        result.valid = node.valid;
+        result.type = node.type;
+        result.name = m_store->name(node.name);
+        return result;
+    }
+
+    std::shared_ptr<RuntimeContinuationState> captureContinuationState(
+        StatementId statement, StatementKind kind, const Frame& frame,
+        const Cursor& cursor, std::optional<quint64> repeatCount,
+        quint64 nextIteration, quint64 semanticItems,
+        quint64 maxProbe = 0) const {
+        auto state = std::make_shared<RuntimeContinuationState>();
+        state->statement = statement;
+        state->kind = kind;
+        state->cursor = cursor;
+        state->frameCommitted = frame.committed;
+        state->repeatCount = repeatCount;
+        state->nextIteration = nextIteration;
+        state->semanticItems = semanticItems;
+        state->maxProbe = maxProbe;
+
+        auto arena = std::make_shared<DecodedTree>();
+        QHash<DecodedValueId, DecodedValueId> copied;
+        std::function<DecodedValueId(DecodedValueId)> copyValue =
+            [&](DecodedValueId sourceValue) -> DecodedValueId {
+            if (sourceValue == kInvalidId ||
+                sourceValue >=
+                    static_cast<DecodedValueId>(m_store->values.size())) {
+                return kInvalidId;
+            }
+            const auto found = copied.constFind(sourceValue);
+            if (found != copied.cend()) {
+                return found.value();
+            }
+            const DecodedValue& sourceValueRecord =
+                m_store->values.at(sourceValue);
+            DecodedValue value = sourceValueRecord;
+            value.node = kInvalidId;
+            value.payload = kInvalidId;
+            value.fields = {};
+            value.elements = {};
+            const DecodedValueId target = arena->addValue(value);
+            copied.insert(sourceValue, target);
+            state->valueMetadata.resize(arena->values.size());
+            state->valueMetadata[target] = valueMetadata(sourceValue);
+
+            switch (sourceValueRecord.kind) {
+                case DecodedValueKind::String:
+                    if (sourceValueRecord.payload <
+                        static_cast<quint32>(m_store->valueStrings.size())) {
+                        arena->values[target].payload = arena->addValueString(
+                            m_store->valueStrings.at(sourceValueRecord.payload));
+                    }
+                    break;
+                case DecodedValueKind::SourceBytes:
+                    if (sourceValueRecord.payload <
+                        static_cast<quint32>(m_store->spans.size())) {
+                        arena->values[target].payload = arena->addSpan(
+                            m_store->spans.at(sourceValueRecord.payload));
+                    }
+                    break;
+                case DecodedValueKind::OwnedBytes:
+                    if (sourceValueRecord.payload <
+                        static_cast<quint32>(m_store->ownedBytes.size())) {
+                        arena->values[target].payload = arena->addOwnedBytes(
+                            m_store->ownedBytes.at(sourceValueRecord.payload));
+                    }
+                    break;
+                case DecodedValueKind::Reference:
+                    if (sourceValueRecord.payload <
+                        static_cast<quint32>(m_store->references.size())) {
+                        arena->values[target].payload =
+                            static_cast<quint32>(arena->references.size());
+                        arena->references.push_back(
+                            m_store->references.at(sourceValueRecord.payload));
+                    }
+                    break;
+                case DecodedValueKind::Object: {
+                    QVector<DecodedFieldValue> fields;
+                    fields.reserve(sourceValueRecord.fields.count);
+                    for (quint32 i = 0; i < sourceValueRecord.fields.count; ++i) {
+                        const DecodedFieldValue& sourceField =
+                            m_store->fieldValues.at(
+                                sourceValueRecord.fields.first + i);
+                        fields.push_back(
+                            {sourceField.name, copyValue(sourceField.value)});
+                    }
+                    arena->values[target].fields =
+                        arena->appendFieldValues(fields);
+                    break;
+                }
+                case DecodedValueKind::Sequence: {
+                    QVector<DecodedValueId> elements;
+                    elements.reserve(sourceValueRecord.elements.count);
+                    for (quint32 i = 0; i < sourceValueRecord.elements.count;
+                         ++i) {
+                        elements.push_back(copyValue(m_store->valueRefs.at(
+                            sourceValueRecord.elements.first + i)));
+                    }
+                    arena->values[target].elements =
+                        arena->appendValueRefs(elements);
+                    break;
+                }
+                default:
+                    break;
+            }
+            return target;
+        };
+
+        state->frameValues.reserve(frame.values.size());
+        for (DecodedValueId value : frame.values) {
+            state->frameValues.push_back(copyValue(value));
+        }
+        state->valueArena = std::move(arena);
+        return state;
+    }
+
+    bool restoreContinuationState(const RuntimeContinuationState& state,
+                                  Frame* frame, Cursor* cursor) {
+        if (!state.valueArena) {
+            return false;
+        }
+        const DecodedTree& arena = *state.valueArena;
+        const quint32 valueBase = static_cast<quint32>(m_store->values.size());
+        const quint32 fieldBase =
+            static_cast<quint32>(m_store->fieldValues.size());
+        const quint32 refBase = static_cast<quint32>(m_store->valueRefs.size());
+        const quint32 spanBase = static_cast<quint32>(m_store->spans.size());
+        const quint32 stringBase =
+            static_cast<quint32>(m_store->valueStrings.size());
+        const quint32 bytesBase =
+            static_cast<quint32>(m_store->ownedBytes.size());
+        const quint32 referenceBase =
+            static_cast<quint32>(m_store->references.size());
+
+        m_store->fieldValues.reserve(m_store->fieldValues.size() +
+                                     arena.fieldValues.size());
+        for (DecodedFieldValue field : arena.fieldValues) {
+            if (field.value != kInvalidId) field.value += valueBase;
+            m_store->fieldValues.push_back(field);
+        }
+        m_store->valueRefs.reserve(m_store->valueRefs.size() +
+                                   arena.valueRefs.size());
+        for (DecodedValueId value : arena.valueRefs) {
+            m_store->valueRefs.push_back(value == kInvalidId
+                                             ? kInvalidId
+                                             : value + valueBase);
+        }
+        m_store->spans += arena.spans;
+        m_store->valueStrings += arena.valueStrings;
+        m_store->ownedBytes += arena.ownedBytes;
+        m_store->references += arena.references;
+        m_store->values.reserve(m_store->values.size() + arena.values.size());
+        for (qsizetype i = 0; i < arena.values.size(); ++i) {
+            DecodedValue value = arena.values.at(i);
+            value.node = kInvalidId;
+            if (value.fields.count != 0) value.fields.first += fieldBase;
+            if (value.elements.count != 0) value.elements.first += refBase;
+            if (value.payload != kInvalidId) {
+                if (value.kind == DecodedValueKind::String) {
+                    value.payload += stringBase;
+                } else if (value.kind == DecodedValueKind::SourceBytes) {
+                    value.payload += spanBase;
+                } else if (value.kind == DecodedValueKind::OwnedBytes) {
+                    value.payload += bytesBase;
+                } else if (value.kind == DecodedValueKind::Reference) {
+                    value.payload += referenceBase;
+                }
+            }
+            const DecodedValueId restored = m_store->addValue(value);
+            if (i < state.valueMetadata.size() &&
+                state.valueMetadata.at(i).present) {
+                m_runtimeValueMetadata.insert(restored,
+                                              state.valueMetadata.at(i));
+            }
+        }
+        frame->values.clear();
+        frame->values.reserve(state.frameValues.size());
+        for (DecodedValueId value : state.frameValues) {
+            frame->values.push_back(value == kInvalidId
+                                        ? kInvalidId
+                                        : value + valueBase);
+        }
+        frame->committed = state.frameCommitted;
+        *cursor = state.cursor;
+        return true;
+    }
+
+    const ResolvedSequenceShape* resolvedSequence(
+        const MaterializationLocator& locator) const {
+        if (!m_request.resolvedShape) return nullptr;
+        for (const ResolvedSequenceShape& sequence :
+             m_request.resolvedShape->sequences) {
+            if (sequence.locator == locator) return &sequence;
+        }
+        return nullptr;
+    }
+
+    SequenceContinuation makeContinuation(
+        const MaterializationLocator& locator, quint64 nextItem,
+        StatementId statement, StatementKind kind, const Frame& frame,
+        const Cursor& cursor, std::optional<quint64> repeatCount,
+        quint64 nextIteration, quint64 semanticItems,
+        quint64 maxProbe = 0) const {
+        SequenceContinuation token;
+        token.documentGeneration = m_request.documentGeneration;
+        token.shapeVersion = m_request.resolvedShape
+                                 ? m_request.resolvedShape->version
+                                 : 1;
+        token.sequence = locator;
+        token.nextItem = nextItem;
+        auto state = captureContinuationState(
+            statement, kind, frame, cursor, repeatCount, nextIteration,
+            semanticItems, maxProbe);
+        state->sequence = locator;
+        state->boundaryItem = nextItem;
+        token.state = std::move(state);
+        return token;
+    }
+
+    const RuntimeContinuationState* validateContinuation(
+        const SequenceContinuation& token,
+        const MaterializationLocator& locator,
+        StatementId statement, quint64 requestedFirst, Cursor& cursor,
+        SourceSpanId span) {
+        const quint64 shapeVersion = m_request.resolvedShape
+                                         ? m_request.resolvedShape->version
+                                         : 1;
+        const auto* state =
+            dynamic_cast<const RuntimeContinuationState*>(token.state.get());
+        if (!token.isValid() ||
+            token.documentGeneration != m_request.documentGeneration ||
+            token.shapeVersion != shapeVersion || token.sequence != locator ||
+            token.nextItem > requestedFirst || state == nullptr ||
+            state->statement != statement || state->sequence != locator ||
+            state->boundaryItem != token.nextItem) {
+            m_continuationError = failure(
+                QStringLiteral("BRR0720"),
+                QStringLiteral("Sequence continuation does not match the requested boundary"),
+                span, cursor);
+            return nullptr;
+        }
+        return state;
+    }
+
+    bool replayBudgetAvailable(bool selectedSequence) const {
+        return !selectedSequence ||
+               m_replayWorkUsed < m_request.workBudget.maxWorkUnits;
+    }
+
+    void recordReplayWork(bool selectedSequence, bool cold) {
+        if (!selectedSequence) return;
+        ++m_replayWorkUsed;
+        if (cold) {
+            ++m_metrics.coldReplayedItems;
+        } else {
+            ++m_metrics.resumedItems;
+        }
+    }
+
+    void publishWindow(const SequenceWindow& requested, quint64 actualCount,
+                       SequenceContinuation successor, bool paused) {
+        SequenceWindow applied = requested;
+        applied.itemCount = actualCount;
+        applied.successor = std::move(successor);
+        m_appliedSequenceWindows.push_back(std::move(applied));
+        m_stopExecution = true;
+        m_paused = paused;
     }
 
     DecodedValueId addUnsigned(TypeId type, quint64 value,
@@ -472,6 +1138,81 @@ private:
         return m_store->addValue(std::move(decoded));
     }
 
+    TypeId firstType(TypeKind kind) const {
+        for (TypeId type = 0;
+             type < static_cast<TypeId>(m_program.types.size()); ++type) {
+            if (m_program.types.at(type).kind == kind) {
+                return type;
+            }
+        }
+        return kInvalidId;
+    }
+
+    DecodedValueId addStableValue(const StableReferenceValue& stable) {
+        switch (stable.kind) {
+            case StableReferenceValueKind::Null:
+                return addNull(kInvalidId);
+            case StableReferenceValueKind::Boolean:
+                return addBoolean(firstType(TypeKind::Boolean),
+                                  stable.booleanValue);
+            case StableReferenceValueKind::UnsignedInteger:
+                return addUnsigned(firstType(TypeKind::UnsignedInteger),
+                                   stable.unsignedValue);
+            case StableReferenceValueKind::SignedInteger:
+                return addSigned(firstType(TypeKind::SignedInteger),
+                                 stable.signedValue);
+            case StableReferenceValueKind::String:
+                return addString(firstType(TypeKind::String),
+                                 stable.stringValue);
+        }
+        return kInvalidId;
+    }
+
+    std::optional<StableReferenceValue> stableValue(
+        DecodedValueId valueId) const {
+        if (valueId >= static_cast<DecodedValueId>(m_store->values.size())) {
+            return std::nullopt;
+        }
+        const DecodedValue& value = m_store->values.at(valueId);
+        StableReferenceValue stable;
+        switch (value.kind) {
+            case DecodedValueKind::Null:
+                stable.kind = StableReferenceValueKind::Null;
+                break;
+            case DecodedValueKind::Boolean:
+                stable.kind = StableReferenceValueKind::Boolean;
+                stable.booleanValue = value.booleanValue;
+                break;
+            case DecodedValueKind::UnsignedInteger:
+                stable.kind = StableReferenceValueKind::UnsignedInteger;
+                stable.unsignedValue = value.unsignedValue;
+                break;
+            case DecodedValueKind::SignedInteger:
+                stable.kind = StableReferenceValueKind::SignedInteger;
+                stable.signedValue = value.signedValue;
+                break;
+            case DecodedValueKind::String:
+                stable.kind = StableReferenceValueKind::String;
+                stable.stringValue =
+                    m_store->valueStrings.value(value.payload);
+                break;
+            default:
+                return std::nullopt;
+        }
+        return stable;
+    }
+
+    DecodedValueId addReference(TypeId type, ReferenceHandle handle,
+                                DecodedNodeId node = kInvalidId) {
+        DecodedValue value;
+        value.kind = DecodedValueKind::Reference;
+        value.type = type;
+        value.payload = static_cast<quint32>(m_store->references.size());
+        value.node = node;
+        m_store->references.push_back(std::move(handle));
+        return m_store->addValue(std::move(value));
+    }
+
     DecodedValueId addSourceBytes(TypeId type, InputId input, quint64 offset,
                                   quint64 length,
                                   DecodedNodeId node = kInvalidId) {
@@ -498,6 +1239,19 @@ private:
         decoded.kind = DecodedValueKind::Sequence;
         decoded.type = type;
         decoded.elements = m_store->appendValueRefs(elements);
+        decoded.logicalCount = static_cast<quint64>(elements.size());
+        decoded.node = node;
+        return m_store->addValue(std::move(decoded));
+    }
+
+    DecodedValueId addSequence(TypeId type,
+                               const QVector<DecodedValueId>& elements,
+                               quint64 logicalCount, DecodedNodeId node) {
+        DecodedValue decoded;
+        decoded.kind = DecodedValueKind::Sequence;
+        decoded.type = type;
+        decoded.elements = m_store->appendValueRefs(elements);
+        decoded.logicalCount = logicalCount;
         decoded.node = node;
         return m_store->addValue(std::move(decoded));
     }
@@ -560,6 +1314,9 @@ private:
                            kInvalidId, cursor);
         }
         for (quint32 i = 0; i < statements.count; ++i) {
+            if (cancelled()) {
+                return cancellationOutcome(cursor);
+            }
             const StatementId id = m_program.statementRefs.at(statements.first + i);
             if (id >= static_cast<StatementId>(m_program.statements.size())) {
                 return failure(QStringLiteral("BRR0102"),
@@ -571,7 +1328,9 @@ private:
                 statement.resultSlot < static_cast<quint32>(frame.values.size())) {
                 frame.values[statement.resultSlot] = kInvalidId;
             }
+            m_locatorPath.push_back(id);
             StatementResult result = execStatement(statement, frame, cursor, parent);
+            m_locatorPath.removeLast();
             if (!result.outcome.succeeded()) {
                 result.outcome.committed =
                     result.outcome.committed || frame.committed;
@@ -580,6 +1339,9 @@ private:
             if (result.hasValue && statement.resultSlot != kInvalidId &&
                 statement.resultSlot < static_cast<quint32>(frame.values.size())) {
                 frame.values[statement.resultSlot] = result.value;
+            }
+            if (m_stopExecution) {
+                return success();
             }
             releaseProbePrefix(cursor);
         }
@@ -591,6 +1353,8 @@ private:
         switch (statement.kind) {
             case StatementKind::Field:
                 return execField(statement, frame, cursor, parent);
+            case StatementKind::Reference:
+                return execReference(statement, frame, cursor, parent);
             case StatementKind::ComputedField:
                 return execComputed(statement, frame, cursor, parent);
             case StatementKind::BitfieldField:
@@ -648,6 +1412,198 @@ private:
                         QStringLiteral("Invalid statement in decoded program"),
                         statement.sourceSpan, cursor),
                 kInvalidId, false};
+    }
+
+    MaterializationLocator currentLocator(qsizetype trimPath = 0) const {
+        MaterializationLocator locator;
+        const MaterializationLocator& activeRoot =
+            m_activeRoot.has_value() ? *m_activeRoot : m_request.root;
+        if (activeRoot.isReferenceTarget()) {
+            locator = activeRoot;
+        }
+        locator.documentGeneration = m_request.documentGeneration;
+        locator.templatePath = m_locatorPath;
+        while (trimPath > 0 && !locator.templatePath.isEmpty()) {
+            locator.templatePath.removeLast();
+            --trimPath;
+        }
+        locator.sequenceIndexes = m_sequenceIndexes;
+        return locator;
+    }
+
+    EvalResult evalChecked(ExpressionId expression, Frame& frame,
+                           Cursor& cursor) {
+        BooleanValueScope checked(&m_checkedArithmetic, true);
+        return eval(expression, frame, cursor);
+    }
+
+    StatementResult execReference(const Statement& statement, Frame& frame,
+                                  Cursor& cursor, DecodedNodeId parent) {
+        if (statement.reference >=
+            static_cast<ReferenceTemplateId>(m_program.references.size())) {
+            return {failure(QStringLiteral("BRR0220"),
+                            QStringLiteral("Invalid reference descriptor"),
+                            statement.sourceSpan, cursor),
+                    kInvalidId, false};
+        }
+        const ReferenceDesc& descriptor =
+            m_program.references.at(statement.reference);
+        ReferenceHandle handle;
+        handle.referenceTemplate = statement.reference;
+        handle.owner = currentLocator(1);
+        handle.strength = descriptor.strength;
+
+        if (statement.condition != kInvalidId) {
+            const EvalResult condition = eval(statement.condition, frame, cursor);
+            if (!condition.outcome.succeeded()) {
+                return {condition.outcome, kInvalidId, false};
+            }
+            handle.isNull = !asBoolean(condition.value).value_or(false);
+        }
+
+        if (!handle.isNull) {
+            QVector<DecodedValueId> arguments;
+            {
+                BooleanValueScope checked(&m_checkedArithmetic, true);
+                const Outcome argumentOutcome = evalArguments(
+                    descriptor.targetArguments, frame, cursor, &arguments);
+                if (!argumentOutcome.succeeded()) {
+                    return {argumentOutcome, kInvalidId, false};
+                }
+            }
+            for (DecodedValueId argument : arguments) {
+                const auto stable = stableValue(argument);
+                if (!stable.has_value()) {
+                    return {failure(QStringLiteral("BRR0221"),
+                                    QStringLiteral("Reference target argument is not a stable scalar"),
+                                    statement.sourceSpan, cursor),
+                            kInvalidId, false};
+                }
+                handle.target.identity.targetArguments.values.push_back(
+                    *stable);
+            }
+
+            const EvalResult displacement = evalChecked(
+                descriptor.address.displacement, frame, cursor);
+            if (!displacement.outcome.succeeded()) {
+                return {displacement.outcome, kInvalidId, false};
+            }
+            const EvalResult region = evalChecked(
+                descriptor.address.regionLength, frame, cursor);
+            if (!region.outcome.succeeded()) {
+                return {region.outcome, kInvalidId, false};
+            }
+            const auto relative = asUnsigned(displacement.value);
+            const auto length = asUnsigned(region.value);
+            if (!relative.has_value() || !length.has_value()) {
+                return {failure(QStringLiteral("BRR0222"),
+                                QStringLiteral("Reference address and region must be unsigned integers"),
+                                statement.sourceSpan, cursor),
+                        kInvalidId, false};
+            }
+            quint64 base = 0;
+            if (descriptor.address.base == AddressBaseKind::EntryRoot) {
+                base = m_entryRootOffset;
+            } else if (descriptor.address.base ==
+                       AddressBaseKind::ContainingEntity) {
+                base = m_entityStartOffset;
+            }
+            if (addWouldOverflow(base, *relative)) {
+                return {failure(QStringLiteral("BRR0223"),
+                                QStringLiteral("Reference address overflow"),
+                                statement.sourceSpan, cursor),
+                        kInvalidId, false};
+            }
+            const quint64 targetOffset = base + *relative;
+            if (addWouldOverflow(targetOffset, *length)) {
+                return {failure(QStringLiteral("BRR0224"),
+                                QStringLiteral("Reference region overflow"),
+                                statement.sourceSpan, cursor),
+                        kInvalidId, false};
+            }
+            if (descriptor.address.input >=
+                    static_cast<InputId>(m_request.inputs.size()) ||
+                source(descriptor.address.input) == nullptr) {
+                return {failure(QStringLiteral("BRR0225"),
+                                QStringLiteral("Reference input is not bound"),
+                                statement.sourceSpan, cursor),
+                        kInvalidId, false};
+            }
+            const auto inputEnd = source(descriptor.address.input)->size();
+            if (inputEnd.has_value() &&
+                targetOffset + *length > *inputEnd) {
+                Cursor targetCursor{descriptor.address.input, targetOffset,
+                                    targetOffset + *length};
+                return {failure(QStringLiteral("BRR0226"),
+                                QStringLiteral("Reference target region exceeds its input"),
+                                statement.sourceSpan, targetCursor),
+                        kInvalidId, false};
+            }
+
+            StableReferenceKey explicitKey;
+            QVector<DecodedValueId> keyValues;
+            {
+                BooleanValueScope checked(&m_checkedArithmetic, true);
+                const Outcome keyOutcome = evalArguments(
+                    descriptor.keyExpressions, frame, cursor, &keyValues);
+                if (!keyOutcome.succeeded()) {
+                    return {keyOutcome, kInvalidId, false};
+                }
+            }
+            for (DecodedValueId keyValue : keyValues) {
+                const auto stable = stableValue(keyValue);
+                if (!stable.has_value()) {
+                    return {failure(QStringLiteral("BRR0227"),
+                                    QStringLiteral("Reference key is not a stable scalar"),
+                                    statement.sourceSpan, cursor),
+                            kInvalidId, false};
+                }
+                explicitKey.values.push_back(*stable);
+            }
+
+            ReferenceTargetIdentity& identity = handle.target.identity;
+            identity.documentGeneration = m_request.documentGeneration;
+            identity.kind = explicitKey.isEmpty()
+                                ? ReferenceIdentityKind::Physical
+                                : ReferenceIdentityKind::Explicit;
+            identity.targetType = descriptor.targetType;
+            identity.explicitKey = explicitKey;
+            if (identity.kind == ReferenceIdentityKind::Physical) {
+                identity.physicalInput = descriptor.address.input;
+                identity.physicalOffset = targetOffset;
+                identity.physicalLength = *length;
+            }
+            handle.target.input = descriptor.address.input;
+            handle.target.logicalOffset = targetOffset;
+            handle.target.regionLength = *length;
+        }
+
+        DecodedNodeId node = kInvalidId;
+        if (!createNode(DecodedNodeKind::Reference, parent,
+                        m_program.symbol(statement.name), statement.type,
+                        statement.sourceSpan, cursor.input, &node)) {
+            return {failure(QStringLiteral("BRR0100"),
+                            QStringLiteral("Decoded node limit exceeded"),
+                            statement.sourceSpan, cursor),
+                    kInvalidId, false};
+        }
+        const DecodedValueId value =
+            addReference(statement.type, handle, node);
+        if (node != kInvalidId) {
+            m_store->nodes[node].value = value;
+            setComputedLayout(node, statement.type);
+        }
+        if (m_request.mode == DecodeMode::ReferenceScan ||
+            m_request.mode == DecodeMode::MaterializePage ||
+            m_request.mode == DecodeMode::Tree) {
+            m_referenceEvents.push_back(
+                {handle, schemaSpan(statement.sourceSpan)});
+        }
+        if (!streamName(statement.name) || !streamValue(value)) {
+            return {writerFailure(statement.sourceSpan, cursor), kInvalidId,
+                    false};
+        }
+        return {success(), value, true};
     }
 
     StatementResult execField(const Statement& statement, Frame& frame,
@@ -840,14 +1796,17 @@ private:
                 }
             }
             DecodedNodeId child = kInvalidId;
+            m_locatorPath.push_back(kInvalidId - memberId);
             if (!createNode(DecodedNodeKind::BitMember, node,
                             m_program.symbol(member.name), memberType,
                             member.sourceSpan, cursor.input, &child)) {
+                m_locatorPath.removeLast();
                 return {failure(QStringLiteral("BRR0100"),
                                 QStringLiteral("Decoded node limit exceeded"),
                                 statement.sourceSpan, cursor),
                         kInvalidId, false};
             }
+            m_locatorPath.removeLast();
             const DecodedValueId childValue =
                 width == 1 ? addBoolean(memberType, memberValue != 0, child)
                            : addUnsigned(memberType, memberValue, child);
@@ -989,6 +1948,7 @@ private:
                             statement.sourceSpan, cursor),
                     kInvalidId, false};
         }
+        beginComposite(node);
         Cursor region{cursor.input, start, end};
         clearObjectSlots(statement.type, frame);
         if (!streamName(statement.name) ||
@@ -1008,9 +1968,302 @@ private:
         cursor.position = end;
         if (node != kInvalidId) {
             m_store->nodes[node].value = value;
-            setCompositeLayout(node, statement.type, cursor.input, start, end);
+            finishCompositeLayout(node, statement.type, cursor.input, start, end);
         }
         return {success(), value, true};
+    }
+
+    StatementResult execForwardLoop(
+        const Statement& statement, Frame& frame, Cursor& cursor,
+        DecodedNodeId node, quint64 sequenceStart, TypeId itemType,
+        std::optional<quint64> evaluatedCount,
+        const MaterializationLocator& sequenceLocator) {
+        const StatementId statementId = m_locatorPath.isEmpty()
+                                            ? kInvalidId
+                                            : m_locatorPath.last();
+        const bool resolving = m_request.mode == DecodeMode::ResolveShape;
+        const ResolvedSequenceShape* recipe =
+            resolving ? nullptr : resolvedSequence(sequenceLocator);
+        const std::optional<SequenceWindow> requested =
+            m_request.mode == DecodeMode::MaterializePage
+                ? MaterializationSink(m_request.sequenceWindows)
+                      .window(sequenceLocator)
+                : std::nullopt;
+        if (!resolving && recipe == nullptr) {
+            return {failure(QStringLiteral("BRR0721"),
+                            QStringLiteral("Variable sequence is absent from the resolved shape"),
+                            statement.sourceSpan, cursor),
+                    kInvalidId, false};
+        }
+
+        const TransactionCheckpoint sequenceBase = transactionCheckpoint();
+        const SequenceContinuation startToken = makeContinuation(
+            sequenceLocator, 0, statementId, statement.kind, frame, cursor,
+            evaluatedCount, 0, 0);
+        quint64 iteration = 0;
+        quint64 semanticItems = 0;
+        quint64 displayItems = 0;
+        std::optional<quint64> count = evaluatedCount;
+        bool cold = requested.has_value() && !requested->successor.has_value();
+
+        if (!resolving) {
+            const SequenceContinuation* token = nullptr;
+            if (requested.has_value() && requested->successor.has_value()) {
+                token = &*requested->successor;
+            } else if (recipe->startContinuation.has_value()) {
+                token = &*recipe->startContinuation;
+            }
+            if (token == nullptr) {
+                return {failure(QStringLiteral("BRR0722"),
+                                QStringLiteral("Variable sequence has no start continuation"),
+                                statement.sourceSpan, cursor),
+                        kInvalidId, false};
+            }
+            const quint64 first = requested.has_value()
+                                      ? qMin(requested->firstItem,
+                                             recipe->displayCount)
+                                      : recipe->displayCount;
+            const RuntimeContinuationState* state = validateContinuation(
+                *token, sequenceLocator, statementId, first, cursor,
+                statement.sourceSpan);
+            if (state == nullptr ||
+                !restoreContinuationState(*state, &frame, &cursor)) {
+                return {m_continuationError.hasDiagnostic
+                            ? m_continuationError
+                            : failure(QStringLiteral("BRR0723"),
+                                      QStringLiteral("Could not restore sequence continuation"),
+                                      statement.sourceSpan, cursor),
+                        kInvalidId, false};
+            }
+            iteration = state->nextIteration;
+            semanticItems = state->semanticItems;
+            displayItems = token->nextItem;
+            count = state->repeatCount;
+            cold = !requested->successor.has_value() ||
+                   token->nextItem < first;
+            if (requested.has_value() && cold) {
+                ++m_metrics.coldCursorOpens;
+            }
+        }
+
+        const quint64 targetFirst = requested.has_value()
+                                        ? qMin(requested->firstItem,
+                                               recipe->displayCount)
+                                        : std::numeric_limits<quint64>::max();
+        const quint64 targetEnd = requested.has_value()
+                                      ? targetFirst + qMin(
+                                            requested->itemCount,
+                                            recipe->displayCount - targetFirst)
+                                      : std::numeric_limits<quint64>::max();
+        QVector<DecodedValueId> materializedItems;
+        quint64 materializedCount = 0;
+        quint64 itemExtentMin = std::numeric_limits<quint64>::max();
+        quint64 itemExtentMax = 0;
+        bool sequenceComplete = false;
+
+        while (true) {
+            if (requested.has_value() && displayItems >= targetEnd) {
+                if (displayItems == recipe->displayCount &&
+                    cursor.position != recipe->endOffset) {
+                    return {failure(QStringLiteral("BRR0726"),
+                                    QStringLiteral("Variable loop replay ended at a different boundary"),
+                                    statement.sourceSpan, cursor),
+                            kInvalidId, false};
+                }
+                clearObjectSlots(itemType, frame);
+                const SequenceContinuation successor = makeContinuation(
+                    sequenceLocator, displayItems, statementId,
+                    statement.kind, frame, cursor, count, iteration,
+                    semanticItems);
+                publishWindow(*requested, materializedCount, successor, false);
+                break;
+            }
+            if (count.has_value() && iteration >= *count) {
+                sequenceComplete = true;
+                break;
+            }
+            if (statement.iterationSlot != kInvalidId &&
+                statement.iterationSlot <
+                    static_cast<quint32>(frame.values.size())) {
+                frame.values[statement.iterationSlot] = addUnsigned(
+                    expressionSlotType(statement.iterationSlot), iteration);
+            }
+            if (statement.kind == StatementKind::While) {
+                const EvalResult condition =
+                    eval(statement.condition, frame, cursor);
+                if (!condition.outcome.succeeded()) {
+                    return {condition.outcome, kInvalidId, false};
+                }
+                if (!asBoolean(condition.value).value_or(false)) {
+                    sequenceComplete = true;
+                    break;
+                }
+            }
+            if (iteration >= m_program.limits.maxLoopIterations) {
+                return {failure(QStringLiteral("BRR0251"),
+                                QStringLiteral("Loop iteration limit exceeded"),
+                                statement.sourceSpan, cursor),
+                        kInvalidId, false};
+            }
+            if (requested.has_value() && !replayBudgetAvailable(true)) {
+                clearObjectSlots(itemType, frame);
+                const SequenceContinuation successor = makeContinuation(
+                    sequenceLocator, displayItems, statementId,
+                    statement.kind, frame, cursor, count, iteration,
+                    semanticItems);
+                publishWindow(*requested, materializedCount, successor, true);
+                break;
+            }
+
+            const bool materialize = requested.has_value() &&
+                                     displayItems >= targetFirst;
+            clearObjectSlots(itemType, frame);
+            VectorAppendScope<quint64> locatorIndex(&m_sequenceIndexes,
+                                                    semanticItems);
+            DecodedNodeId itemNode = kInvalidId;
+            const quint64 itemStart = cursor.position;
+            Outcome body;
+            DecodedValueId item = kInvalidId;
+            {
+                BooleanValueScope discard(&m_suppressDurableOutput,
+                                          !materialize);
+                if (!createNode(DecodedNodeKind::SequenceItem, node,
+                                QStringLiteral("[%1]").arg(semanticItems),
+                                itemType, statement.sourceSpan, cursor.input,
+                                &itemNode)) {
+                    return {failure(QStringLiteral("BRR0100"),
+                                    QStringLiteral("Decoded node limit exceeded"),
+                                    statement.sourceSpan, cursor),
+                            kInvalidId, false};
+                }
+                beginComposite(itemNode);
+                body = execBlock(statement.statements, frame, cursor, itemNode);
+                if (body.flow == Flow::Failure || body.flow == Flow::NoMatch) {
+                    return {body, kInvalidId, false};
+                }
+                item = buildObject(itemType, frame, itemNode);
+                if (itemNode != kInvalidId) {
+                    m_store->nodes[itemNode].value = item;
+                    finishCompositeLayout(itemNode, itemType, cursor.input,
+                                          itemStart, cursor.position);
+                }
+            }
+            const quint64 itemBytes = cursor.position - itemStart;
+            itemExtentMin = qMin(itemExtentMin, itemBytes);
+            itemExtentMax = qMax(itemExtentMax, itemBytes);
+            ++semanticItems;
+            ++displayItems;
+            ++iteration;
+            ++m_metrics.scannedItems;
+            m_metrics.scannedBytes += itemBytes;
+            recordReplayWork(requested.has_value(), cold);
+            if (materialize) {
+                materializedItems.push_back(item);
+                ++materializedCount;
+            }
+
+            bool stop = body.flow == Flow::Break;
+            if (!stop && statement.kind == StatementKind::Repeat &&
+                statement.condition != kInvalidId) {
+                const EvalResult until = eval(statement.condition, frame, cursor);
+                if (!until.outcome.succeeded()) {
+                    return {until.outcome, kInvalidId, false};
+                }
+                stop = asBoolean(until.value).value_or(false);
+            }
+            if (!count.has_value() && cursor.position == itemStart) {
+                return {failure(QStringLiteral("BRR0252"),
+                                QStringLiteral("Unbounded loop made no input progress"),
+                                statement.sourceSpan, cursor),
+                        kInvalidId, false};
+            }
+
+            if (!materialize) {
+                // Item fields are no longer semantically live once the loop's
+                // post-condition has run.  Excluding them from the boundary
+                // arena keeps reference handles (and their dependent scalar
+                // values) transient during shape replay instead of retaining
+                // an orphaned copy in the durable outline.
+                clearObjectSlots(itemType, frame);
+                const auto boundaryState = captureContinuationState(
+                    statementId, statement.kind, frame, cursor, count,
+                    iteration, semanticItems);
+                rollbackDiscardedOutput(sequenceBase);
+                if (!restoreContinuationState(*boundaryState, &frame,
+                                              &cursor)) {
+                    return {failure(QStringLiteral("BRR0723"),
+                                    QStringLiteral("Could not retain variable loop state"),
+                                    statement.sourceSpan, cursor),
+                            kInvalidId, false};
+                }
+            }
+            if (stop) {
+                sequenceComplete = true;
+                if (requested.has_value() && displayItems < targetEnd) {
+                    return {failure(QStringLiteral("BRR0725"),
+                                    QStringLiteral("Variable loop replay ended before the resolved boundary"),
+                                    statement.sourceSpan, cursor),
+                            kInvalidId, false};
+                }
+                if (requested.has_value()) {
+                    if (displayItems == recipe->displayCount &&
+                        cursor.position != recipe->endOffset) {
+                        return {failure(QStringLiteral("BRR0726"),
+                                        QStringLiteral("Variable loop replay ended at a different boundary"),
+                                        statement.sourceSpan, cursor),
+                                kInvalidId, false};
+                    }
+                    clearObjectSlots(itemType, frame);
+                    publishWindow(
+                        *requested, materializedCount,
+                        makeContinuation(sequenceLocator, displayItems,
+                                         statementId, statement.kind, frame,
+                                         cursor, count, iteration,
+                                         semanticItems),
+                        false);
+                }
+                break;
+            }
+            releaseProbePrefix(cursor);
+        }
+
+        const quint64 logicalCount = resolving
+                                         ? semanticItems
+                                         : recipe->itemCount;
+        const DecodedValueId sequence = addSequence(
+            statement.type, materializedItems, logicalCount, node);
+        if (node != kInvalidId) {
+            m_store->nodes[node].value = sequence;
+            finishCompositeLayout(node, statement.type, cursor.input,
+                                  resolving ? sequenceStart
+                                            : recipe->startOffset,
+                                  cursor.position);
+        }
+
+        if (resolving) {
+            ResolvedSequenceShape shape;
+            shape.locator = sequenceLocator;
+            shape.statement = statementId;
+            shape.itemType = itemType;
+            shape.staticItemTemplate = statement.staticItemTemplate;
+            shape.indexKind = SequenceIndexKind::ForwardReplay;
+            shape.itemCount = semanticItems;
+            shape.displayCount = displayItems;
+            shape.startOffset = sequenceStart;
+            shape.endOffset = cursor.position;
+            shape.startContinuation = startToken;
+            shape.totalPrimaryBytes = cursor.position - sequenceStart;
+            shape.itemExtentMin = semanticItems == 0 ? 0 : itemExtentMin;
+            shape.itemExtentMax = itemExtentMax;
+            ShapeSink(&m_resolvedSequences)
+                .recordSequence(std::move(shape));
+        } else if (!requested.has_value() && !sequenceComplete) {
+            return {failure(QStringLiteral("BRR0724"),
+                            QStringLiteral("Variable sequence replay stopped before completion"),
+                            statement.sourceSpan, cursor),
+                    kInvalidId, false};
+        }
+        return {success(), sequence, true};
     }
 
     StatementResult execLoop(const Statement& statement, Frame& frame,
@@ -1019,7 +2272,7 @@ private:
             m_streamLoopReplayDepth == 0) {
             const Cursor savedCursor = cursor;
             const Frame savedFrame = frame;
-            const DecodedTreeCheckpoint checkpoint = m_store->checkpoint();
+            const TransactionCheckpoint checkpoint = transactionCheckpoint();
             const qsizetype diagnosticCheckpoint = m_diagnostics.size();
             const QVector<ProbeAnchor> savedAnchors = m_probeAnchors;
             const quint32 savedDepth = m_depth;
@@ -1030,7 +2283,7 @@ private:
 
             cursor = savedCursor;
             frame = savedFrame;
-            m_store->rollback(checkpoint);
+            rollbackTransaction(checkpoint);
             m_diagnostics.resize(diagnosticCheckpoint);
             m_probeAnchors = savedAnchors;
             m_depth = savedDepth;
@@ -1054,6 +2307,7 @@ private:
                     kInvalidId, false};
         }
         const quint64 start = cursor.position;
+        beginComposite(node);
         for (quint32 i = 0; i < statement.initializers.count; ++i) {
             const Statement& initializer = m_program.statements.at(
                 m_program.statementRefs.at(statement.initializers.first + i));
@@ -1086,6 +2340,220 @@ private:
             statement.type < static_cast<TypeId>(m_program.types.size())
                 ? m_program.types.at(statement.type).elementType
                 : kInvalidId;
+
+        const bool arithmeticMode =
+            (m_request.mode == DecodeMode::ResolveShape ||
+             m_request.mode == DecodeMode::MaterializePage) &&
+            statement.kind == StatementKind::Repeat && count.has_value() &&
+            statement.loopScanPlan == LoopScanPlan::BatchAdvance &&
+            statement.condition == kInvalidId &&
+            statement.itemExtent <
+                static_cast<quint32>(m_program.extents.size());
+        if (arithmeticMode) {
+            const ExtentSummary& itemExtent =
+                m_program.extents.at(statement.itemExtent);
+            if (!itemExtent.exactBytes.has_value() ||
+                *itemExtent.exactBytes == 0 ||
+                itemExtent.parentAdvance != ParentAdvance::Contiguous) {
+                return {failure(QStringLiteral("BRR0253"),
+                                QStringLiteral("Invalid arithmetic loop plan"),
+                                statement.sourceSpan, cursor),
+                        kInvalidId, false};
+            }
+            const quint64 stride = *itemExtent.exactBytes;
+            quint64 totalBytes = 0;
+            if (multiplyWouldOverflow(*count, stride, &totalBytes) ||
+                addWouldOverflow(start, totalBytes)) {
+                return {failure(QStringLiteral("BRR0254"),
+                                QStringLiteral("Fixed-stride loop extent overflow"),
+                                statement.sourceSpan, cursor),
+                        kInvalidId, false};
+            }
+            const quint64 loopEnd = start + totalBytes;
+            const std::optional<quint64> availableEnd =
+                cursor.end.has_value() ? cursor.end : source(cursor.input)->size();
+            if (availableEnd.has_value() && loopEnd > *availableEnd) {
+                return {failure(QStringLiteral("BRR0313"),
+                                QStringLiteral("Unexpected end of region"),
+                                statement.sourceSpan, cursor),
+                        kInvalidId, false};
+            }
+            if (!availableEnd.has_value()) {
+                constexpr quint64 chunkBytes = 1024 * 1024;
+                quint64 probe = start;
+                while (probe < loopEnd) {
+                    if (cancelled()) {
+                        return {cancellationOutcome(cursor,
+                                                    statement.sourceSpan),
+                                kInvalidId, false};
+                    }
+                    const qsizetype amount = static_cast<qsizetype>(
+                        qMin(loopEnd - probe, chunkBytes));
+                    const ByteReadResult bytes =
+                        source(cursor.input)->read(probe, amount);
+                    if (!bytes.ok() || bytes.view.length != amount) {
+                        return {failure(QStringLiteral("BRR0313"),
+                                        QStringLiteral("Unexpected end of input"),
+                                        statement.sourceSpan, cursor),
+                                kInvalidId, false};
+                    }
+                    probe += static_cast<quint64>(amount);
+                    m_metrics.scannedBytes += static_cast<quint64>(amount);
+                }
+            }
+
+            const quint64 nodesPerItem =
+                1 + staticTemplateChildNodeCount(statement.statements);
+            quint64 lazyNodes = 0;
+            if (multiplyWouldOverflow(*count, nodesPerItem, &lazyNodes) ||
+                addWouldOverflow(m_logicalNodes, lazyNodes)) {
+                m_logicalNodes = std::numeric_limits<quint64>::max();
+            } else {
+                m_logicalNodes += lazyNodes;
+            }
+
+            const MaterializationLocator sequenceLocator =
+                node != kInvalidId &&
+                        node < static_cast<DecodedNodeId>(m_store->locators.size())
+                    ? m_store->locators.at(node)
+                    : currentLocator();
+            if (m_request.mode == DecodeMode::ResolveShape) {
+                ResolvedSequenceShape shape;
+                shape.locator = sequenceLocator;
+                shape.statement = m_locatorPath.isEmpty()
+                                      ? kInvalidId
+                                      : m_locatorPath.last();
+                shape.itemType = itemType;
+                shape.staticItemTemplate = statement.staticItemTemplate;
+                shape.indexKind = SequenceIndexKind::Arithmetic;
+                shape.arithmetic = {cursor.input, start, *count, stride};
+                shape.itemCount = *count;
+                shape.displayCount = *count;
+                shape.startOffset = start;
+                shape.endOffset = loopEnd;
+                shape.totalPrimaryBytes = totalBytes;
+                shape.itemExtentMin = stride;
+                shape.itemExtentMax = stride;
+                ShapeSink(&m_resolvedSequences)
+                    .recordSequence(std::move(shape));
+            }
+
+            quint64 first = 0;
+            quint64 amount = 0;
+            if (m_request.mode == DecodeMode::MaterializePage) {
+                const auto window =
+                    MaterializationSink(m_request.sequenceWindows)
+                        .requestedWindow(sequenceLocator, *count);
+                if (window.has_value()) {
+                    first = window->first;
+                    amount = window->second;
+                }
+            }
+            QVector<DecodedValueId> materializedItems;
+            if (amount != 0) {
+                quint64 firstBytes = 0;
+                multiplyWouldOverflow(first, stride, &firstBytes);
+                cursor.position = start + firstBytes;
+                materializedItems.reserve(static_cast<qsizetype>(qMin<quint64>(
+                    amount, static_cast<quint64>(
+                                std::numeric_limits<qsizetype>::max()))));
+                for (quint64 relative = 0; relative < amount; ++relative) {
+                    if (cancelled()) {
+                        return {cancellationOutcome(cursor,
+                                                    statement.sourceSpan),
+                                kInvalidId, false};
+                    }
+                    const quint64 iteration = first + relative;
+                    if (statement.iterationSlot != kInvalidId &&
+                        statement.iterationSlot <
+                            static_cast<quint32>(frame.values.size())) {
+                        frame.values[statement.iterationSlot] = addUnsigned(
+                            expressionSlotType(statement.iterationSlot), iteration);
+                    }
+                    clearObjectSlots(itemType, frame);
+                    m_sequenceIndexes.push_back(iteration);
+                    DecodedNodeId itemNode = kInvalidId;
+                    if (!createNode(DecodedNodeKind::SequenceItem, node,
+                                    QStringLiteral("[%1]").arg(iteration), itemType,
+                                    statement.sourceSpan, cursor.input, &itemNode)) {
+                        m_sequenceIndexes.removeLast();
+                        return {failure(QStringLiteral("BRR0100"),
+                                        QStringLiteral("Decoded node limit exceeded"),
+                                        statement.sourceSpan, cursor),
+                                kInvalidId, false};
+                    }
+                    beginComposite(itemNode);
+                    const quint64 itemStart = cursor.position;
+                    Outcome body =
+                        execBlock(statement.statements, frame, cursor, itemNode);
+                    if (!body.succeeded()) {
+                        m_sequenceIndexes.removeLast();
+                        return {body, kInvalidId, false};
+                    }
+                    if (cursor.position != itemStart + stride) {
+                        m_sequenceIndexes.removeLast();
+                        return {failure(
+                                    QStringLiteral("BRR0255"),
+                                    QStringLiteral("Fixed-stride materialization did not match resolved shape"),
+                                    statement.sourceSpan, cursor),
+                                kInvalidId, false};
+                    }
+                    const DecodedValueId item =
+                        buildObject(itemType, frame, itemNode);
+                    materializedItems.push_back(item);
+                    if (itemNode != kInvalidId) {
+                        m_store->nodes[itemNode].value = item;
+                        finishCompositeLayout(itemNode, itemType, cursor.input,
+                                              itemStart, cursor.position);
+                    }
+                    m_sequenceIndexes.removeLast();
+                    ++m_metrics.scannedItems;
+                    m_metrics.scannedBytes += stride;
+                }
+            }
+            cursor.position = loopEnd;
+            m_metrics.arithmeticSkippedItems += *count - amount;
+            m_metrics.arithmeticSkippedBytes += totalBytes - amount * stride;
+            const DecodedValueId sequence = addSequence(
+                statement.type, materializedItems, *count, node);
+            if (node != kInvalidId) {
+                m_store->nodes[node].value = sequence;
+                finishCompositeLayout(node, statement.type, cursor.input, start,
+                                      cursor.position);
+            }
+            if (m_request.mode == DecodeMode::MaterializePage) {
+                const auto requested =
+                    MaterializationSink(m_request.sequenceWindows)
+                        .window(sequenceLocator);
+                if (requested.has_value()) {
+                    SequenceWindow applied = *requested;
+                    applied.firstItem = first;
+                    applied.itemCount = amount;
+                    applied.successor.reset();
+                    m_appliedSequenceWindows.push_back(std::move(applied));
+                }
+            }
+            return {success(), sequence, true};
+        }
+
+        if ((m_request.mode == DecodeMode::ResolveShape ||
+             m_request.mode == DecodeMode::MaterializePage) &&
+            statement.loopScanPlan == LoopScanPlan::ExecuteItems) {
+            const MaterializationLocator sequenceLocator =
+                node != kInvalidId &&
+                        node < static_cast<DecodedNodeId>(m_store->locators.size())
+                    ? m_store->locators.at(node)
+                    : currentLocator();
+            if (m_request.mode == DecodeMode::ResolveShape ||
+                resolvedSequence(sequenceLocator) != nullptr) {
+                return execForwardLoop(statement, frame, cursor, node, start,
+                                       itemType, count, sequenceLocator);
+            }
+        }
+
+        if (m_request.mode == DecodeMode::ResolveShape) {
+            m_usedLegacyEagerSequence = true;
+        }
         QVector<DecodedValueId> items;
         if (!streamName(statement.name) ||
             (emitting() && !m_writer->beginArray())) {
@@ -1093,6 +2561,10 @@ private:
                     false};
         }
         for (quint64 iteration = 0;; ++iteration) {
+            if (cancelled()) {
+                return {cancellationOutcome(cursor, statement.sourceSpan),
+                        kInvalidId, false};
+            }
             if (count.has_value() && iteration >= *count) {
                 break;
             }
@@ -1117,15 +2589,18 @@ private:
                         kInvalidId, false};
             }
             clearObjectSlots(itemType, frame);
+            m_sequenceIndexes.push_back(iteration);
             DecodedNodeId itemNode = kInvalidId;
             if (!createNode(DecodedNodeKind::SequenceItem, node,
                             QStringLiteral("[%1]").arg(iteration), itemType,
                             statement.sourceSpan, cursor.input, &itemNode)) {
+                m_sequenceIndexes.removeLast();
                 return {failure(QStringLiteral("BRR0100"),
                                 QStringLiteral("Decoded node limit exceeded"),
                                 statement.sourceSpan, cursor),
                         kInvalidId, false};
             }
+            beginComposite(itemNode);
             const quint64 itemStart = cursor.position;
             if (emitting() && !m_writer->beginObject()) {
                 return {writerFailure(statement.sourceSpan, cursor), kInvalidId,
@@ -1133,6 +2608,7 @@ private:
             }
             Outcome body = execBlock(statement.statements, frame, cursor, itemNode);
             if (body.flow == Flow::Failure || body.flow == Flow::NoMatch) {
+                m_sequenceIndexes.removeLast();
                 return {body, kInvalidId, false};
             }
             if (emitting() && !m_writer->endObject()) {
@@ -1143,9 +2619,12 @@ private:
             items.push_back(item);
             if (itemNode != kInvalidId) {
                 m_store->nodes[itemNode].value = item;
-                setCompositeLayout(itemNode, itemType, cursor.input, itemStart,
-                                   cursor.position);
+                finishCompositeLayout(itemNode, itemType, cursor.input, itemStart,
+                                      cursor.position);
             }
+            m_sequenceIndexes.removeLast();
+            ++m_metrics.scannedItems;
+            m_metrics.scannedBytes += cursor.position - itemStart;
             if (body.flow == Flow::Break) {
                 break;
             }
@@ -1176,8 +2655,242 @@ private:
         const DecodedValueId sequence = addSequence(statement.type, items, node);
         if (node != kInvalidId) {
             m_store->nodes[node].value = sequence;
-            setCompositeLayout(node, statement.type, cursor.input, start,
-                               cursor.position);
+            finishCompositeLayout(node, statement.type, cursor.input, start,
+                                  cursor.position);
+        }
+        return {success(), sequence, true};
+    }
+
+    StatementResult execForwardMany(
+        const Statement& statement, Frame& frame, Cursor& cursor,
+        DecodedNodeId node, quint64 sequenceStart, TypeId itemType,
+        const MaterializationLocator& sequenceLocator) {
+        const StatementId statementId = m_locatorPath.isEmpty()
+                                            ? kInvalidId
+                                            : m_locatorPath.last();
+        const bool resolving = m_request.mode == DecodeMode::ResolveShape;
+        const ResolvedSequenceShape* recipe =
+            resolving ? nullptr : resolvedSequence(sequenceLocator);
+        const std::optional<SequenceWindow> requested =
+            m_request.mode == DecodeMode::MaterializePage
+                ? MaterializationSink(m_request.sequenceWindows)
+                      .window(sequenceLocator)
+                : std::nullopt;
+        if (!resolving && recipe == nullptr) {
+            return {failure(QStringLiteral("BRR0721"),
+                            QStringLiteral("Variable sequence is absent from the resolved shape"),
+                            statement.sourceSpan, cursor),
+                    kInvalidId, false};
+        }
+
+        const TransactionCheckpoint sequenceBase = transactionCheckpoint();
+        const SequenceContinuation startToken = makeContinuation(
+            sequenceLocator, 0, statementId, statement.kind, frame, cursor,
+            std::nullopt, 0, 0);
+        quint64 iteration = 0;
+        quint64 itemsSeen = 0;
+        bool cold = requested.has_value() && !requested->successor.has_value();
+        if (!resolving) {
+            const SequenceContinuation* token =
+                requested.has_value() && requested->successor.has_value()
+                    ? &*requested->successor
+                    : (recipe->startContinuation.has_value()
+                           ? &*recipe->startContinuation
+                           : nullptr);
+            if (token == nullptr) {
+                return {failure(QStringLiteral("BRR0722"),
+                                QStringLiteral("Variable sequence has no start continuation"),
+                                statement.sourceSpan, cursor),
+                        kInvalidId, false};
+            }
+            const quint64 first = requested.has_value()
+                                      ? qMin(requested->firstItem,
+                                             recipe->displayCount)
+                                      : recipe->displayCount;
+            const RuntimeContinuationState* state = validateContinuation(
+                *token, sequenceLocator, statementId, first, cursor,
+                statement.sourceSpan);
+            if (state == nullptr ||
+                !restoreContinuationState(*state, &frame, &cursor)) {
+                return {m_continuationError.hasDiagnostic
+                            ? m_continuationError
+                            : failure(QStringLiteral("BRR0723"),
+                                      QStringLiteral("Could not restore sequence continuation"),
+                                      statement.sourceSpan, cursor),
+                        kInvalidId, false};
+            }
+            iteration = state->nextIteration;
+            itemsSeen = token->nextItem;
+            cold = !requested->successor.has_value() ||
+                   token->nextItem < first;
+            if (requested.has_value() && cold) {
+                ++m_metrics.coldCursorOpens;
+            }
+        }
+
+        const quint64 targetFirst = requested.has_value()
+                                        ? qMin(requested->firstItem,
+                                               recipe->displayCount)
+                                        : std::numeric_limits<quint64>::max();
+        const quint64 targetEnd = requested.has_value()
+                                      ? targetFirst + qMin(
+                                            requested->itemCount,
+                                            recipe->displayCount - targetFirst)
+                                      : std::numeric_limits<quint64>::max();
+        QVector<DecodedValueId> materializedItems;
+        quint64 materializedCount = 0;
+        quint64 itemExtentMin = std::numeric_limits<quint64>::max();
+        quint64 itemExtentMax = 0;
+
+        while (true) {
+            if (requested.has_value() && itemsSeen >= targetEnd) {
+                if (itemsSeen == recipe->displayCount &&
+                    cursor.position != recipe->endOffset) {
+                    return {failure(QStringLiteral("BRR0726"),
+                                    QStringLiteral("Variable many replay ended at a different boundary"),
+                                    statement.sourceSpan, cursor),
+                            kInvalidId, false};
+                }
+                publishWindow(
+                    *requested, materializedCount,
+                    makeContinuation(sequenceLocator, itemsSeen, statementId,
+                                     statement.kind, frame, cursor,
+                                     std::nullopt, iteration, itemsSeen),
+                    false);
+                break;
+            }
+            if (!resolving && itemsSeen >= recipe->itemCount) {
+                break;
+            }
+            if (resolving && isAtEnd(cursor)) {
+                break;
+            }
+            if (iteration >= m_program.limits.maxLoopIterations) {
+                return {failure(QStringLiteral("BRR0251"),
+                                QStringLiteral("Loop iteration limit exceeded"),
+                                statement.sourceSpan, cursor),
+                        kInvalidId, false};
+            }
+            if (requested.has_value() && !replayBudgetAvailable(true)) {
+                publishWindow(
+                    *requested, materializedCount,
+                    makeContinuation(sequenceLocator, itemsSeen, statementId,
+                                     statement.kind, frame, cursor,
+                                     std::nullopt, iteration, itemsSeen),
+                    true);
+                break;
+            }
+
+            const bool materialize = requested.has_value() &&
+                                     itemsSeen >= targetFirst;
+            const quint64 itemStart = cursor.position;
+            const TransactionCheckpoint attemptCheckpoint =
+                transactionCheckpoint();
+            const qsizetype diagnosticCheckpoint = m_diagnostics.size();
+            VectorAppendScope<quint64> locatorIndex(&m_sequenceIndexes,
+                                                    itemsSeen);
+            DecodedNodeId itemNode = kInvalidId;
+            DecodedValueId item = kInvalidId;
+            Outcome attempt;
+            {
+                BooleanValueScope discard(&m_suppressDurableOutput,
+                                          !materialize);
+                if (!createNode(DecodedNodeKind::SequenceItem, node,
+                                QStringLiteral("[%1]").arg(itemsSeen), itemType,
+                                statement.sourceSpan, cursor.input,
+                                &itemNode)) {
+                    return {failure(QStringLiteral("BRR0100"),
+                                    QStringLiteral("Decoded node limit exceeded"),
+                                    statement.sourceSpan, cursor),
+                            kInvalidId, false};
+                }
+                QVector<DecodedValueId> arguments;
+                Outcome argumentOutcome = evalArguments(
+                    statement.arguments, frame, cursor, &arguments);
+                if (!argumentOutcome.succeeded()) {
+                    return {argumentOutcome, kInvalidId, false};
+                }
+                m_probeAnchors.push_back(
+                    {cursor.input, cursor.position, false});
+                attempt = decodeType(itemType, arguments, frame, cursor,
+                                     itemNode, &item, statement.sourceSpan);
+                m_probeAnchors.pop_back();
+            }
+            if (!attempt.succeeded()) {
+                cursor.position = itemStart;
+                rollbackTransaction(attemptCheckpoint);
+                if (attempt.committed || attempt.fatal) {
+                    return {attempt, kInvalidId, false};
+                }
+                m_diagnostics.resize(diagnosticCheckpoint);
+                if (!resolving && itemsSeen < recipe->itemCount) {
+                    return {failure(QStringLiteral("BRR0725"),
+                                    QStringLiteral("Variable many replay ended before the resolved boundary"),
+                                    statement.sourceSpan, cursor),
+                            kInvalidId, false};
+                }
+                break;
+            }
+            if (cursor.position == itemStart) {
+                return {failure(QStringLiteral("BRR0260"),
+                                QStringLiteral("many item made no input progress"),
+                                statement.sourceSpan, cursor),
+                        kInvalidId, false};
+            }
+            const quint64 itemBytes = cursor.position - itemStart;
+            itemExtentMin = qMin(itemExtentMin, itemBytes);
+            itemExtentMax = qMax(itemExtentMax, itemBytes);
+            ++iteration;
+            ++itemsSeen;
+            ++m_metrics.scannedItems;
+            m_metrics.scannedBytes += itemBytes;
+            recordReplayWork(requested.has_value(), cold);
+            if (materialize) {
+                materializedItems.push_back(item);
+                ++materializedCount;
+            } else {
+                const auto boundaryState = captureContinuationState(
+                    statementId, statement.kind, frame, cursor,
+                    std::nullopt, iteration, itemsSeen);
+                rollbackDiscardedOutput(sequenceBase);
+                if (!restoreContinuationState(*boundaryState, &frame,
+                                              &cursor)) {
+                    return {failure(QStringLiteral("BRR0723"),
+                                    QStringLiteral("Could not retain many continuation state"),
+                                    statement.sourceSpan, cursor),
+                            kInvalidId, false};
+                }
+            }
+            releaseProbePrefix(cursor);
+        }
+
+        const quint64 logicalCount = resolving ? itemsSeen : recipe->itemCount;
+        const DecodedValueId sequence = addSequence(
+            statement.type, materializedItems, logicalCount, node);
+        if (node != kInvalidId) {
+            m_store->nodes[node].value = sequence;
+            finishCompositeLayout(node, statement.type, cursor.input,
+                                  resolving ? sequenceStart
+                                            : recipe->startOffset,
+                                  cursor.position);
+        }
+        if (resolving) {
+            ResolvedSequenceShape shape;
+            shape.locator = sequenceLocator;
+            shape.statement = statementId;
+            shape.itemType = itemType;
+            shape.staticItemTemplate = statement.staticItemTemplate;
+            shape.indexKind = SequenceIndexKind::ForwardReplay;
+            shape.itemCount = itemsSeen;
+            shape.displayCount = itemsSeen;
+            shape.startOffset = sequenceStart;
+            shape.endOffset = cursor.position;
+            shape.startContinuation = startToken;
+            shape.totalPrimaryBytes = cursor.position - sequenceStart;
+            shape.itemExtentMin = itemsSeen == 0 ? 0 : itemExtentMin;
+            shape.itemExtentMax = itemExtentMax;
+            ShapeSink(&m_resolvedSequences)
+                .recordSequence(std::move(shape));
         }
         return {success(), sequence, true};
     }
@@ -1194,7 +2907,21 @@ private:
                     kInvalidId, false};
         }
         const quint64 start = cursor.position;
+        beginComposite(node);
         const TypeId itemType = m_program.types.at(statement.type).elementType;
+        if (m_request.mode == DecodeMode::ResolveShape ||
+            m_request.mode == DecodeMode::MaterializePage) {
+            const MaterializationLocator sequenceLocator =
+                node != kInvalidId &&
+                        node < static_cast<DecodedNodeId>(m_store->locators.size())
+                    ? m_store->locators.at(node)
+                    : currentLocator();
+            if (m_request.mode == DecodeMode::ResolveShape ||
+                resolvedSequence(sequenceLocator) != nullptr) {
+                return execForwardMany(statement, frame, cursor, node, start,
+                                       itemType, sequenceLocator);
+            }
+        }
         QVector<DecodedValueId> items;
         if (!streamName(statement.name) ||
             (emitting() && !m_writer->beginArray())) {
@@ -1203,12 +2930,18 @@ private:
         }
         for (quint64 iteration = 0; iteration < m_program.limits.maxLoopIterations;
              ++iteration) {
+            if (cancelled()) {
+                return {cancellationOutcome(cursor, statement.sourceSpan),
+                        kInvalidId, false};
+            }
             if (isAtEnd(cursor)) {
                 break;
             }
             const quint64 itemStart = cursor.position;
-            const DecodedTreeCheckpoint checkpoint = m_store->checkpoint();
+            const TransactionCheckpoint checkpoint = transactionCheckpoint();
             const qsizetype diagnosticCheckpoint = m_diagnostics.size();
+            VectorAppendScope<quint64> locatorIndex(&m_sequenceIndexes,
+                                                    iteration);
             DecodedNodeId itemNode = kInvalidId;
             if (!createNode(DecodedNodeKind::SequenceItem, node,
                             QStringLiteral("[%1]").arg(iteration), itemType,
@@ -1237,7 +2970,7 @@ private:
             m_probeAnchors.pop_back();
             if (streaming() && attempt.succeeded()) {
                 cursor.position = itemStart;
-                m_store->rollback(checkpoint);
+                rollbackTransaction(checkpoint);
                 m_diagnostics.resize(diagnosticCheckpoint);
                 arguments.clear();
                 argumentOutcome =
@@ -1252,7 +2985,7 @@ private:
             }
             if (!attempt.succeeded()) {
                 cursor.position = itemStart;
-                m_store->rollback(checkpoint);
+                rollbackTransaction(checkpoint);
                 if (attempt.committed || attempt.fatal) {
                     return {attempt, kInvalidId, false};
                 }
@@ -1283,8 +3016,8 @@ private:
         const DecodedValueId sequence = addSequence(statement.type, items, node);
         if (node != kInvalidId) {
             m_store->nodes[node].value = sequence;
-            setCompositeLayout(node, statement.type, cursor.input, start,
-                               cursor.position);
+            finishCompositeLayout(node, statement.type, cursor.input, start,
+                                  cursor.position);
         }
         return {success(), sequence, true};
     }
@@ -1339,6 +3072,7 @@ private:
                     kInvalidId, false};
         }
         const quint64 start = cursor.position;
+        beginComposite(node);
         DecodedValueId value = kInvalidId;
         Outcome outcome;
         if (!streamName(statement.name)) {
@@ -1372,8 +3106,8 @@ private:
         }
         if (node != kInvalidId) {
             m_store->nodes[node].value = value;
-            setCompositeLayout(node, statement.type, cursor.input, start,
-                               cursor.position);
+            finishCompositeLayout(node, statement.type, cursor.input, start,
+                                  cursor.position);
         }
         return {success(), value, true};
     }
@@ -1390,6 +3124,7 @@ private:
                     kInvalidId, false};
         }
         const quint64 start = cursor.position;
+        beginComposite(node);
         Outcome last = failure(QStringLiteral("BRR0280"),
                                QStringLiteral("No one_of alternative matched"),
                                statement.sourceSpan, cursor, Flow::NoMatch);
@@ -1398,7 +3133,7 @@ private:
                 const Alternative& alternative =
                     m_program.alternatives.at(statement.alternatives.first + i);
                 const quint64 savedPosition = cursor.position;
-                const DecodedTreeCheckpoint checkpoint = m_store->checkpoint();
+                const TransactionCheckpoint checkpoint = transactionCheckpoint();
                 const qsizetype diagnosticCheckpoint = m_diagnostics.size();
                 QVector<DecodedValueId> arguments;
                 Outcome outcome =
@@ -1417,7 +3152,7 @@ private:
                 m_probeAnchors.pop_back();
                 const quint64 committedEnd = cursor.position;
                 cursor.position = savedPosition;
-                m_store->rollback(checkpoint);
+                rollbackTransaction(checkpoint);
                 m_diagnostics.resize(diagnosticCheckpoint);
                 if (outcome.succeeded()) {
                     if (!streamName(statement.name)) {
@@ -1455,7 +3190,7 @@ private:
             const Alternative& alternative =
                 m_program.alternatives.at(statement.alternatives.first + i);
             const quint64 savedPosition = cursor.position;
-            const DecodedTreeCheckpoint checkpoint = m_store->checkpoint();
+            const TransactionCheckpoint checkpoint = transactionCheckpoint();
             const qsizetype diagnosticCheckpoint = m_diagnostics.size();
             QVector<DecodedValueId> arguments;
             Outcome outcome =
@@ -1474,14 +3209,14 @@ private:
             if (outcome.succeeded()) {
                 if (node != kInvalidId) {
                     m_store->nodes[node].value = value;
-                    setCompositeLayout(node, statement.type, cursor.input, start,
-                                       cursor.position);
+                    finishCompositeLayout(node, statement.type, cursor.input,
+                                          start, cursor.position);
                 }
                 return {success(), value, true};
             }
             last = outcome;
             cursor.position = savedPosition;
-            m_store->rollback(checkpoint);
+            rollbackTransaction(checkpoint);
             if (node != kInvalidId) {
                 m_store->nodes[node] = savedNode;
             }
@@ -1492,6 +3227,339 @@ private:
             m_diagnostics.resize(diagnosticCheckpoint);
         }
         return {last, kInvalidId, false};
+    }
+
+    StatementResult execForwardRecover(
+        const Statement& statement, Frame& frame, Cursor& cursor,
+        DecodedNodeId node, quint64 sequenceStart, TypeId itemType,
+        quint64 evaluatedMaxProbe,
+        const MaterializationLocator& sequenceLocator) {
+        const StatementId statementId = m_locatorPath.isEmpty()
+                                            ? kInvalidId
+                                            : m_locatorPath.last();
+        const bool resolving = m_request.mode == DecodeMode::ResolveShape;
+        const ResolvedSequenceShape* recipe =
+            resolving ? nullptr : resolvedSequence(sequenceLocator);
+        const std::optional<SequenceWindow> requested =
+            m_request.mode == DecodeMode::MaterializePage
+                ? MaterializationSink(m_request.sequenceWindows)
+                      .window(sequenceLocator)
+                : std::nullopt;
+        if (!resolving && recipe == nullptr) {
+            return {failure(QStringLiteral("BRR0721"),
+                            QStringLiteral("Recovery sequence is absent from the resolved shape"),
+                            statement.sourceSpan, cursor),
+                    kInvalidId, false};
+        }
+
+        const TransactionCheckpoint sequenceBase = transactionCheckpoint();
+        const SequenceContinuation startToken = makeContinuation(
+            sequenceLocator, 0, statementId, statement.kind, frame, cursor,
+            std::nullopt, 0, 0, evaluatedMaxProbe);
+        quint64 iteration = 0;
+        quint64 successfulItems = 0;
+        quint64 actions = 0;
+        quint64 maxProbe = evaluatedMaxProbe;
+        bool cold = requested.has_value() && !requested->successor.has_value();
+        if (!resolving) {
+            const SequenceContinuation* token =
+                requested.has_value() && requested->successor.has_value()
+                    ? &*requested->successor
+                    : (recipe->startContinuation.has_value()
+                           ? &*recipe->startContinuation
+                           : nullptr);
+            if (token == nullptr) {
+                return {failure(QStringLiteral("BRR0722"),
+                                QStringLiteral("Recovery sequence has no start continuation"),
+                                statement.sourceSpan, cursor),
+                        kInvalidId, false};
+            }
+            const quint64 first = requested.has_value()
+                                      ? qMin(requested->firstItem,
+                                             recipe->displayCount)
+                                      : recipe->displayCount;
+            const RuntimeContinuationState* state = validateContinuation(
+                *token, sequenceLocator, statementId, first, cursor,
+                statement.sourceSpan);
+            if (state == nullptr ||
+                !restoreContinuationState(*state, &frame, &cursor)) {
+                return {m_continuationError.hasDiagnostic
+                            ? m_continuationError
+                            : failure(QStringLiteral("BRR0723"),
+                                      QStringLiteral("Could not restore recovery continuation"),
+                                      statement.sourceSpan, cursor),
+                        kInvalidId, false};
+            }
+            iteration = state->nextIteration;
+            successfulItems = state->semanticItems;
+            actions = token->nextItem;
+            maxProbe = state->maxProbe;
+            cold = !requested->successor.has_value() ||
+                   token->nextItem < first;
+            if (requested.has_value() && cold) {
+                ++m_metrics.coldCursorOpens;
+            }
+        }
+
+        const quint64 targetFirst = requested.has_value()
+                                        ? qMin(requested->firstItem,
+                                               recipe->displayCount)
+                                        : std::numeric_limits<quint64>::max();
+        const quint64 targetEnd = requested.has_value()
+                                      ? targetFirst + qMin(
+                                            requested->itemCount,
+                                            recipe->displayCount - targetFirst)
+                                      : std::numeric_limits<quint64>::max();
+        QVector<DecodedValueId> materializedItems;
+        quint64 materializedActions = 0;
+        quint64 itemExtentMin = std::numeric_limits<quint64>::max();
+        quint64 itemExtentMax = 0;
+
+        while (true) {
+            if (requested.has_value() && actions >= targetEnd) {
+                if (actions == recipe->displayCount &&
+                    cursor.position != recipe->endOffset) {
+                    return {failure(QStringLiteral("BRR0726"),
+                                    QStringLiteral("Recovery replay ended at a different boundary"),
+                                    statement.sourceSpan, cursor),
+                            kInvalidId, false};
+                }
+                publishWindow(
+                    *requested, materializedActions,
+                    makeContinuation(sequenceLocator, actions, statementId,
+                                     statement.kind, frame, cursor,
+                                     std::nullopt, iteration,
+                                     successfulItems, maxProbe),
+                    false);
+                break;
+            }
+            if (!resolving && actions >= recipe->displayCount) {
+                break;
+            }
+            if (isAtEnd(cursor)) {
+                break;
+            }
+            if (iteration >= m_program.limits.maxLoopIterations) {
+                return {failure(QStringLiteral("BRR0251"),
+                                QStringLiteral("Loop iteration limit exceeded"),
+                                statement.sourceSpan, cursor),
+                        kInvalidId, false};
+            }
+            if (requested.has_value() && !replayBudgetAvailable(true)) {
+                publishWindow(
+                    *requested, materializedActions,
+                    makeContinuation(sequenceLocator, actions, statementId,
+                                     statement.kind, frame, cursor,
+                                     std::nullopt, iteration,
+                                     successfulItems, maxProbe),
+                    true);
+                break;
+            }
+
+            const bool materialize = requested.has_value() &&
+                                     actions >= targetFirst;
+            const quint64 attemptStart = cursor.position;
+            const TransactionCheckpoint attemptCheckpoint =
+                transactionCheckpoint();
+            const qsizetype diagnosticCheckpoint = m_diagnostics.size();
+            DecodedValueId item = kInvalidId;
+            Outcome attempt;
+            {
+                BooleanValueScope discard(&m_suppressDurableOutput,
+                                          !materialize);
+                VectorAppendScope<quint64> locatorIndex(
+                    &m_sequenceIndexes, successfulItems);
+                DecodedNodeId itemNode = kInvalidId;
+                if (!createNode(DecodedNodeKind::SequenceItem, node,
+                                QStringLiteral("[%1]").arg(successfulItems),
+                                itemType, statement.sourceSpan, cursor.input,
+                                &itemNode)) {
+                    return {failure(QStringLiteral("BRR0100"),
+                                    QStringLiteral("Decoded node limit exceeded"),
+                                    statement.sourceSpan, cursor),
+                            kInvalidId, false};
+                }
+                QVector<DecodedValueId> arguments;
+                Outcome argumentOutcome = evalArguments(
+                    statement.arguments, frame, cursor, &arguments);
+                if (!argumentOutcome.succeeded()) {
+                    return {argumentOutcome, kInvalidId, false};
+                }
+                m_probeAnchors.push_back(
+                    {cursor.input, cursor.position, false});
+                attempt = decodeType(itemType, arguments, frame, cursor,
+                                     itemNode, &item, statement.sourceSpan);
+                m_probeAnchors.pop_back();
+            }
+            if (attempt.succeeded()) {
+                if (cursor.position == attemptStart) {
+                    return {failure(QStringLiteral("BRR0290"),
+                                    QStringLiteral("Recovered item made no input progress"),
+                                    statement.sourceSpan, cursor),
+                            kInvalidId, false};
+                }
+                const quint64 extent = cursor.position - attemptStart;
+                itemExtentMin = qMin(itemExtentMin, extent);
+                itemExtentMax = qMax(itemExtentMax, extent);
+                ++iteration;
+                ++successfulItems;
+                ++actions;
+                ++m_metrics.scannedItems;
+                m_metrics.scannedBytes += extent;
+                recordReplayWork(requested.has_value(), cold);
+                if (materialize) {
+                    materializedItems.push_back(item);
+                    ++materializedActions;
+                } else {
+                    const auto boundaryState = captureContinuationState(
+                        statementId, statement.kind, frame, cursor,
+                        std::nullopt, iteration, successfulItems, maxProbe);
+                    rollbackDiscardedOutput(sequenceBase);
+                    if (!restoreContinuationState(*boundaryState, &frame,
+                                                  &cursor)) {
+                        return {failure(QStringLiteral("BRR0723"),
+                                        QStringLiteral("Could not retain recovery continuation state"),
+                                        statement.sourceSpan, cursor),
+                                kInvalidId, false};
+                    }
+                }
+                releaseProbePrefix(cursor);
+                continue;
+            }
+            if (attempt.fatal) {
+                return {attempt, kInvalidId, false};
+            }
+            cursor.position = attemptStart;
+            rollbackTransaction(attemptCheckpoint);
+            m_diagnostics.resize(diagnosticCheckpoint);
+
+            const auto candidate = findSync(statement, cursor, maxProbe);
+            const quint64 end = cursorEnd(cursor).value_or(cursor.position);
+            quint64 gapEnd = attemptStart;
+            bool stopAfterGap = false;
+            if (!candidate.has_value()) {
+                gapEnd = qMin(end, addWouldOverflow(attemptStart, maxProbe)
+                                       ? std::numeric_limits<quint64>::max()
+                                       : attemptStart + maxProbe);
+                stopAfterGap = gapEnd >= end;
+                if (!stopAfterGap && gapEnd == attemptStart) {
+                    return {failure(QStringLiteral("BRR0291"),
+                                    QStringLiteral("Recovery probe limit exceeded"),
+                                    statement.sourceSpan, cursor),
+                            kInvalidId, false};
+                }
+            } else {
+                gapEnd = *candidate;
+            }
+            if (gapEnd > attemptStart) {
+                {
+                    BooleanValueScope discard(&m_suppressDurableOutput,
+                                              !materialize);
+                    Outcome gap = emitGap(statement, node, cursor,
+                                          attemptStart,
+                                          gapEnd - attemptStart);
+                    if (!gap.succeeded()) {
+                        return {gap, kInvalidId, false};
+                    }
+                }
+                cursor.position = gapEnd;
+                const quint64 extent = gapEnd - attemptStart;
+                itemExtentMin = qMin(itemExtentMin, extent);
+                itemExtentMax = qMax(itemExtentMax, extent);
+                ++iteration;
+                ++actions;
+                ++m_metrics.scannedItems;
+                m_metrics.scannedBytes += extent;
+                recordReplayWork(requested.has_value(), cold);
+                if (materialize) {
+                    ++materializedActions;
+                } else {
+                    const auto boundaryState = captureContinuationState(
+                        statementId, statement.kind, frame, cursor,
+                        std::nullopt, iteration, successfulItems, maxProbe);
+                    rollbackDiscardedOutput(sequenceBase);
+                    if (!restoreContinuationState(*boundaryState, &frame,
+                                                  &cursor)) {
+                        return {failure(QStringLiteral("BRR0723"),
+                                        QStringLiteral("Could not retain recovery gap state"),
+                                        statement.sourceSpan, cursor),
+                                kInvalidId, false};
+                    }
+                }
+                releaseProbePrefix(cursor);
+                if (!candidate.has_value() && cursor.position < end) {
+                    return {failure(QStringLiteral("BRR0291"),
+                                    QStringLiteral("Recovery probe limit exceeded"),
+                                    statement.sourceSpan, cursor),
+                            kInvalidId, false};
+                }
+                if (stopAfterGap) {
+                    if (requested.has_value() && actions < targetEnd) {
+                        return {failure(QStringLiteral("BRR0725"),
+                                        QStringLiteral("Recovery replay ended before the resolved boundary"),
+                                        statement.sourceSpan, cursor),
+                                kInvalidId, false};
+                    }
+                    if (requested.has_value()) {
+                        if (actions == recipe->displayCount &&
+                            cursor.position != recipe->endOffset) {
+                            return {failure(QStringLiteral("BRR0726"),
+                                            QStringLiteral("Recovery replay ended at a different boundary"),
+                                            statement.sourceSpan, cursor),
+                                    kInvalidId, false};
+                        }
+                        publishWindow(
+                            *requested, materializedActions,
+                            makeContinuation(
+                                sequenceLocator, actions, statementId,
+                                statement.kind, frame, cursor, std::nullopt,
+                                iteration, successfulItems, maxProbe),
+                            false);
+                    }
+                    break;
+                }
+                continue;
+            }
+            if (!candidate.has_value() && cursor.position < end) {
+                return {failure(QStringLiteral("BRR0291"),
+                                QStringLiteral("Recovery probe limit exceeded"),
+                                statement.sourceSpan, cursor),
+                        kInvalidId, false};
+            }
+            break;
+        }
+
+        const quint64 logicalCount = resolving
+                                         ? successfulItems
+                                         : recipe->itemCount;
+        const DecodedValueId sequence = addSequence(
+            statement.type, materializedItems, logicalCount, node);
+        if (node != kInvalidId) {
+            m_store->nodes[node].value = sequence;
+            finishCompositeLayout(node, statement.type, cursor.input,
+                                  resolving ? sequenceStart
+                                            : recipe->startOffset,
+                                  cursor.position);
+        }
+        if (resolving) {
+            ResolvedSequenceShape shape;
+            shape.locator = sequenceLocator;
+            shape.statement = statementId;
+            shape.itemType = itemType;
+            shape.staticItemTemplate = statement.staticItemTemplate;
+            shape.indexKind = SequenceIndexKind::ForwardReplay;
+            shape.itemCount = successfulItems;
+            shape.displayCount = actions;
+            shape.startOffset = sequenceStart;
+            shape.endOffset = cursor.position;
+            shape.startContinuation = startToken;
+            shape.totalPrimaryBytes = cursor.position - sequenceStart;
+            shape.itemExtentMin = actions == 0 ? 0 : itemExtentMin;
+            shape.itemExtentMax = itemExtentMax;
+            ShapeSink(&m_resolvedSequences)
+                .recordSequence(std::move(shape));
+        }
+        return {success(), sequence, true};
     }
 
     StatementResult execRecover(const Statement& statement, Frame& frame,
@@ -1506,6 +3574,7 @@ private:
                     kInvalidId, false};
         }
         const quint64 start = cursor.position;
+        beginComposite(node);
         const TypeId itemType = m_program.types.at(statement.type).elementType;
         quint64 maxProbe = m_program.limits.maxProbeBytes;
         if (statement.secondaryExpression != kInvalidId) {
@@ -1516,6 +3585,20 @@ private:
             }
             maxProbe = asUnsigned(evaluated.value).value_or(maxProbe);
         }
+        if (m_request.mode == DecodeMode::ResolveShape ||
+            m_request.mode == DecodeMode::MaterializePage) {
+            const MaterializationLocator sequenceLocator =
+                node != kInvalidId &&
+                        node < static_cast<DecodedNodeId>(m_store->locators.size())
+                    ? m_store->locators.at(node)
+                    : currentLocator();
+            if (m_request.mode == DecodeMode::ResolveShape ||
+                resolvedSequence(sequenceLocator) != nullptr) {
+                return execForwardRecover(statement, frame, cursor, node,
+                                          start, itemType, maxProbe,
+                                          sequenceLocator);
+            }
+        }
         QVector<DecodedValueId> items;
         if (!streamName(statement.name) ||
             (emitting() && !m_writer->beginArray())) {
@@ -1523,6 +3606,10 @@ private:
                     false};
         }
         for (quint64 iteration = 0;; ++iteration) {
+            if (cancelled()) {
+                return {cancellationOutcome(cursor, statement.sourceSpan),
+                        kInvalidId, false};
+            }
             if (isAtEnd(cursor)) {
                 break;
             }
@@ -1533,8 +3620,10 @@ private:
                         kInvalidId, false};
             }
             const quint64 attemptStart = cursor.position;
-            const DecodedTreeCheckpoint checkpoint = m_store->checkpoint();
+            const TransactionCheckpoint checkpoint = transactionCheckpoint();
             const qsizetype diagnosticCheckpoint = m_diagnostics.size();
+            VectorAppendScope<quint64> locatorIndex(
+                &m_sequenceIndexes, static_cast<quint64>(items.size()));
             DecodedNodeId itemNode = kInvalidId;
             if (!createNode(DecodedNodeKind::SequenceItem, node,
                             QStringLiteral("[%1]").arg(items.size()), itemType,
@@ -1563,7 +3652,7 @@ private:
             m_probeAnchors.pop_back();
             if (streaming() && attempt.succeeded()) {
                 cursor.position = attemptStart;
-                m_store->rollback(checkpoint);
+                rollbackTransaction(checkpoint);
                 m_diagnostics.resize(diagnosticCheckpoint);
                 arguments.clear();
                 argumentOutcome =
@@ -1591,7 +3680,7 @@ private:
                 return {attempt, kInvalidId, false};
             }
             cursor.position = attemptStart;
-            m_store->rollback(checkpoint);
+            rollbackTransaction(checkpoint);
             m_diagnostics.resize(diagnosticCheckpoint);
 
             const auto candidate = findSync(statement, cursor, maxProbe);
@@ -1634,14 +3723,16 @@ private:
         const DecodedValueId sequence = addSequence(statement.type, items, node);
         if (node != kInvalidId) {
             m_store->nodes[node].value = sequence;
-            setCompositeLayout(node, statement.type, cursor.input, start,
-                               cursor.position);
+            finishCompositeLayout(node, statement.type, cursor.input, start,
+                                  cursor.position);
         }
         return {success(), sequence, true};
     }
 
     Outcome emitGap(const Statement& statement, DecodedNodeId parent,
                     const Cursor& cursor, quint64 start, quint64 length) {
+        VectorAppendScope<StatementId> gapTemplate(&m_locatorPath, kInvalidId);
+        VectorAppendScope<quint64> gapIndex(&m_sequenceIndexes, start);
         DecodedNodeId gap = kInvalidId;
         const QString name = statement.gapsName != kInvalidId
                                  ? m_program.symbol(statement.gapsName)
@@ -1800,6 +3891,7 @@ private:
             }
         }
         const quint64 start = cursor.position;
+        beginComposite(node);
         if (emitting() && !m_writer->beginObject()) {
             --m_depth;
             return writerFailure(span, cursor);
@@ -1815,8 +3907,8 @@ private:
             if (node != kInvalidId) {
                 m_store->nodes[node].kind = DecodedNodeKind::Record;
                 m_store->nodes[node].value = *value;
-                setCompositeLayout(node, type, cursor.input, start,
-                                   cursor.position);
+                finishCompositeLayout(node, type, cursor.input, start,
+                                      cursor.position);
             }
         }
         --m_depth;
@@ -2048,37 +4140,103 @@ private:
                     kInvalidId};
         }
         const DecodedValue& value = m_store->values.at(base.value);
+        const QString member = m_program.symbol(expression.symbol);
+        if (value.kind == DecodedValueKind::Reference) {
+            if (value.payload >=
+                static_cast<quint32>(m_store->references.size())) {
+                return {failure(QStringLiteral("BRR0430"),
+                                QStringLiteral("Reference metadata base is invalid"),
+                                expression.sourceSpan, cursor),
+                        kInvalidId};
+            }
+            const ReferenceHandle& reference =
+                m_store->references.at(value.payload);
+            if (member == QStringLiteral("is_null")) {
+                return {success(), addBoolean(expression.type,
+                                              reference.isNull)};
+            }
+            if (member == QStringLiteral("address")) {
+                return {success(), addUnsigned(
+                                       expression.type,
+                                       reference.isNull
+                                           ? 0
+                                           : reference.target.logicalOffset)};
+            }
+            if (member == QStringLiteral("length")) {
+                return {success(), addUnsigned(
+                                       expression.type,
+                                       reference.isNull
+                                           ? 0
+                                           : reference.target.regionLength)};
+            }
+            if (member == QStringLiteral("key")) {
+                if (reference.isNull) {
+                    return {success(), addNull(expression.type)};
+                }
+                const StableReferenceKey& key =
+                    reference.target.identity.kind ==
+                            ReferenceIdentityKind::Explicit
+                        ? reference.target.identity.explicitKey
+                        : StableReferenceKey{};
+                if (!key.values.isEmpty()) {
+                    return {success(),
+                            coerce(addStableValue(key.values.first()),
+                                   expression.type)};
+                }
+                return {success(), addUnsigned(
+                                       expression.type,
+                                       reference.target.logicalOffset)};
+            }
+            return {failure(QStringLiteral("BRR0431"),
+                            QStringLiteral("Reference metadata '@%1' is unavailable")
+                                .arg(member),
+                            expression.sourceSpan, cursor),
+                    kInvalidId};
+        }
         const DecodedNode* node =
             value.node != kInvalidId &&
                     value.node < static_cast<DecodedNodeId>(m_store->nodes.size())
                 ? &m_store->nodes.at(value.node)
                 : nullptr;
-        const QString member = m_program.symbol(expression.symbol);
+        const RuntimeValueMetadata restored = valueMetadata(base.value);
         if (member == QStringLiteral("valid")) {
             return {success(), addBoolean(expression.type,
-                                          node == nullptr || node->valid)};
+                                          node != nullptr
+                                              ? node->valid
+                                              : (!restored.present ||
+                                                 restored.valid))};
         }
         if (member == QStringLiteral("offset") ||
             member == QStringLiteral("length")) {
-            const quint64 number = node != nullptr && node->hasSourceSpan
-                                       ? (member == QStringLiteral("offset")
-                                              ? node->offset
-                                              : node->length)
-                                       : 0;
+            quint64 number = 0;
+            if (node != nullptr && node->hasSourceSpan) {
+                number = member == QStringLiteral("offset") ? node->offset
+                                                             : node->length;
+            } else if (restored.present && restored.hasSourceSpan) {
+                number = member == QStringLiteral("offset")
+                             ? restored.offset
+                             : restored.length;
+            }
             return {success(), addUnsigned(expression.type, number)};
         }
         if (member == QStringLiteral("name")) {
             return {success(), addString(expression.type,
                                          node != nullptr
                                              ? m_store->name(node->name)
-                                             : QString())};
+                                             : restored.name)};
         }
         if (member == QStringLiteral("type")) {
-            const TypeId type = node != nullptr ? node->type : value.type;
+            const TypeId type = node != nullptr
+                                    ? node->type
+                                    : (restored.present ? restored.type
+                                                        : value.type);
             return {success(), addString(expression.type, typeName(type))};
         }
         if (member == QStringLiteral("input")) {
-            const InputId input = node != nullptr ? node->input : kInvalidId;
+            const InputId input = node != nullptr
+                                      ? node->input
+                                      : (restored.present ? restored.input
+                                                          : kInvalidId);
             return {success(), addString(
                                    expression.type,
                                    input < static_cast<InputId>(m_program.inputs.size())
@@ -2086,17 +4244,29 @@ private:
                                        : QString())};
         }
         if (member == QStringLiteral("path")) {
-            const InputId input = node != nullptr ? node->input : kInvalidId;
+            const InputId input = node != nullptr
+                                      ? node->input
+                                      : (restored.present ? restored.input
+                                                          : kInvalidId);
             return {success(), addString(expression.type,
                                          source(input) != nullptr
                                              ? source(input)->path()
                                              : QString())};
         }
-        if (member == QStringLiteral("bytes") && node != nullptr &&
-            node->hasSourceSpan) {
-            const quint64 logical = logicalOffset(node->input, node->offset);
-            return {success(), addSourceBytes(expression.type, node->input,
-                                              logical, node->length)};
+        if (member == QStringLiteral("bytes")) {
+            const bool currentSpan = node != nullptr && node->hasSourceSpan;
+            const bool restoredSpan = restored.present &&
+                                      restored.hasSourceSpan;
+            if (currentSpan || restoredSpan) {
+                const InputId input = currentSpan ? node->input : restored.input;
+                const quint64 offset = currentSpan ? node->offset
+                                                    : restored.offset;
+                const quint64 length = currentSpan ? node->length
+                                                    : restored.length;
+                return {success(), addSourceBytes(
+                                       expression.type, input,
+                                       logicalOffset(input, offset), length)};
+            }
         }
         if (member == QStringLiteral("value")) {
             return {success(), base.value};
@@ -2218,6 +4388,30 @@ private:
                     kInvalidId};
         }
         quint64 result = 0;
+        if (m_checkedArithmetic) {
+            if (expression.binaryOperator == SyntaxBinaryOperator::Add &&
+                addWouldOverflow(a, b)) {
+                return {failure(QStringLiteral("BRR0441"),
+                                QStringLiteral("Checked unsigned addition overflow"),
+                                expression.sourceSpan, cursor),
+                        kInvalidId};
+            }
+            if (expression.binaryOperator == SyntaxBinaryOperator::Subtract &&
+                a < b) {
+                return {failure(QStringLiteral("BRR0441"),
+                                QStringLiteral("Checked unsigned subtraction underflow"),
+                                expression.sourceSpan, cursor),
+                        kInvalidId};
+            }
+            quint64 multiplied = 0;
+            if (expression.binaryOperator == SyntaxBinaryOperator::Multiply &&
+                multiplyWouldOverflow(a, b, &multiplied)) {
+                return {failure(QStringLiteral("BRR0441"),
+                                QStringLiteral("Checked unsigned multiplication overflow"),
+                                expression.sourceSpan, cursor),
+                        kInvalidId};
+            }
+        }
         if (expression.binaryOperator == SyntaxBinaryOperator::Add) result = a + b;
         if (expression.binaryOperator == SyntaxBinaryOperator::Subtract) result = a - b;
         if (expression.binaryOperator == SyntaxBinaryOperator::Multiply) result = a * b;
@@ -2236,6 +4430,76 @@ private:
         }
         const DecodedValueId argument = arguments.value(0, kInvalidId);
         const QString function = m_program.symbol(expression.symbol);
+        if (function == QStringLiteral("deref")) {
+            if (argument >=
+                    static_cast<DecodedValueId>(m_store->values.size()) ||
+                m_store->values.at(argument).kind !=
+                    DecodedValueKind::Reference) {
+                return {failure(QStringLiteral("BRR0451"),
+                                QStringLiteral("deref requires a reference value"),
+                                expression.sourceSpan, cursor),
+                        kInvalidId};
+            }
+            const DecodedValue& referenceValue =
+                m_store->values.at(argument);
+            if (referenceValue.payload >=
+                static_cast<quint32>(m_store->references.size())) {
+                return {failure(QStringLiteral("BRR0451"),
+                                QStringLiteral("Reference handle is invalid"),
+                                expression.sourceSpan, cursor),
+                        kInvalidId};
+            }
+            const ReferenceHandle reference =
+                m_store->references.at(referenceValue.payload);
+            if (reference.isNull) {
+                return {failure(QStringLiteral("BRR0452"),
+                                QStringLiteral("Cannot dereference a null reference"),
+                                expression.sourceSpan, cursor),
+                        kInvalidId};
+            }
+            if (m_inProgressTargets.contains(
+                    reference.target.identity)) {
+                return {failure(QStringLiteral("BRR0453"),
+                                QStringLiteral("Semantic dereference cycle detected"),
+                                expression.sourceSpan, cursor),
+                        kInvalidId};
+            }
+            Cursor targetCursor{
+                reference.target.input,
+                reference.target.logicalOffset,
+                reference.target.logicalOffset +
+                    reference.target.regionLength};
+            QVector<DecodedValueId> targetArguments;
+            for (const StableReferenceValue& stable :
+                 reference.target.identity.targetArguments.values) {
+                targetArguments.push_back(addStableValue(stable));
+            }
+            Frame targetCaller;
+            DecodedValueId targetValue = kInvalidId;
+            const std::optional<MaterializationLocator> savedRoot =
+                m_activeRoot;
+            const quint64 savedEntityStart = m_entityStartOffset;
+            m_activeRoot = reference.targetLocator();
+            m_entityStartOffset = reference.target.logicalOffset;
+            m_inProgressTargets.push_back(reference.target.identity);
+            Outcome targetOutcome;
+            {
+                BooleanValueScope suppress(&m_suppressDurableOutput, true);
+                ++m_streamSuppressionDepth;
+                targetOutcome = decodeType(
+                    reference.target.identity.targetType, targetArguments,
+                    targetCaller, targetCursor, kInvalidId, &targetValue,
+                    expression.sourceSpan);
+                --m_streamSuppressionDepth;
+            }
+            m_inProgressTargets.removeLast();
+            m_activeRoot = savedRoot;
+            m_entityStartOffset = savedEntityStart;
+            if (!targetOutcome.succeeded()) {
+                return {targetOutcome, kInvalidId};
+            }
+            return {success(), targetValue};
+        }
         if (function == QStringLiteral("int")) {
             return {success(), addUnsigned(expression.type,
                                            asUnsigned(argument).value_or(0))};
@@ -2250,7 +4514,7 @@ private:
             quint64 count = 0;
             if (argument < static_cast<DecodedValueId>(m_store->values.size()) &&
                 m_store->values.at(argument).kind == DecodedValueKind::Sequence) {
-                count = m_store->values.at(argument).elements.count;
+                count = m_store->values.at(argument).logicalCount;
             }
             return {success(), addUnsigned(expression.type, count)};
         }
@@ -2462,6 +4726,45 @@ private:
         return QStringLiteral("type#%1").arg(type);
     }
 
+    quint64 staticTypeDescendantNodeCount(TypeId type) const {
+        if (type >= static_cast<TypeId>(m_program.types.size())) {
+            return 0;
+        }
+        const TypeDesc& descriptor = m_program.types.at(type);
+        if (descriptor.kind == TypeKind::Bitfield) {
+            return descriptor.fields.count;
+        }
+        if (descriptor.kind != TypeKind::Record) {
+            return 0;
+        }
+        for (const RecordDesc& record : m_program.records) {
+            if (record.type == type) {
+                return staticTemplateChildNodeCount(record.statements);
+            }
+        }
+        return 0;
+    }
+
+    quint64 staticTemplateChildNodeCount(IdRange statements) const {
+        quint64 result = 0;
+        for (quint32 i = 0; i < statements.count; ++i) {
+            const StatementId id =
+                m_program.statementRefs.at(statements.first + i);
+            const Statement& statement = m_program.statements.at(id);
+            quint64 nodes = 1;
+            if (statement.kind == StatementKind::BitfieldField) {
+                nodes += statement.bitMembers.count;
+            } else if (statement.kind == StatementKind::Field) {
+                nodes += staticTypeDescendantNodeCount(statement.type);
+            }
+            if (result > std::numeric_limits<quint64>::max() - nodes) {
+                return std::numeric_limits<quint64>::max();
+            }
+            result += nodes;
+        }
+        return result;
+    }
+
     TypeId bytesType() const {
         for (TypeId id = 0; id < static_cast<TypeId>(m_program.types.size()); ++id) {
             if (m_program.types.at(id).kind == TypeKind::Bytes) return id;
@@ -2503,6 +4806,27 @@ private:
     std::unique_ptr<JsonWriter> m_writer;
     QVector<RuntimeDiagnostic> m_diagnostics;
     QVector<ProbeAnchor> m_probeAnchors;
+    QVector<CompositeSpanAccumulator> m_spanAccumulators;
+    QVector<StatementId> m_locatorPath;
+    QVector<quint64> m_sequenceIndexes;
+    QVector<ResolvedSequenceShape> m_resolvedSequences;
+    QVector<SequenceWindow> m_appliedSequenceWindows;
+    QVector<ReferenceEvent> m_referenceEvents;
+    QVector<ReferenceTargetIdentity> m_inProgressTargets;
+    QHash<DecodedValueId, RuntimeValueMetadata> m_runtimeValueMetadata;
+    std::optional<MaterializationLocator> m_activeRoot;
+    DecodeMetrics m_metrics;
+    quint64 m_logicalNodes = 0;
+    quint64 m_replayWorkUsed = 0;
+    bool m_usedLegacyEagerSequence = false;
+    bool m_cancelled = false;
+    bool m_suppressDurableOutput = false;
+    bool m_stopExecution = false;
+    bool m_paused = false;
+    bool m_checkedArithmetic = false;
+    quint64 m_entryRootOffset = 0;
+    quint64 m_entityStartOffset = 0;
+    Outcome m_continuationError;
     quint32 m_streamSuppressionDepth = 0;
     quint32 m_streamLoopReplayDepth = 0;
     quint32 m_depth = 0;

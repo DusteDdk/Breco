@@ -31,6 +31,7 @@ set(BRECO_SOURCES
     src/main.cpp
     src/app/MainWindow.cpp
     src/brecolang/gui/BrecoLangLibrary.cpp
+    src/brecolang/gui/BrecoDecodeController.cpp
     src/brecolang/gui/BrecoLangPanel.cpp
     src/brecolang/gui/DecodedTreeModel.cpp
     src/panel/BitmapViewPanel.cpp
@@ -71,6 +72,7 @@ endif()
 set(BRECO_HEADERS
     src/app/MainWindow.h
     src/brecolang/gui/BrecoLangLibrary.h
+    src/brecolang/gui/BrecoDecodeController.h
     src/brecolang/gui/BrecoLangPanel.h
     src/brecolang/gui/DecodedTreeModel.h
     src/panel/BitmapViewPanel.h
@@ -155,10 +157,13 @@ add_library(brecolang_runtime STATIC
     src/brecolang/render/RenderStore.cpp
     src/brecolang/runtime/ByteSource.cpp
     src/brecolang/runtime/DecodedData.cpp
+    src/brecolang/runtime/DecodeDocument.cpp
     src/brecolang/runtime/Interpreter.cpp
     src/brecolang/runtime/JsonWriter.cpp
     src/brecolang/runtime/ByteSource.h
     src/brecolang/runtime/DecodedData.h
+    src/brecolang/runtime/DecodeDocument.h
+    src/brecolang/runtime/DecodeTypes.h
     src/brecolang/runtime/Interpreter.h
     src/brecolang/runtime/JsonWriter.h
     src/brecolang/runtime/ProbeScan.h
@@ -408,6 +413,8 @@ add_test(NAME brecolang_compiler_tests COMMAND brecolang_compiler_tests)
 qt_add_executable(brecolang_runtime_tests
     tests/brecolang_runtime_tests.cpp
 )
+target_compile_definitions(
+    brecolang_runtime_tests PRIVATE BRECO_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries(
     brecolang_runtime_tests PRIVATE brecolang_runtime Qt6::Core Qt6::Test)
 add_test(NAME brecolang_runtime_tests COMMAND brecolang_runtime_tests)

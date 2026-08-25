@@ -31,6 +31,7 @@ struct ResolveContext {
     int identifyDepth = 0;
     bool hasIdentified = false;
     bool outform = false;
+    bool referenceRewrite = false;
     OutformMode outformMode = OutformMode::Text;
 
     std::optional<Binding> find(QStringView name) const {
@@ -320,6 +321,14 @@ private:
         const TypeId id = addType(type);
         m_optionalTypes.insert(element, id);
         return id;
+    }
+
+    TypeId referenceType(TypeId target, TypeId keyType) {
+        TypeDesc type;
+        type.kind = TypeKind::Reference;
+        type.elementType = target;
+        type.referenceKeyType = keyType;
+        return addType(type);
     }
 
     TypeId variantType(const QVector<TypeId>& alternatives) {
@@ -807,7 +816,8 @@ private:
         expression.symbol = intern(syntax.text);
         if (syntax.kind == SyntaxExpressionKind::MetadataMember) {
             expression.kind = ExpressionKind::MetadataMember;
-            expression.type = metadataType(syntax.text, syntax.span);
+            expression.type = metadataType(baseExpression.type, syntax.text,
+                                           syntax.span, context);
             return appendExpression(expression, {base});
         }
         if (baseExpression.kind == ExpressionKind::TypeName) {
@@ -841,7 +851,37 @@ private:
         return appendExpression(expression, {base});
     }
 
-    TypeId metadataType(const QString& name, SourceSpan span) {
+    TypeId metadataType(TypeId baseType, const QString& name, SourceSpan span,
+                        const ResolveContext* context) {
+        if (baseType != kInvalidId &&
+            baseType < static_cast<TypeId>(m_program->types.size()) &&
+            m_program->types.at(baseType).kind == TypeKind::Reference) {
+            const TypeDesc& reference = m_program->types.at(baseType);
+            if (name == QStringLiteral("key")) {
+                return reference.referenceKeyType;
+            }
+            if (name == QStringLiteral("address") ||
+                name == QStringLiteral("length")) {
+                return m_u64Type;
+            }
+            if (name == QStringLiteral("is_null")) {
+                return m_boolType;
+            }
+            if (name == QStringLiteral("relocated_key")) {
+                if (context != nullptr && context->referenceRewrite) {
+                    return m_u64Type;
+                }
+                report(QStringLiteral("BR0304"),
+                       QStringLiteral("@relocated_key is only valid in a rewrite rule"),
+                       span);
+                return kInvalidId;
+            }
+            report(QStringLiteral("BR0303"),
+                   QStringLiteral("Unknown reference metadata property '@%1'")
+                       .arg(name),
+                   span);
+            return kInvalidId;
+        }
         static const QSet<QString> strings{
             QStringLiteral("name"), QStringLiteral("type"),
             QStringLiteral("input"), QStringLiteral("path"),
@@ -994,6 +1034,20 @@ private:
             expression.type = m_bytesType;
         } else if (function == QStringLiteral("present")) {
             expression.type = m_boolType;
+        } else if (function == QStringLiteral("deref")) {
+            const TypeId argumentType = arguments.isEmpty()
+                                            ? kInvalidId
+                                            : expressionType(arguments.first());
+            if (argumentType == kInvalidId ||
+                argumentType >= static_cast<TypeId>(m_program->types.size()) ||
+                m_program->types.at(argumentType).kind != TypeKind::Reference) {
+                report(QStringLiteral("BR0323"),
+                       QStringLiteral("deref expects a reference value"),
+                       syntax.span);
+                expression.type = kInvalidId;
+            } else {
+                expression.type = m_program->types.at(argumentType).elementType;
+            }
         } else if (function == QStringLiteral("count") ||
                    function == QStringLiteral("int")) {
             expression.type = m_u64Type;
@@ -1153,6 +1207,8 @@ private:
         result.mayNoMatch = left.mayNoMatch || right.mayNoMatch;
         result.requiresRandomAccess =
             left.requiresRandomAccess || right.requiresRandomAccess;
+        result.hasReferenceEffects =
+            left.hasReferenceEffects || right.hasReferenceEffects;
         return result;
     }
 
@@ -1190,6 +1246,75 @@ private:
         return result;
     }
 
+    bool typeIsBatchAdvanceSafe(TypeId type, QSet<TypeId>* visiting = nullptr) {
+        if (type == kInvalidId ||
+            type >= static_cast<TypeId>(m_program->types.size())) {
+            return false;
+        }
+        const TypeDesc& descriptor = m_program->types.at(type);
+        switch (descriptor.kind) {
+            case TypeKind::UnsignedInteger:
+            case TypeKind::SignedInteger:
+            case TypeKind::FloatingPoint:
+            case TypeKind::Enum:
+            case TypeKind::Bitfield:
+                return true;
+            case TypeKind::Record: {
+                QSet<TypeId> local;
+                if (visiting == nullptr) {
+                    visiting = &local;
+                }
+                if (visiting->contains(type)) {
+                    return false;
+                }
+                visiting->insert(type);
+                const auto found = std::find_if(
+                    m_program->records.cbegin(), m_program->records.cend(),
+                    [type](const RecordDesc& record) { return record.type == type; });
+                const bool safe = found != m_program->records.cend() &&
+                                  statementsAreBatchAdvanceSafe(found->statements,
+                                                               visiting);
+                visiting->remove(type);
+                return safe;
+            }
+            default:
+                return false;
+        }
+    }
+
+    bool statementsAreBatchAdvanceSafe(IdRange statements,
+                                       QSet<TypeId>* visiting = nullptr) {
+        if (statements.first >
+                static_cast<quint32>(m_program->statementRefs.size()) ||
+            statements.count >
+                static_cast<quint32>(m_program->statementRefs.size()) -
+                    statements.first) {
+            return false;
+        }
+        for (quint32 i = 0; i < statements.count; ++i) {
+            const StatementId id =
+                m_program->statementRefs.at(statements.first + i);
+            if (id >= static_cast<StatementId>(m_program->statements.size())) {
+                return false;
+            }
+            const Statement& child = m_program->statements.at(id);
+            if (child.kind == StatementKind::Reference) {
+                continue;
+            }
+            if (child.kind == StatementKind::BitfieldField) {
+                continue;
+            }
+            if (child.kind != StatementKind::Field ||
+                child.condition != kInvalidId || child.expression != kInvalidId ||
+                child.secondaryExpression != kInvalidId ||
+                child.input != kInvalidId || child.arguments.count != 0 ||
+                !typeIsBatchAdvanceSafe(child.type, visiting)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     ExtentSummary alternativeExtent(const QVector<ExtentSummary>& alternatives) {
         ExtentSummary result;
         if (alternatives.isEmpty()) {
@@ -1216,6 +1341,8 @@ private:
             result.mayNoMatch = result.mayNoMatch || next.mayNoMatch;
             result.requiresRandomAccess =
                 result.requiresRandomAccess || next.requiresRandomAccess;
+            result.hasReferenceEffects =
+                result.hasReferenceEffects || next.hasReferenceEffects;
         }
         return result;
     }
@@ -1381,6 +1508,251 @@ private:
         return static_cast<StatementKind>(kind);
     }
 
+    bool isStableReferenceType(TypeId type) const {
+        if (type == kInvalidId ||
+            type >= static_cast<TypeId>(m_program->types.size())) {
+            return false;
+        }
+        switch (m_program->types.at(type).kind) {
+            case TypeKind::Boolean:
+            case TypeKind::UnsignedInteger:
+            case TypeKind::SignedInteger:
+            case TypeKind::String:
+            case TypeKind::Enum:
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    std::optional<QPair<AddressBaseKind, SyntaxExpressionId>>
+    referenceAddress(const SyntaxStatement& syntax) {
+        if (syntax.expression == kInvalidSyntaxExpression ||
+            syntax.expression >=
+                static_cast<SyntaxExpressionId>(m_syntax.expressions.size())) {
+            report(QStringLiteral("BR0550"),
+                   QStringLiteral("Reference requires 'from <input> at <address-base>(...)'"),
+                   syntax.span);
+            return std::nullopt;
+        }
+        const SyntaxExpression& call =
+            m_syntax.expressions.at(syntax.expression);
+        if (call.kind != SyntaxExpressionKind::Call ||
+            call.operands.size() != 2) {
+            report(QStringLiteral("BR0551"),
+                   QStringLiteral("Reference address must use input_offset(...), root_offset(...), or self_offset(...)"),
+                   call.span);
+            return std::nullopt;
+        }
+        const SyntaxExpression& callee =
+            m_syntax.expressions.at(call.operands.first());
+        if (callee.kind != SyntaxExpressionKind::Identifier) {
+            report(QStringLiteral("BR0551"),
+                   QStringLiteral("Reference address must use an explicit address base"),
+                   call.span);
+            return std::nullopt;
+        }
+        AddressBaseKind base = AddressBaseKind::Input;
+        if (callee.text == QStringLiteral("input_offset")) {
+            base = AddressBaseKind::Input;
+        } else if (callee.text == QStringLiteral("root_offset")) {
+            base = AddressBaseKind::EntryRoot;
+        } else if (callee.text == QStringLiteral("self_offset")) {
+            base = AddressBaseKind::ContainingEntity;
+        } else {
+            report(QStringLiteral("BR0551"),
+                   QStringLiteral("Unknown reference address base '%1'")
+                       .arg(callee.text),
+                   callee.span);
+            return std::nullopt;
+        }
+        return qMakePair(base, call.operands.at(1));
+    }
+
+    TypeId resolveReference(const SyntaxStatement& syntax,
+                            ResolveContext* context, TypeId ownerType,
+                            Statement* statement, ExtentSummary* extent) {
+        const TypeId targetType = resolveType(syntax.type);
+        QVector<TypeId> parameterTypes;
+        if (targetType != kInvalidId &&
+            targetType < static_cast<TypeId>(m_program->types.size()) &&
+            m_program->types.at(targetType).kind == TypeKind::Record) {
+            const QString targetName =
+                m_program->symbol(m_program->types.at(targetType).name);
+            const auto recordSyntax = m_recordSyntax.constFind(targetName);
+            if (recordSyntax != m_recordSyntax.cend()) {
+                for (const SyntaxParameter& parameter :
+                     m_syntax.records.at(*recordSyntax).parameters) {
+                    parameterTypes.push_back(resolveType(parameter.type));
+                }
+            }
+        }
+        if (statement->arguments.count !=
+            static_cast<quint32>(parameterTypes.size())) {
+            report(QStringLiteral("BR0563"),
+                   QStringLiteral("Reference target expects %1 argument(s), got %2")
+                       .arg(parameterTypes.size())
+                       .arg(statement->arguments.count),
+                   syntax.type.span);
+        }
+        for (quint32 i = 0; i < statement->arguments.count; ++i) {
+            const ExpressionId argument = m_program->expressionRefs.at(
+                statement->arguments.first + i);
+            if (!isStableReferenceType(expressionType(argument))) {
+                report(QStringLiteral("BR0552"),
+                       QStringLiteral("Reference target arguments must be stable scalar values"),
+                       syntax.type.span);
+            }
+            if (i < static_cast<quint32>(parameterTypes.size())) {
+                checkAssignable(parameterTypes.at(i),
+                                expressionType(argument), syntax.type.span);
+            }
+        }
+
+        ReferenceDesc reference;
+        reference.targetType = targetType;
+        reference.targetArguments = statement->arguments;
+        if (syntax.sourceInput.isEmpty()) {
+            report(QStringLiteral("BR0553"),
+                   QStringLiteral("Reference requires a source input"),
+                   syntax.span);
+        } else {
+            const auto input = m_inputIds.constFind(syntax.sourceInput);
+            if (input == m_inputIds.constEnd()) {
+                report(QStringLiteral("BR0500"),
+                       QStringLiteral("Unknown input '%1'")
+                           .arg(syntax.sourceInput),
+                       syntax.sourceInputSpan);
+            } else {
+                reference.address.input = *input;
+            }
+        }
+        const auto address = referenceAddress(syntax);
+        if (address.has_value()) {
+            reference.address.base = address->first;
+            reference.address.displacement =
+                resolveExpression(address->second, context);
+            if (!isIntegerType(
+                    expressionType(reference.address.displacement))) {
+                report(QStringLiteral("BR0554"),
+                       QStringLiteral("Reference address displacement must be an integer"),
+                       m_syntax.expressions.at(address->second).span);
+            }
+        }
+        if (syntax.secondaryExpression == kInvalidSyntaxExpression) {
+            report(QStringLiteral("BR0555"),
+                   QStringLiteral("Reference requires 'within bytes(...)'"),
+                   syntax.span);
+        } else {
+            reference.address.regionLength =
+                resolveExpression(syntax.secondaryExpression, context);
+            if (!isIntegerType(
+                    expressionType(reference.address.regionLength))) {
+                report(QStringLiteral("BR0556"),
+                       QStringLiteral("Reference region length must be an integer"),
+                       m_syntax.expressions.at(syntax.secondaryExpression).span);
+            }
+        }
+        if (syntax.condition != kInvalidSyntaxExpression) {
+            statement->condition = resolveBoolean(
+                syntax.condition, context,
+                QStringLiteral("reference condition"));
+        }
+        if (syntax.referenceStrength == SyntaxReferenceStrength::Invalid) {
+            report(QStringLiteral("BR0557"),
+                   QStringLiteral("Reference must declare 'follow' or 'weak'"),
+                   syntax.span);
+        }
+        reference.strength =
+            syntax.referenceStrength == SyntaxReferenceStrength::Follow
+                ? ReferenceStrength::Follow
+                : ReferenceStrength::Weak;
+        reference.coverage =
+            syntax.referenceCoverage == SyntaxReferenceCoverage::WholeRegion
+                ? ReferenceCoverage::WholeRegion
+                : ReferenceCoverage::DecodedStorage;
+
+        QVector<ExpressionId> keys;
+        for (SyntaxExpressionId key : syntax.referenceKeys) {
+            const ExpressionId resolved = resolveExpression(key, context);
+            if (!isStableReferenceType(expressionType(resolved))) {
+                report(QStringLiteral("BR0558"),
+                       QStringLiteral("Reference keys must be stable scalar values"),
+                       m_syntax.expressions.at(key).span);
+            }
+            keys.push_back(resolved);
+        }
+        if (keys.size() > 1) {
+            report(QStringLiteral("BR0559"),
+                   QStringLiteral("Phase A supports one explicit key expression per reference"),
+                   syntax.span);
+        }
+        reference.keyExpressions =
+            appendRefs(&m_program->expressionRefs, keys);
+        const TypeId keyType = keys.isEmpty()
+                                   ? m_u64Type
+                                   : expressionType(keys.first());
+        const TypeId resultType = referenceType(targetType, keyType);
+
+        QVector<quint32> rewriteIds;
+        for (const SyntaxReferenceRewrite& syntaxRewrite :
+             syntax.referenceRewrites) {
+            ReferenceRewriteDesc rewrite;
+            QVector<SymbolId> path;
+            const FieldDesc* patch = nullptr;
+            TypeId pathType = ownerType;
+            for (const QString& component : syntaxRewrite.targetPath) {
+                patch = findField(pathType, component);
+                path.push_back(intern(component));
+                if (patch == nullptr) {
+                    report(QStringLiteral("BR0560"),
+                           QStringLiteral("Unknown rewrite target field '%1'")
+                               .arg(component),
+                           syntaxRewrite.span);
+                    break;
+                }
+                pathType = patch->type;
+            }
+            if (patch != nullptr) {
+                rewrite.patchStatement = patch->statement;
+                const StatementKind patchKind =
+                    patch->statement <
+                            static_cast<StatementId>(m_program->statements.size())
+                        ? m_program->statements.at(patch->statement).kind
+                        : StatementKind::Invalid;
+                if (patchKind != StatementKind::Field &&
+                    patchKind != StatementKind::BitfieldField) {
+                    report(QStringLiteral("BR0561"),
+                           QStringLiteral("Rewrite target must be a source-backed field"),
+                           syntaxRewrite.span);
+                }
+            }
+            rewrite.patchPath = appendRefs(&m_program->symbolRefs, path);
+            ResolveContext rewriteContext = *context;
+            rewriteContext.referenceRewrite = true;
+            rewriteContext.scopes.push_back({});
+            rewriteContext.scopes.last().insert(
+                QStringLiteral("target"), {resultType, kInvalidId});
+            rewrite.exportedValue = resolveExpression(
+                syntaxRewrite.expression, &rewriteContext);
+            if (!isIntegerType(expressionType(rewrite.exportedValue))) {
+                report(QStringLiteral("BR0562"),
+                       QStringLiteral("Reference rewrite expression must produce an integer"),
+                       syntaxRewrite.span);
+            }
+            rewriteIds.push_back(
+                static_cast<quint32>(m_program->referenceRewrites.size()));
+            m_program->referenceRewrites.push_back(std::move(rewrite));
+        }
+        reference.rewriteRules =
+            appendRefs(&m_program->referenceRewriteRefs, rewriteIds);
+        statement->reference =
+            static_cast<ReferenceTemplateId>(m_program->references.size());
+        m_program->references.push_back(std::move(reference));
+        extent->hasReferenceEffects = true;
+        return resultType;
+    }
+
     StatementId resolveStatement(SyntaxStatementId syntaxId,
                                  ResolveContext* context, TypeId ownerType,
                                  ExtentSummary* extentOut) {
@@ -1446,6 +1818,10 @@ private:
                 }
                 break;
             }
+            case SyntaxStatementKind::Reference:
+                fieldType = resolveReference(syntax, context, ownerType,
+                                             &statement, &extent);
+                break;
             case SyntaxStatementKind::ComputedField:
                 fieldType = resolveType(syntax.type);
                 statement.expression = resolveExpression(syntax.expression, context);
@@ -1519,6 +1895,7 @@ private:
                 extent.parentAdvance = ParentAdvance::Contiguous;
                 extent.mayFail = true;
                 extent.requiresRandomAccess = body.extent.requiresRandomAccess;
+                extent.hasReferenceEffects = body.extent.hasReferenceEffects;
                 break;
             }
             case SyntaxStatementKind::Repeat:
@@ -1556,6 +1933,8 @@ private:
                 statement.statements =
                     appendRefs(&m_program->statementRefs, body.statements);
                 fieldType = sequenceType(shape);
+                statement.itemExtent = addExtent(body.extent);
+                statement.staticItemTemplate = shape;
                 const std::optional<quint64> count =
                     !isWhile && syntax.expression != kInvalidSyntaxExpression
                         ? constantInteger(syntax.expression)
@@ -1567,13 +1946,34 @@ private:
                     extent.exactBytes.reset();
                     extent.fixedPrefixBytes = 0;
                 }
+                if (!isWhile && statement.expression != kInvalidId &&
+                    statement.condition == kInvalidId &&
+                    statement.initializers.count == 0 &&
+                    body.extent.exactBytes.has_value() &&
+                    *body.extent.exactBytes > 0 &&
+                    body.extent.parentAdvance == ParentAdvance::Contiguous &&
+                    !body.extent.requiresRandomAccess &&
+                    statementsAreBatchAdvanceSafe(statement.statements)) {
+                    statement.loopScanPlan = LoopScanPlan::BatchAdvance;
+                }
+                if (body.extent.hasReferenceEffects) {
+                    statement.referenceEffectScanPlan =
+                        ReferenceEffectScanPlan::ExecuteItems;
+                }
                 break;
             }
             case SyntaxStatementKind::Many:
                 fieldType = sequenceType(resolveType(syntax.type));
-                extent = repeatedExtent(extentForType(
-                                            m_program->types.at(fieldType).elementType),
-                                        std::nullopt);
+                {
+                    const ExtentSummary item = extentForType(
+                        m_program->types.at(fieldType).elementType);
+                    statement.itemExtent = addExtent(item);
+                    extent = repeatedExtent(item, std::nullopt);
+                    if (item.hasReferenceEffects) {
+                        statement.referenceEffectScanPlan =
+                            ReferenceEffectScanPlan::ExecuteItems;
+                    }
+                }
                 extent.mayNoMatch = true;
                 break;
             case SyntaxStatementKind::Select:
@@ -1584,6 +1984,10 @@ private:
                 break;
             case SyntaxStatementKind::Recover:
                 fieldType = resolveRecover(syntax, context, &statement, &extent);
+                if (extent.hasReferenceEffects) {
+                    statement.referenceEffectScanPlan =
+                        ReferenceEffectScanPlan::ExecuteItems;
+                }
                 break;
             case SyntaxStatementKind::Continue:
             case SyntaxStatementKind::Break:
@@ -1640,6 +2044,7 @@ private:
 
         statement.type = fieldType;
         if (syntax.kind == SyntaxStatementKind::Field ||
+            syntax.kind == SyntaxStatementKind::Reference ||
             syntax.kind == SyntaxStatementKind::ComputedField ||
             syntax.kind == SyntaxStatementKind::BitfieldField ||
             syntax.kind == SyntaxStatementKind::Preserve ||
@@ -1923,7 +2328,9 @@ private:
                    QStringLiteral("recover requires at least one sync pattern"),
                    syntax.span);
         }
-        *extent = repeatedExtent(extentForType(itemType), std::nullopt);
+        const ExtentSummary itemExtent = extentForType(itemType);
+        statement->itemExtent = addExtent(itemExtent);
+        *extent = repeatedExtent(itemExtent, std::nullopt);
         extent->mayFail = true;
         extent->requiresRandomAccess = true;
         return sequenceType(itemType);

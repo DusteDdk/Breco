@@ -921,7 +921,11 @@ private:
         statement.name = name.text;
         statement.nameSpan = name.span;
 
-        if (matchKeyword(u"bitfield")) {
+        if (matchKeyword(u"ref")) {
+            statement.kind = SyntaxStatementKind::Reference;
+            statement.type = parseType();
+            parseReferenceModifiers(&statement);
+        } else if (matchKeyword(u"bitfield")) {
             statement.kind = SyntaxStatementKind::BitfieldField;
             statement.type = parseType(false);
             parseBitfieldMembers(&statement);
@@ -1207,6 +1211,93 @@ private:
                 break;
             }
         }
+    }
+
+    void parseReferenceModifiers(SyntaxStatement* statement) {
+        for (;;) {
+            if (matchKeyword(u"when")) {
+                statement->condition = parseExpression();
+            } else if (matchKeyword(u"from")) {
+                const Token input =
+                    expectIdentifier(QStringLiteral("Expected reference input name"));
+                statement->sourceInput = input.text;
+                statement->sourceInputSpan = input.span;
+                expectKeyword(u"at",
+                              QStringLiteral("Expected 'at' after input name"));
+                statement->expression = parseExpression();
+            } else if (matchKeyword(u"within")) {
+                statement->secondaryExpression = parseBytesCall();
+            } else if (matchKeyword(u"key")) {
+                statement->referenceKeys.push_back(parseExpression());
+            } else if (matchKeyword(u"follow")) {
+                if (statement->referenceStrength !=
+                    SyntaxReferenceStrength::Invalid) {
+                    report(QStringLiteral("BP0452"),
+                           QStringLiteral("Reference strength may be declared only once"),
+                           previous().span);
+                }
+                statement->referenceStrength = SyntaxReferenceStrength::Follow;
+            } else if (matchKeyword(u"weak")) {
+                if (statement->referenceStrength !=
+                    SyntaxReferenceStrength::Invalid) {
+                    report(QStringLiteral("BP0452"),
+                           QStringLiteral("Reference strength may be declared only once"),
+                           previous().span);
+                }
+                statement->referenceStrength = SyntaxReferenceStrength::Weak;
+            } else if (matchKeyword(u"cover")) {
+                const Token coverage = expectIdentifier(
+                    QStringLiteral("Expected 'decoded' or 'region' after cover"));
+                if (coverage.text == QStringLiteral("decoded")) {
+                    statement->referenceCoverage =
+                        SyntaxReferenceCoverage::DecodedStorage;
+                } else if (coverage.text == QStringLiteral("region")) {
+                    statement->referenceCoverage =
+                        SyntaxReferenceCoverage::WholeRegion;
+                } else {
+                    report(QStringLiteral("BP0450"),
+                           QStringLiteral("Reference coverage must be 'decoded' or 'region'"),
+                           coverage.span);
+                }
+            } else if (matchKeyword(u"rewrite")) {
+                parseReferenceRewrites(statement);
+            } else {
+                break;
+            }
+        }
+    }
+
+    void parseReferenceRewrites(SyntaxStatement* statement) {
+        if (!match(TokenKind::LeftBrace)) {
+            report(QStringLiteral("BP0451"),
+                   QStringLiteral("Expected '{' before reference rewrite rules"),
+                   peek().span);
+            return;
+        }
+        while (!atEnd() && !check(TokenKind::RightBrace)) {
+            SyntaxReferenceRewrite rewrite;
+            const Token first = expectIdentifier(
+                QStringLiteral("Expected rewrite target field"));
+            rewrite.targetPath.push_back(first.text);
+            SourceSpan end = first.span;
+            while (match(TokenKind::Dot)) {
+                const Token member = expectIdentifier(
+                    QStringLiteral("Expected field name after '.'"));
+                rewrite.targetPath.push_back(member.text);
+                end = member.span;
+            }
+            expect(TokenKind::Equal,
+                   QStringLiteral("Expected '=' after rewrite target"));
+            rewrite.expression = parseExpression();
+            consumeOptionalSemicolon();
+            if (rewrite.expression != kInvalidSyntaxExpression) {
+                end = m_result.syntax.expressions.at(rewrite.expression).span;
+            }
+            rewrite.span = spanning(first.span, end);
+            statement->referenceRewrites.push_back(std::move(rewrite));
+        }
+        expect(TokenKind::RightBrace,
+               QStringLiteral("Expected '}' after reference rewrite rules"));
     }
 
     SyntaxStatementId parseOutformStatement() {

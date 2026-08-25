@@ -8,6 +8,7 @@
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QEnterEvent>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
 #include <QFrame>
@@ -20,6 +21,7 @@
 #include <QMenu>
 #include <QPixmap>
 #include <QPlainTextEdit>
+#include <QPersistentModelIndex>
 #include <QProgressBar>
 #include <QPushButton>
 #include <QRadioButton>
@@ -46,11 +48,14 @@
 #endif
 
 #include <memory>
+#include <atomic>
 #include <utility>
 
 #include "app/MainWindow.h"
 #include "brecolang/gui/BrecoLangPanel.h"
+#include "brecolang/gui/BrecoDecodeController.h"
 #include "brecolang/gui/DecodedTreeModel.h"
+#include "brecolang/compiler/Compiler.h"
 #include "io/ProtectedSourceOpener.h"
 #include "panel/CurrentByteInfoPanel.h"
 #include "panel/DataViewByteAndBitmapPanel.h"
@@ -111,6 +116,56 @@ private:
     bool m_existed = false;
 };
 
+struct ObservedSourceState {
+    std::atomic_int reads{0};
+    std::atomic_int guiThreadReads{0};
+    std::atomic<QThread*> readThread{nullptr};
+};
+
+class ObservedSlowSource final : public breco::lang::ByteSource {
+public:
+    ObservedSlowSource(QByteArray bytes,
+                       std::shared_ptr<ObservedSourceState> state,
+                       unsigned long delayMs)
+        : m_bytes(std::make_shared<QByteArray>(std::move(bytes))),
+          m_state(std::move(state)), m_delayMs(delayMs) {}
+
+    breco::lang::ByteReadResult read(quint64 offset,
+                                     qsizetype length) override {
+        QThread* current = QThread::currentThread();
+        m_state->readThread.store(current, std::memory_order_release);
+        m_state->reads.fetch_add(1, std::memory_order_relaxed);
+        if (current == QApplication::instance()->thread()) {
+            m_state->guiThreadReads.fetch_add(1, std::memory_order_relaxed);
+        }
+        if (m_delayMs != 0) {
+            QThread::msleep(m_delayMs);
+        }
+        if (offset >= static_cast<quint64>(m_bytes->size())) {
+            return {breco::lang::ByteReadStatus::EndOfInput, {}, {}};
+        }
+        const qsizetype available = static_cast<qsizetype>(
+            qMin<quint64>(static_cast<quint64>(m_bytes->size()) - offset,
+                          static_cast<quint64>(length)));
+        if (available < length) {
+            return {breco::lang::ByteReadStatus::EndOfInput, {}, {}};
+        }
+        return {breco::lang::ByteReadStatus::Ok,
+                {m_bytes, static_cast<qsizetype>(offset), available}, {}};
+    }
+
+    std::optional<quint64> size() const override {
+        return static_cast<quint64>(m_bytes->size());
+    }
+    bool randomAccess() const override { return true; }
+    QString path() const override { return QStringLiteral("observed.bin"); }
+
+private:
+    std::shared_ptr<QByteArray> m_bytes;
+    std::shared_ptr<ObservedSourceState> m_state;
+    unsigned long m_delayMs = 0;
+};
+
 class MainWindowIntegrationTests : public QObject {
     Q_OBJECT
 
@@ -120,6 +175,10 @@ private slots:
     void selectingResultRowUpdatesPreviewBuffers();
     void twoColumnCompositionAndDataViewToolbar();
     void brecoLangPanelDecodesRealFileWithoutAutomaticExpandAll();
+    void brecoDecodeWorkerOwnsSlowSourceAndCancellationStaysResponsive();
+    void millionItemBrecoViewPaintsAndPagesExplicitly();
+    void variableSequenceModelPassesSuccessorContinuation();
+    void referenceRowsExpandAliasesAndTerminateCycles();
     void navigatorLabelsAndDataViewEndianFollowSelection();
     void hexViewDefaultsPersistAcrossWindows();
     void hexNavigatorEditsPreserveDeltaAndSelectionLength();
@@ -462,7 +521,7 @@ outform Summary(root: Inspect) text { emit "${root.packet.marker}" }
 
     auto* model = window.m_brecoLangPanel->treeModel();
     QTreeView* view = window.m_brecoLangPanel->treeView();
-    QCOMPARE(model->rowCount(), 1);
+    QTRY_COMPARE_WITH_TIMEOUT(model->rowCount(), 1, 5000);
     const QModelIndex root = model->index(0, 0);
     QVERIFY(root.isValid());
     QVERIFY(view->isExpanded(root));
@@ -472,7 +531,7 @@ outform Summary(root: Inspect) text { emit "${root.packet.marker}" }
     window.m_brecoLangPanel->expandAllButton()->click();
     QVERIFY(view->isExpanded(packet));
     QVERIFY(window.m_brecoLangPanel->statusText().contains(
-        QStringLiteral("Decoded 5 bytes")));
+        QStringLiteral("Resolved 5 bytes")));
 
     QVERIFY(window.m_brecoLangPanel->pinCurrentView());
     QCOMPARE(window.m_brecoLangPanel->viewTabs()->count(), 2);
@@ -495,6 +554,285 @@ outform Summary(root: Inspect) text { emit "${root.packet.marker}" }
                                                      &error),
              qPrintable(error));
     QCOMPARE(outform.data(), QByteArray("126"));
+}
+
+void MainWindowIntegrationTests::brecoDecodeWorkerOwnsSlowSourceAndCancellationStaysResponsive() {
+    using namespace breco::lang;
+    const CompileResult slowCompiled = compileBrecoLang(QString::fromUtf8(R"BRECO(
+language breco 0.1
+inputs { input data { default } }
+limits { max_loop_iterations 1000 max_nodes 5000 }
+entry Run from data {
+    items: repeat 500 { value: u8 check value >= 0 else "impossible" }
+}
+)BRECO"));
+    QVERIFY(slowCompiled.success());
+    const CompileResult fastCompiled = compileBrecoLang(QString::fromUtf8(R"BRECO(
+language breco 0.1
+inputs { input data { default } }
+limits { max_loop_iterations 1000 max_nodes 5000 }
+entry Run from data { items: repeat 256 { value: u8 } }
+)BRECO"));
+    QVERIFY(fastCompiled.success());
+
+    BrecoDecodeController controller;
+    auto slowState = std::make_shared<ObservedSourceState>();
+    auto fastState = std::make_shared<ObservedSourceState>();
+    InputBindingSpec slowBinding;
+    slowBinding.factory = [slowState](const CancellationToken&) {
+        return std::make_shared<ObservedSlowSource>(
+            QByteArray(500, '\x11'), slowState, 2);
+    };
+    InputBindingSpec fastBinding;
+    fastBinding.factory = [fastState](const CancellationToken&) {
+        return std::make_shared<ObservedSlowSource>(
+            QByteArray(256, '\x22'), fastState, 0);
+    };
+
+    bool guiTimerFired = false;
+    ResolveResponse resolved;
+    int forwardedResolveResponses = 0;
+    connect(&controller, &BrecoDecodeController::resolveFinished, this,
+            [&](const ResolveResponse& response) {
+                ++forwardedResolveResponses;
+                resolved = response;
+            });
+    controller.requestResolve(7, slowCompiled.program, QStringLiteral("Run"),
+                              {slowBinding}, 0);
+    QTimer::singleShot(5, this, [&]() { guiTimerFired = true; });
+    QTimer::singleShot(30, this, [&]() {
+        controller.requestResolve(7, fastCompiled.program,
+                                  QStringLiteral("Run"), {fastBinding}, 0);
+    });
+
+    QTRY_VERIFY_WITH_TIMEOUT(resolved.result.success(), 5000);
+    QVERIFY(guiTimerFired);
+    QCOMPARE(forwardedResolveResponses, 1);
+    QVERIFY(slowState->reads.load() > 0);
+    QVERIFY(slowState->reads.load() < 500);
+    QCOMPARE(slowState->guiThreadReads.load(), 0);
+    QCOMPARE(slowState->readThread.load(), controller.workerThread());
+    QCOMPARE(resolved.result.shape->sequences.size(), 1);
+
+    DisplayPageResponse page;
+    connect(&controller, &BrecoDecodeController::displayPageFinished, this,
+            [&](const DisplayPageResponse& response) { page = response; });
+    DisplayPageRequest pageRequest;
+    pageRequest.root = resolved.result.shape->root;
+    controller.requestDisplayPage(7, pageRequest);
+    QTRY_VERIFY_WITH_TIMEOUT(page.result.success(), 5000);
+    QCOMPARE(page.result.metrics.replayedItems, 64ULL);
+    QCOMPARE(fastState->guiThreadReads.load(), 0);
+    QCOMPARE(fastState->readThread.load(), controller.workerThread());
+
+    QBuffer binary;
+    QVERIFY(binary.open(QIODevice::WriteOnly));
+    DocumentOutputRequest outputRequest;
+    outputRequest.kind = DocumentOutputKind::BinarySpans;
+    outputRequest.target = resolved.result.shape->root;
+    QString error;
+    QVERIFY2(controller.renderOutputBlocking(7, outputRequest, &binary, &error),
+             qPrintable(error));
+    QCOMPARE(binary.data(), QByteArray(256, '\x22'));
+    QCOMPARE(fastState->guiThreadReads.load(), 0);
+    QCOMPARE(fastState->readThread.load(), controller.workerThread());
+}
+
+void MainWindowIntegrationTests::millionItemBrecoViewPaintsAndPagesExplicitly() {
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString inputPath = directory.filePath(QStringLiteral("million.bin"));
+    QFile input(inputPath);
+    QVERIFY(input.open(QIODevice::WriteOnly));
+    const QByteArray chunk(1024 * 1024, '\x5a');
+    QCOMPARE(input.write(chunk.constData(), 1000000), 1000000LL);
+    input.close();
+
+    breco::MainWindow window;
+    window.show();
+    QVERIFY(window.m_brecoLangPanel->loadSchemaText(QString::fromUtf8(R"BRECO(
+language breco 0.1
+inputs { input data { default } }
+entry Run from data { items: repeat 1000000 { value: u8 } }
+default entry Run
+)BRECO")));
+    QVERIFY(window.m_brecoLangPanel->setInputPath(u"data", inputPath));
+    bool firstEventTurnPainted = false;
+    QTimer::singleShot(0, &window, [&]() { firstEventTurnPainted = true; });
+    QElapsedTimer submitTimer;
+    submitTimer.start();
+    QVERIFY(window.m_brecoLangPanel->decodeSelected());
+    QVERIFY2(submitTimer.elapsed() < 100,
+             "decodeSelected performed synchronous decode work");
+
+    breco::lang::DecodedTreeModel* model =
+        window.m_brecoLangPanel->treeModel();
+    QTRY_VERIFY_WITH_TIMEOUT(
+        model->rowCount() == 1 &&
+            model->rowCount(model->index(0, 0)) == 1 &&
+            model->rowCount(model->index(0, 0, model->index(0, 0))) == 65,
+        5000);
+    QVERIFY(firstEventTurnPainted);
+    const QModelIndex root = model->index(0, 0);
+    const QModelIndex sequence = model->index(0, 0, root);
+    QCOMPARE(model->rowCount(sequence), 65);
+    const QModelIndex footer = model->index(64, 0, sequence);
+    QVERIFY(model->isContinuationRow(footer));
+    QVERIFY(model->data(footer).toString().contains(
+        QStringLiteral("Show next 128 items")));
+
+    const QPersistentModelIndex firstItem(model->index(0, 0, sequence));
+    QVERIFY(model->requestMore(footer));
+    QTRY_COMPARE_WITH_TIMEOUT(model->rowCount(sequence), 193, 5000);
+    QVERIFY(firstItem.isValid());
+    const QModelIndex nextFooter = model->index(192, 0, sequence);
+    QVERIFY(model->data(nextFooter).toString().contains(
+        QStringLiteral("Show next 384 items")));
+    QVERIFY(window.m_brecoLangPanel->statusText().contains(
+        QStringLiteral("Resolved 1000000 bytes")));
+}
+
+void MainWindowIntegrationTests::variableSequenceModelPassesSuccessorContinuation() {
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString inputPath = directory.filePath(QStringLiteral("variable.bin"));
+    QFile input(inputPath);
+    QVERIFY(input.open(QIODevice::WriteOnly));
+    const QByteArray bytes(131, '\x2a');
+    QCOMPARE(input.write(bytes), bytes.size());
+    input.close();
+
+    breco::MainWindow window;
+    window.show();
+    QVERIFY(window.m_brecoLangPanel->loadSchemaText(QString::fromUtf8(R"BRECO(
+language breco 0.1
+inputs { input data { default } }
+limits { max_loop_iterations 1000 max_nodes 10000 }
+entry Run from data {
+    items: while remaining > 1 with { seed: u64 = 5 } {
+        value: u8
+        computed carried: u64 = seed + value + iteration
+    }
+    tail: u8
+}
+default entry Run
+)BRECO")));
+    QVERIFY(window.m_brecoLangPanel->setInputPath(u"data", inputPath));
+    QVERIFY(window.m_brecoLangPanel->decodeSelected());
+
+    breco::lang::DecodedTreeModel* model =
+        window.m_brecoLangPanel->treeModel();
+    QTRY_VERIFY_WITH_TIMEOUT(
+        model->rowCount() == 1 &&
+            model->rowCount(model->index(0, 0)) == 2,
+        5000);
+    const QModelIndex root = model->index(0, 0);
+    const QModelIndex sequence = model->index(0, 0, root);
+    QTRY_COMPARE_WITH_TIMEOUT(model->rowCount(sequence), 65, 5000);
+    const QModelIndex footer = model->index(64, 0, sequence);
+    QVERIFY(model->isContinuationRow(footer));
+
+    breco::lang::SequenceWindow outgoing;
+    connect(model, &breco::lang::DecodedTreeModel::pageRequested, this,
+            [&](const breco::lang::SequenceWindow& windowRequest) {
+                outgoing = windowRequest;
+            });
+    QVERIFY(model->requestMore(footer));
+    QVERIFY(outgoing.successor.has_value());
+    QCOMPARE(outgoing.successor->nextItem, 64ULL);
+    QCOMPARE(outgoing.firstItem, 64ULL);
+    QCOMPARE(outgoing.itemCount, 66ULL);
+    QTRY_COMPARE_WITH_TIMEOUT(model->rowCount(sequence), 130, 5000);
+}
+
+void MainWindowIntegrationTests::referenceRowsExpandAliasesAndTerminateCycles() {
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString inputPath =
+        directory.filePath(QStringLiteral("references.bin"));
+    QFile input(inputPath);
+    QVERIFY(input.open(QIODevice::WriteOnly));
+    QByteArray bytes(6, '\0');
+    bytes[0] = '\x02';
+    bytes[2] = static_cast<char>(0xa1);
+    bytes[3] = '\x04';
+    bytes[4] = static_cast<char>(0xb2);
+    bytes[5] = '\x02';
+    QCOMPARE(input.write(bytes), bytes.size());
+    input.close();
+
+    breco::MainWindow window;
+    window.show();
+    QVERIFY(window.m_brecoLangPanel->loadSchemaText(QString::fromUtf8(R"BRECO(
+language breco 0.1
+inputs { input data { default } }
+record Node {
+    value: u8
+    next_offset: u8
+    next: ref Node
+        from data at root_offset(next_offset)
+        within bytes(2)
+        key next_offset
+        follow
+}
+entry Run from data {
+    first_offset: u8
+    first: ref Node
+        from data at root_offset(first_offset)
+        within bytes(2)
+        key first_offset
+        follow
+    alias: ref Node
+        from data at root_offset(first_offset)
+        within bytes(2)
+        key first_offset
+        follow
+}
+default entry Run
+)BRECO")));
+    QVERIFY(window.m_brecoLangPanel->setInputPath(u"data", inputPath));
+    QVERIFY(window.m_brecoLangPanel->decodeSelected());
+
+    breco::lang::DecodedTreeModel* model =
+        window.m_brecoLangPanel->treeModel();
+    QTRY_VERIFY_WITH_TIMEOUT(model->rowCount() == 1, 5000);
+    const QModelIndex root = model->index(0, 0);
+    QTRY_COMPARE_WITH_TIMEOUT(model->rowCount(root), 3, 5000);
+    const QModelIndex first = model->index(1, 0, root);
+    const QModelIndex alias = model->index(2, 0, root);
+    QVERIFY(model->isReferenceRow(first));
+    QVERIFY(model->isReferenceRow(alias));
+    QCOMPARE(model->rowCount(first), 0);
+    QCOMPARE(model->rowCount(alias), 0);
+    QVERIFY(model->canFetchMore(first));
+
+    model->fetchMore(first);
+    QTRY_COMPARE_WITH_TIMEOUT(model->rowCount(first), 1, 5000);
+    const QModelIndex firstTarget = model->index(0, 0, first);
+    QCOMPARE(model->parent(firstTarget), first);
+    QTRY_COMPARE_WITH_TIMEOUT(model->rowCount(firstTarget), 3, 5000);
+    const QModelIndex firstNext = model->index(2, 0, firstTarget);
+    QVERIFY(model->isReferenceRow(firstNext));
+    QVERIFY(model->canFetchMore(firstNext));
+
+    model->fetchMore(alias);
+    QTRY_COMPARE_WITH_TIMEOUT(model->rowCount(alias), 1, 5000);
+    const QModelIndex aliasTarget = model->index(0, 0, alias);
+    QCOMPARE(model->parent(aliasTarget), alias);
+    QVERIFY(firstTarget != aliasTarget);
+    QVERIFY(model->treeForIndex(firstTarget) ==
+            model->treeForIndex(aliasTarget));
+
+    model->fetchMore(firstNext);
+    QTRY_COMPARE_WITH_TIMEOUT(model->rowCount(firstNext), 1, 5000);
+    const QModelIndex secondTarget = model->index(0, 0, firstNext);
+    QTRY_COMPARE_WITH_TIMEOUT(model->rowCount(secondTarget), 3, 5000);
+    const QModelIndex backReference = model->index(2, 0, secondTarget);
+    QVERIFY(model->isReferenceRow(backReference));
+    QVERIFY(!model->canFetchMore(backReference));
+    QVERIFY(model->data(backReference.siblingAtColumn(2)).toString().contains(
+        QStringLiteral("back-reference")));
+    QCOMPARE(model->rowCount(backReference), 0);
 }
 
 void MainWindowIntegrationTests::navigatorLabelsAndDataViewEndianFollowSelection() {

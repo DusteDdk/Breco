@@ -100,9 +100,34 @@ struct SyntaxBytePattern {
     QVector<SyntaxExpressionId> bytes;
 };
 
+enum class SyntaxReferenceAddressBase {
+    Invalid,
+    Input,
+    EntryRoot,
+    ContainingEntity,
+};
+
+enum class SyntaxReferenceStrength {
+    Invalid,
+    Follow,
+    Weak,
+};
+
+enum class SyntaxReferenceCoverage {
+    DecodedStorage,
+    WholeRegion,
+};
+
+struct SyntaxReferenceRewrite {
+    QVector<QString> targetPath;
+    SourceSpan span;
+    SyntaxExpressionId expression = kInvalidSyntaxExpression;
+};
+
 enum class SyntaxStatementKind {
     Invalid,
     Field,
+    Reference,
     ComputedField,
     BitfieldField,
     Identify,
@@ -148,6 +173,14 @@ struct SyntaxStatement {
     QVector<SyntaxAlternative> alternatives;
     QVector<SyntaxBitMember> bitMembers;
     QVector<SyntaxBytePattern> syncPatterns;
+    QVector<SyntaxExpressionId> referenceKeys;
+    QVector<SyntaxReferenceRewrite> referenceRewrites;
+    SyntaxReferenceAddressBase referenceAddressBase =
+        SyntaxReferenceAddressBase::Invalid;
+    SyntaxReferenceStrength referenceStrength =
+        SyntaxReferenceStrength::Invalid;
+    SyntaxReferenceCoverage referenceCoverage =
+        SyntaxReferenceCoverage::DecodedStorage;
     QString gapsName;
     quint64 stepBytes = 1;
 };

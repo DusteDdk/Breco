@@ -7,6 +7,7 @@
 #include <QtGlobal>
 
 #include "brecolang/ir/BrecoProgram.h"
+#include "brecolang/runtime/DecodeTypes.h"
 
 namespace breco::lang {
 
@@ -26,6 +27,7 @@ enum class DecodedValueKind {
     OwnedBytes,
     Object,
     Sequence,
+    Reference,
 };
 
 struct ByteSpanValue {
@@ -49,6 +51,7 @@ struct DecodedValue {
     quint32 payload = kInvalidId;
     IdRange fields;
     IdRange elements;
+    quint64 logicalCount = 0;
     DecodedNodeId node = kInvalidId;
 };
 
@@ -85,6 +88,7 @@ enum class DecodedNodeKind {
     Bitfield,
     BitMember,
     Gap,
+    Reference,
 };
 
 struct DecodedNode {
@@ -115,6 +119,8 @@ struct DecodedTreeCheckpoint {
     qsizetype layouts = 0;
     qsizetype valueStrings = 0;
     qsizetype ownedBytes = 0;
+    qsizetype locators = 0;
+    qsizetype references = 0;
 };
 
 class DecodedTree {
@@ -128,6 +134,8 @@ public:
     QVector<QString> names;
     QVector<QString> valueStrings;
     QVector<QByteArray> ownedBytes;
+    QVector<MaterializationLocator> locators;
+    QVector<ReferenceHandle> references;
 
     DecodedNameId internName(const QString& name);
     const QString& name(DecodedNameId id) const;

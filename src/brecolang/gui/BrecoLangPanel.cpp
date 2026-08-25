@@ -1,9 +1,9 @@
 #include "brecolang/gui/BrecoLangPanel.h"
 
 #include "brecolang/compiler/Compiler.h"
+#include "brecolang/gui/BrecoDecodeController.h"
 #include "brecolang/gui/BrecoLangLibrary.h"
 #include "brecolang/gui/DecodedTreeModel.h"
-#include "brecolang/render/OutformRenderer.h"
 
 #include <QComboBox>
 #include <QFile>
@@ -55,6 +55,11 @@ QString runtimeMessages(const QVector<RuntimeDiagnostic>& diagnostics) {
 
 BrecoLangPanel::BrecoLangPanel(QWidget* parent) : QWidget(parent) {
     setObjectName(QStringLiteral("brecoLangPanel"));
+    m_decodeController = new BrecoDecodeController(this);
+    connect(m_decodeController, &BrecoDecodeController::resolveFinished, this,
+            &BrecoLangPanel::handleResolveFinished);
+    connect(m_decodeController, &BrecoDecodeController::displayPageFinished,
+            this, &BrecoLangPanel::handleDisplayPageFinished);
     auto* outer = new QVBoxLayout(this);
     outer->setContentsMargins(6, 6, 6, 6);
 
@@ -147,7 +152,8 @@ BrecoLangPanel::BrecoLangPanel(QWidget* parent) : QWidget(parent) {
     auto* saveJsonButton = new QPushButton(QStringLiteral("Save JSON…"), resultPane);
     auto* saveBinaryButton =
         new QPushButton(QStringLiteral("Save Binary…"), resultPane);
-    m_expandAllButton = new QPushButton(QStringLiteral("Expand All"), resultPane);
+    m_expandAllButton =
+        new QPushButton(QStringLiteral("Expand Loaded"), resultPane);
     m_expandAllButton->setObjectName(QStringLiteral("brecoLangExpandAll"));
     treeTools->addWidget(new QLabel(QStringLiteral("Outform"), resultPane));
     treeTools->addWidget(m_outformCombo, 1);
@@ -235,6 +241,7 @@ BrecoLangPanel::BrecoLangPanel(QWidget* parent) : QWidget(parent) {
             m_views.begin(), m_views.end(),
             [page](const ViewState& view) { return view.page == page; });
         if (found != m_views.end()) {
+            m_decodeController->closeView(found->id);
             m_views.erase(found);
         }
         m_viewTabs->removeTab(index);
@@ -246,6 +253,7 @@ BrecoLangPanel::BrecoLangPanel(QWidget* parent) : QWidget(parent) {
 
 BrecoLangPanel::ViewState BrecoLangPanel::createView(const QString& title) {
     ViewState view;
+    view.id = m_nextViewId++;
     view.page = new QWidget(m_viewTabs);
     auto* layout = new QVBoxLayout(view.page);
     layout->setContentsMargins(0, 0, 0, 0);
@@ -262,6 +270,38 @@ BrecoLangPanel::ViewState BrecoLangPanel::createView(const QString& title) {
     layout->addWidget(view.tree);
     m_viewTabs->addTab(view.page, title);
     installViewNavigation(view);
+    connect(view.model, &DecodedTreeModel::pageRequested, this,
+            [this, viewId = view.id](const SequenceWindow& window) {
+                ViewState* target = viewById(viewId);
+                if (target == nullptr || !target->document.isValid() ||
+                    !target->shape) {
+                    return;
+                }
+                DisplayPageRequest request;
+                request.document = target->document;
+                request.root = window.sequence.isReferenceTarget() &&
+                                       window.sequence.referenceTarget.has_value()
+                                   ? MaterializationLocator::target(
+                                         *window.sequence.referenceTarget)
+                                   : target->shape->root;
+                request.expansionPath = window.expansionPath;
+                request.sequenceWindows = {window};
+                m_decodeController->requestDisplayPage(viewId,
+                                                       std::move(request));
+            });
+    connect(view.model, &DecodedTreeModel::referenceRequested, this,
+            [this, viewId = view.id](const ReferencePageRequest& expansion) {
+                ViewState* target = viewById(viewId);
+                if (target == nullptr || !target->document.isValid()) {
+                    return;
+                }
+                DisplayPageRequest request;
+                request.document = target->document;
+                request.root = expansion.handle.targetLocator();
+                request.expansionPath = expansion.expansionPath;
+                m_decodeController->requestDisplayPage(viewId,
+                                                       std::move(request));
+            });
     return view;
 }
 
@@ -277,13 +317,25 @@ void BrecoLangPanel::installViewNavigation(ViewState& view) {
                 if (found == m_views.cend() || !found->program) {
                     return;
                 }
-                const DecodedNode* node = found->model->nodeForIndex(index);
-                if (node == nullptr || !node->hasSourceSpan ||
-                    node->input >= static_cast<InputId>(found->sources.size()) ||
-                    !found->sources.at(node->input)) {
+                if (found->model->isContinuationRow(index)) {
+                    found->model->requestMore(index);
                     return;
                 }
-                emit sourceLocationActivated(found->sources.at(node->input)->path(),
+                if (found->model->isReferenceRow(index)) {
+                    treeView->setExpanded(index, true);
+                    if (found->model->canFetchMore(index)) {
+                        found->model->fetchMore(index);
+                    }
+                    return;
+                }
+                const DecodedNode* node = found->model->nodeForIndex(index);
+                if (node == nullptr || !node->hasSourceSpan ||
+                    node->input >=
+                        static_cast<InputId>(found->inputPaths.size()) ||
+                    found->inputPaths.at(node->input).isEmpty()) {
+                    return;
+                }
+                emit sourceLocationActivated(found->inputPaths.at(node->input),
                                              node->offset, node->length);
             });
 }
@@ -326,8 +378,12 @@ void BrecoLangPanel::compileEditor() {
     if (!compiled.success()) {
         m_program.reset();
         if (ViewState* view = liveView(); view != nullptr) {
+            m_decodeController->closeView(view->id);
             view->program.reset();
             view->sources.clear();
+            view->inputPaths.clear();
+            view->document = {};
+            view->shape.reset();
             view->rootValue = kInvalidId;
             view->model->clear();
         }
@@ -470,65 +526,138 @@ bool BrecoLangPanel::decodeSelected() {
         return false;
     }
 
-    DecodeRequest request;
-    request.program = m_program;
-    request.entryName = m_entryCombo->currentText();
-    request.startOffset = offset;
-    request.mode = DecodeMode::Tree;
-    request.inputs.resize(m_program->inputs.size());
-    for (InputId input = 0; input < static_cast<InputId>(m_program->inputs.size());
-         ++input) {
-        const QString path = inputPath(input);
-        if (path.isEmpty()) {
-            continue;
-        }
-        QString error;
-        request.inputs[input] = PagedFileSource::open(path, &error);
-        if (!request.inputs[input]) {
-            setStatus(QStringLiteral("Could not bind input '%1': %2")
-                          .arg(m_program->symbol(m_program->inputs.at(input).name),
-                               error),
-                      true);
-            return false;
-        }
-    }
-    const DecodeResult decoded = decodeBrecoProgram(request);
     ViewState* view = liveView();
     if (view == nullptr) {
         return false;
     }
-    view->program = m_program;
-    view->entryName = request.entryName;
-    view->offset = offset;
-    view->sources = request.inputs;
-    view->rootValue = decoded.rootValue;
-    if (!decoded.tree) {
-        view->model->clear();
-    } else {
-        view->model->setDocument(m_program, decoded.tree);
-        if (view->model->rowCount() > 0) {
-            view->tree->expand(view->model->index(0, 0));
-        }
+    QVector<InputBindingSpec> bindings(m_program->inputs.size());
+    QVector<QString> paths(m_program->inputs.size());
+    for (InputId input = 0; input < static_cast<InputId>(m_program->inputs.size());
+         ++input) {
+        const QString path = inputPath(input);
+        bindings[input].path = path;
+        paths[input] = path;
     }
+    view->program = m_program;
+    view->entryName = m_entryCombo->currentText();
+    view->offset = offset;
+    view->sources.clear();
+    view->inputPaths = std::move(paths);
+    view->document = {};
+    view->shape.reset();
+    view->rootValue = kInvalidId;
+    view->model->clear();
     m_viewTabs->setCurrentWidget(view->page);
+    m_decodeController->requestResolve(
+        view->id, m_program, view->entryName, std::move(bindings), offset);
+    setStatus(QStringLiteral("Resolving decode shape…"), false);
+    m_liveDecoded = true;
+    return true;
+}
+
+BrecoLangPanel::ViewState* BrecoLangPanel::viewById(quint64 id) {
+    const auto found = std::find_if(
+        m_views.begin(), m_views.end(),
+        [id](const ViewState& view) { return view.id == id; });
+    return found == m_views.end() ? nullptr : &*found;
+}
+
+const BrecoLangPanel::ViewState* BrecoLangPanel::viewById(quint64 id) const {
+    const auto found = std::find_if(
+        m_views.cbegin(), m_views.cend(),
+        [id](const ViewState& view) { return view.id == id; });
+    return found == m_views.cend() ? nullptr : &*found;
+}
+
+void BrecoLangPanel::handleResolveFinished(const ResolveResponse& response) {
+    ViewState* view = viewById(response.tag.viewId);
+    if (view == nullptr) {
+        return;
+    }
+    const DecodeResult& decoded = response.result;
     const QString messages = runtimeMessages(decoded.diagnostics);
-    setStatus(decoded.success()
-                  ? QStringLiteral("Decoded %1 bytes into %2 nodes.%3")
-                        .arg(decoded.endOffset - decoded.startOffset)
-                        .arg(decoded.constructedNodes)
-                        .arg(messages.isEmpty()
-                                 ? QString()
-                                 : QStringLiteral("\n%1").arg(messages))
-                  : (messages.isEmpty() ? QStringLiteral("Decode failed.")
-                                        : messages),
-              !decoded.success());
-    m_liveDecoded = decoded.success();
-    return decoded.success();
+    if (!decoded.success() || !decoded.shape) {
+        view->document = {};
+        view->shape.reset();
+        view->model->clear();
+        m_liveDecoded = false;
+        setStatus(messages.isEmpty() ? QStringLiteral("Decode failed.")
+                                     : messages,
+                  true);
+        return;
+    }
+    view->document = decoded.document;
+    view->shape = decoded.shape;
+    view->model->setDocument(view->program, decoded.document, decoded.shape);
+    if (decoded.shape->outline && !decoded.shape->outline->nodes.isEmpty()) {
+        view->rootValue = decoded.shape->outline->nodes.first().value;
+    }
+    if (view->model->rowCount() > 0) {
+        view->tree->expand(view->model->index(0, 0));
+    }
+    const quint64 bytes = decoded.endOffset - decoded.startOffset;
+    setStatus(
+        QStringLiteral("Resolved %1 bytes and %2 logical nodes; materialized %3 nodes.%4")
+            .arg(bytes)
+            .arg(decoded.logicalNodes)
+            .arg(decoded.constructedNodes)
+            .arg(messages.isEmpty() ? QString()
+                                    : QStringLiteral("\n%1").arg(messages)),
+        false);
+    m_liveDecoded = true;
+    if (!decoded.shape->sequences.isEmpty()) {
+        DisplayPageRequest request;
+        request.document = decoded.document;
+        request.root = decoded.shape->root;
+        request.defaultSequenceItems = 64;
+        m_decodeController->requestDisplayPage(view->id, std::move(request));
+    }
+}
+
+void BrecoLangPanel::handleDisplayPageFinished(
+    const DisplayPageResponse& response) {
+    ViewState* view = viewById(response.tag.viewId);
+    if (view == nullptr || !view->shape) {
+        return;
+    }
+    if (response.result.status != DecodeStatus::Success &&
+        response.result.status != DecodeStatus::Paused) {
+        const QString messages = runtimeMessages(response.result.diagnostics);
+        if (!response.expansionPath.isEmpty()) {
+            ReferencePageRequest expansion;
+            expansion.expansionPath = response.expansionPath;
+            view->model->failReference(
+                expansion,
+                messages.isEmpty() ? QStringLiteral("request failed")
+                                   : messages);
+        }
+        for (const SequenceWindow& window : response.windows) {
+            view->model->failPage(
+                window, messages.isEmpty() ? QStringLiteral("request failed")
+                                            : messages);
+        }
+        setStatus(messages.isEmpty() ? QStringLiteral("Materialization failed.")
+                                     : messages,
+                  true);
+        return;
+    }
+    view->model->applyPage(response.result);
+    if (view->model->rowCount() > 0) {
+        view->tree->expand(view->model->index(0, 0));
+    }
+    setStatus(
+        response.result.status == DecodeStatus::Paused
+            ? QStringLiteral("Replay paused at a committed item boundary; activate the continuation row to resume.")
+            : QStringLiteral("Resolved %1 bytes; materialized %2 nodes for display.")
+                  .arg(view->shape->endOffset - view->shape->startOffset)
+                  .arg(response.result.metrics.materializedNodes),
+        false);
 }
 
 bool BrecoLangPanel::pinCurrentView() {
     const ViewState* source = activeView();
-    if (source == nullptr || !source->model->tree() || !source->program) {
+    if (source == nullptr || !source->shape || !source->program ||
+        !source->document.isValid()) {
         setStatus(QStringLiteral("Decode an entry before pinning a view."), true);
         return false;
     }
@@ -540,12 +669,26 @@ bool BrecoLangPanel::pinCurrentView() {
     pinned.entryName = source->entryName;
     pinned.offset = source->offset;
     pinned.sources = source->sources;
+    pinned.inputPaths = source->inputPaths;
+    pinned.document = source->document;
+    pinned.shape = source->shape;
     pinned.rootValue = source->rootValue;
-    pinned.model->setDocument(source->program, source->model->tree());
+    if (!m_decodeController->shareDocument(source->id, pinned.id)) {
+        pinned.page->deleteLater();
+        setStatus(QStringLiteral("Could not share the decoded document."), true);
+        return false;
+    }
+    pinned.model->setDocument(source->program, source->document, source->shape);
     m_views.push_back(pinned);
     m_viewTabs->setCurrentWidget(pinned.page);
     if (pinned.model->rowCount() > 0) {
         pinned.tree->expand(pinned.model->index(0, 0));
+    }
+    if (!pinned.shape->sequences.isEmpty()) {
+        DisplayPageRequest request;
+        request.document = pinned.document;
+        request.root = pinned.shape->root;
+        m_decodeController->requestDisplayPage(pinned.id, std::move(request));
     }
     setStatus(QStringLiteral("Pinned %1.").arg(title), false);
     return true;
@@ -573,137 +716,51 @@ BrecoLangPanel::ViewState* BrecoLangPanel::activeView() {
 
 bool BrecoLangPanel::exportJson(QIODevice* output, QString* error) const {
     const ViewState* view = activeView();
-    if (view == nullptr || !view->program || !view->model->tree()) {
+    if (view == nullptr || !view->program || !view->document.isValid()) {
         if (error != nullptr) {
             *error = QStringLiteral("Decode an entry before exporting JSON");
         }
         return false;
     }
-    DecodeRequest request;
-    request.program = view->program;
-    request.entryName = view->entryName;
-    request.inputs = view->sources;
-    request.startOffset = view->offset;
-    request.mode = DecodeMode::Streaming;
-    request.output = output;
-    const DecodeResult decoded = decodeBrecoProgram(request);
-    if (!decoded.success()) {
-        if (error != nullptr) {
-            *error = runtimeMessages(decoded.diagnostics);
-        }
-        return false;
-    }
-    if (output->write("\n", 1) != 1) {
-        if (error != nullptr) {
-            *error = output->errorString();
-        }
-        return false;
-    }
-    return true;
-}
-
-bool BrecoLangPanel::writeSourceSpans(const ViewState& view,
-                                      const StorageLayout& layout,
-                                      QIODevice* output, QString* error) const {
-    const auto tree = view.model->tree();
-    if (!tree || layout.spans.first > static_cast<quint32>(tree->spans.size()) ||
-        layout.spans.count > static_cast<quint32>(tree->spans.size()) -
-                                 layout.spans.first) {
-        if (error != nullptr) {
-            *error = QStringLiteral("Decoded storage layout is invalid");
-        }
-        return false;
-    }
-    constexpr qsizetype chunkSize = 1024 * 1024;
-    for (quint32 index = 0; index < layout.spans.count; ++index) {
-        const ByteSpanValue& span = tree->spans.at(layout.spans.first + index);
-        if (span.input >= static_cast<InputId>(view.sources.size()) ||
-            !view.sources.at(span.input)) {
-            if (error != nullptr) {
-                *error = QStringLiteral("Storage input is no longer bound");
-            }
-            return false;
-        }
-        ByteSource* source = view.sources.at(span.input).get();
-        const quint64 base = source->absoluteOffset(0);
-        if (span.offset < base) {
-            if (error != nullptr) {
-                *error = QStringLiteral("Storage span precedes its input window");
-            }
-            return false;
-        }
-        quint64 logical = span.offset - base;
-        quint64 remaining = span.length;
-        while (remaining > 0) {
-            const qsizetype amount = static_cast<qsizetype>(
-                qMin<quint64>(remaining, static_cast<quint64>(chunkSize)));
-            const ByteReadResult bytes = source->read(logical, amount);
-            if (!bytes.ok() || bytes.view.data() == nullptr) {
-                if (error != nullptr) {
-                    *error = bytes.error.isEmpty()
-                                 ? QStringLiteral("Could not read decoded source span")
-                                 : bytes.error;
-                }
-                return false;
-            }
-            if (output->write(bytes.view.data(), bytes.view.length) !=
-                bytes.view.length) {
-                if (error != nullptr) {
-                    *error = output->errorString();
-                }
-                return false;
-            }
-            logical += static_cast<quint64>(amount);
-            remaining -= static_cast<quint64>(amount);
-        }
-    }
-    return true;
+    DocumentOutputRequest request;
+    request.kind = DocumentOutputKind::Json;
+    return m_decodeController->renderOutputBlocking(view->id, request, output,
+                                                    error);
 }
 
 bool BrecoLangPanel::exportBinary(QIODevice* output, QString* error) const {
     const ViewState* view = activeView();
-    if (view == nullptr || !view->model->tree()) {
+    if (view == nullptr || !view->document.isValid() || !view->shape) {
         if (error != nullptr) {
             *error = QStringLiteral("Decode an entry before exporting binary data");
         }
         return false;
     }
     QModelIndex index = view->tree->currentIndex();
-    const DecodedNode* node = view->model->nodeForIndex(index);
-    if (node == nullptr && !view->model->tree()->nodes.isEmpty()) {
-        node = &view->model->tree()->nodes.first();
+    DocumentOutputRequest request;
+    request.kind = DocumentOutputKind::BinarySpans;
+    request.target = view->model->locatorForIndex(index);
+    if (!request.target.isValid()) {
+        request.target = view->shape->root;
     }
-    if (node == nullptr ||
-        node->storageLayout >=
-            static_cast<quint32>(view->model->tree()->storageLayouts.size())) {
-        if (error != nullptr) {
-            *error = QStringLiteral("The selected node has no stored byte layout");
-        }
-        return false;
-    }
-    return writeSourceSpans(
-        *view, view->model->tree()->storageLayouts.at(node->storageLayout),
-        output, error);
+    return m_decodeController->renderOutputBlocking(view->id, request, output,
+                                                    error);
 }
 
 bool BrecoLangPanel::renderOutform(QStringView outformName, QIODevice* output,
                                    QString* error) const {
     const ViewState* view = activeView();
-    if (view == nullptr || !view->program || !view->model->tree() ||
-        view->rootValue == kInvalidId) {
+    if (view == nullptr || !view->program || !view->document.isValid()) {
         if (error != nullptr) {
             *error = QStringLiteral("Decode an entry before rendering an outform");
         }
         return false;
     }
-    const RenderStore store(view->program, view->model->tree(), view->sources,
-                            view->rootValue);
-    const OutformRenderResult rendered =
-        breco::lang::renderOutform(store, outformName, output);
-    if (!rendered.success && error != nullptr) {
-        *error = rendered.error;
-    }
-    return rendered.success;
+    DocumentOutputRequest request;
+    request.kind = DocumentOutputKind::Outform;
+    request.outformName = outformName.toString();
+    return m_decodeController->renderOutputBlocking(view->id, request, output,
+                                                    error);
 }
 
 std::optional<ProbeScanPlan> BrecoLangPanel::probeScanPlan(QString* error) const {

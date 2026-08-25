@@ -27,6 +27,9 @@ QT_END_NAMESPACE
 namespace breco::lang {
 
 class DecodedTreeModel;
+class BrecoDecodeController;
+struct ResolveResponse;
+struct DisplayPageResponse;
 
 class BrecoLangPanel final : public QWidget {
     Q_OBJECT
@@ -82,12 +85,16 @@ signals:
 private:
     struct ViewState {
         QWidget* page = nullptr;
+        quint64 id = 0;
         QTreeView* tree = nullptr;
         DecodedTreeModel* model = nullptr;
         std::shared_ptr<const BrecoProgram> program;
         QString entryName;
         quint64 offset = 0;
         QVector<std::shared_ptr<ByteSource>> sources;
+        QVector<QString> inputPaths;
+        DecodeDocumentHandle document;
+        std::shared_ptr<const ResolvedShapeSnapshot> shape;
         DecodedValueId rootValue = kInvalidId;
     };
 
@@ -108,8 +115,10 @@ private:
     ViewState* activeView();
     ViewState createView(const QString& title);
     void installViewNavigation(ViewState& view);
-    bool writeSourceSpans(const ViewState& view, const StorageLayout& layout,
-                          QIODevice* output, QString* error) const;
+    void handleResolveFinished(const ResolveResponse& response);
+    void handleDisplayPageFinished(const DisplayPageResponse& response);
+    ViewState* viewById(quint64 id);
+    const ViewState* viewById(quint64 id) const;
     bool saveWithCommit(const QString& caption, const QString& filter,
                         const std::function<bool(QIODevice*, QString*)>& writer);
 
@@ -128,6 +137,7 @@ private:
     QPushButton* m_pinViewButton = nullptr;
     QPushButton* m_scanButton = nullptr;
     QTimer* m_compileTimer = nullptr;
+    BrecoDecodeController* m_decodeController = nullptr;
     QString m_suggestedInputPath;
     QString m_sourcePath;
     std::shared_ptr<const BrecoProgram> m_program;
@@ -135,6 +145,7 @@ private:
     bool m_updatingEditor = false;
     bool m_liveDecoded = false;
     bool m_scanRunning = false;
+    quint64 m_nextViewId = 1;
 };
 
 }  // namespace breco::lang

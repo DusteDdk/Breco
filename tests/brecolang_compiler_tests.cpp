@@ -229,6 +229,8 @@ private slots:
     void completeLanguageProgramCompiles();
     void resolvedProgramContainsTransactionalAndOutformPlans();
     void extentAndEffectAnalysisPropagatesUsefulFacts();
+    void loopScanPlanIsConservativeAndKeepsItemExtent();
+    void referencesLowerToExplicitIrAndKeepStructuralBatchPlan();
     void parserAndResolverBatchIndependentDiagnostics();
     void parserRecoversToLaterTopLevelDeclarations();
     void shippedExamplesCompile();
@@ -349,6 +351,121 @@ void BrecoLangCompilerTests::extentAndEffectAnalysisPropagatesUsefulFacts() {
     QVERIFY(splitExtent.requiresRandomAccess);
     QCOMPARE(splitExtent.parentAdvance, ParentAdvance::MultiInput);
     QVERIFY(!splitExtent.exactBytes.has_value());
+}
+
+void BrecoLangCompilerTests::loopScanPlanIsConservativeAndKeepsItemExtent() {
+    const QString source = QString::fromUtf8(R"BRECO(
+language breco 0.1
+inputs { input data { default } }
+entry Run from data {
+    fast: repeat 100 { value: u8 }
+    checked: repeat 2 { value: u8 check value != 0 else "zero" }
+    controlled: repeat 2 { value: u8 break when iteration == 0 }
+}
+)BRECO");
+    const CompileResult result = compileBrecoLang(source);
+    QVERIFY2(result.success(), qPrintable(diagnosticsText(result.diagnostics)));
+    const Statement* fast = nullptr;
+    const Statement* checked = nullptr;
+    const Statement* controlled = nullptr;
+    for (const Statement& statement : result.program->statements) {
+        const QString name = result.program->symbol(statement.name);
+        if (name == QStringLiteral("fast")) fast = &statement;
+        if (name == QStringLiteral("checked")) checked = &statement;
+        if (name == QStringLiteral("controlled")) controlled = &statement;
+    }
+    QVERIFY(fast != nullptr);
+    QCOMPARE(fast->loopScanPlan, LoopScanPlan::BatchAdvance);
+    QVERIFY(fast->itemExtent != kInvalidId);
+    QCOMPARE(*result.program->extents.at(fast->itemExtent).exactBytes, 1ULL);
+    QVERIFY(fast->staticItemTemplate != kInvalidId);
+    QVERIFY(checked != nullptr);
+    QCOMPARE(checked->loopScanPlan, LoopScanPlan::ExecuteItems);
+    QVERIFY(controlled != nullptr);
+    QCOMPARE(controlled->loopScanPlan, LoopScanPlan::ExecuteItems);
+}
+
+void BrecoLangCompilerTests::referencesLowerToExplicitIrAndKeepStructuralBatchPlan() {
+    const QString source = QString::fromUtf8(R"BRECO(
+language breco 0.1
+inputs { input data { default } }
+record Target(id: u32) { value: u8 }
+entry Run from data {
+    items: repeat 2000000 {
+        carrier: u32le
+        target: ref Target(carrier)
+            from data at root_offset(carrier + 4)
+            within bytes(1)
+            key carrier
+            follow
+            cover region
+            rewrite { carrier = target.@relocated_key; }
+    }
+}
+)BRECO");
+    const CompileResult result = compileBrecoLang(source);
+    QVERIFY2(result.success(), qPrintable(diagnosticsText(result.diagnostics)));
+    QCOMPARE(result.program->references.size(), 1);
+    QCOMPARE(result.program->referenceRewrites.size(), 1);
+    const ReferenceDesc& reference = result.program->references.first();
+    QCOMPARE(reference.address.base, AddressBaseKind::EntryRoot);
+    QCOMPARE(reference.strength, ReferenceStrength::Follow);
+    QCOMPARE(reference.coverage, ReferenceCoverage::WholeRegion);
+    QCOMPARE(reference.keyExpressions.count, 1U);
+    QCOMPARE(reference.rewriteRules.count, 1U);
+
+    const Statement* loop = nullptr;
+    const Statement* referenceStatement = nullptr;
+    for (const Statement& statement : result.program->statements) {
+        if (result.program->symbol(statement.name) == QStringLiteral("items")) {
+            loop = &statement;
+        } else if (result.program->symbol(statement.name) ==
+                   QStringLiteral("target")) {
+            referenceStatement = &statement;
+        }
+    }
+    QVERIFY(loop != nullptr);
+    QCOMPARE(loop->loopScanPlan, LoopScanPlan::BatchAdvance);
+    QCOMPARE(loop->referenceEffectScanPlan,
+             ReferenceEffectScanPlan::ExecuteItems);
+    QVERIFY(referenceStatement != nullptr);
+    QCOMPARE(referenceStatement->kind, StatementKind::Reference);
+    const ExtentSummary& extent =
+        result.program->extents.at(referenceStatement->extent);
+    QCOMPARE(extent.exactBytes, std::optional<quint64>(0));
+    QVERIFY(extent.hasReferenceEffects);
+
+    const CompileResult invalid = compileBrecoLang(QString::fromUtf8(R"BRECO(
+language breco 0.1
+inputs { input data { default } }
+record T { value: u8 }
+entry Bad from data {
+    pointer: ref T from data at 3 within bytes(1)
+}
+)BRECO"));
+    QVERIFY(!invalid.success());
+    const QString messages = diagnosticsText(invalid.diagnostics);
+    QVERIFY(messages.contains(QStringLiteral("explicit address base")) ||
+            messages.contains(QStringLiteral("input_offset")));
+    QVERIFY(messages.contains(QStringLiteral("follow")));
+
+    const CompileResult invalidRewrite =
+        compileBrecoLang(QString::fromUtf8(R"BRECO(
+language breco 0.1
+inputs { input data { default } }
+record T { value: u8 }
+entry BadRewrite from data {
+    computed carrier: u64 = 0
+    pointer: ref T
+        from data at input_offset(0)
+        within bytes(1)
+        weak
+        rewrite { carrier = target.@relocated_key; }
+}
+)BRECO"));
+    QVERIFY(!invalidRewrite.success());
+    QVERIFY(diagnosticsText(invalidRewrite.diagnostics)
+                .contains(QStringLiteral("source-backed field")));
 }
 
 void BrecoLangCompilerTests::parserAndResolverBatchIndependentDiagnostics() {

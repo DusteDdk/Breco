@@ -1,0 +1,131 @@
+language breco 0.1
+
+// Lazy navigation of a little-endian ELF64 file.
+//
+// Open examples/samples/elf64-reference-sample.o with this schema.  Expanding
+// file reveals the ELF header without eagerly reading the section table.
+// Expanding section_table pages through its fixed-size headers, and each
+// non-empty file-backed header has a content reference to its raw bytes.
+
+inputs { input data "ELF64 file or embedded ELF64 image" { default } }
+
+const ELF64_HEADER_BYTES: u64 = 64
+const ELF64_SECTION_HEADER_BYTES: u64 = 64
+const SHT_NOBITS: u64 = 8
+
+record Elf64Header {
+    identify {
+        magic: u32le
+        class: u8
+        byte_order: u8
+        match magic == 0x464C457F && class == 2 && byte_order == 1
+            else "not a little-endian ELF64 file"
+    }
+    commit
+    ident_version: u8
+    abi: u8
+    abi_version: u8
+    ident_padding: region bytes(7) { raw remaining as bytes }
+    object_type: u16le
+    machine: u16le
+    version: u32le
+    entry_address: u64le
+    program_header_offset: u64le
+    section_header_offset: u64le
+    flags: u32le
+    header_size: u16le
+    program_header_size: u16le
+    program_header_count: u16le
+    section_header_size: u16le
+    section_header_count: u16le
+    section_name_index: u16le
+}
+
+record Elf64SectionData(byte_size: u64) {
+    // cover region on the reference says the entire allocation is meaningful;
+    // this field gives those bytes a useful decoded representation as well.
+    bytes: region bytes(byte_size) { preserve remaining as bytes }
+}
+
+record Elf64SectionHeader {
+    name_index: u32le
+    section_type: u32le
+    flags: u64le
+    virtual_address: u64le
+    file_offset: u64le
+    byte_size: u64le
+    link: u32le
+    info: u32le
+    alignment: u64le
+    entry_size: u64le
+
+    // ELF sh_offset is relative to the beginning selected by the entry, so a
+    // root-relative reference still works when an ELF image is embedded at a
+    // nonzero blob offset. SHT_NOBITS (for example .bss) has no file payload;
+    // its false condition produces a null reference instead of reading bytes.
+    content: ref Elf64SectionData(byte_size)
+        from data at root_offset(file_offset)
+        within bytes(byte_size)
+        key file_offset
+        weak
+        when section_type != SHT_NOBITS && byte_size > 0
+        cover region
+}
+
+record Elf64SectionTable(section_count: u16le) {
+    // References have zero extent, so these headers remain a fixed-stride
+    // sequence. The UI can page it arithmetically and creates content handles
+    // only for the displayed section rows.
+    sections: repeat section_count { section: Elf64SectionHeader }
+}
+
+record Elf64File(file_length: u64) {
+    header: Elf64Header
+    require header.header_size == ELF64_HEADER_BYTES
+        else "unexpected ELF64 header size"
+    require header.section_header_size == ELF64_SECTION_HEADER_BYTES
+        else "unexpected ELF64 section-header size"
+    require header.section_header_offset
+                + header.section_header_count * header.section_header_size
+            <= file_length
+        else "section-header table exceeds the ELF file"
+
+    // sh_offset values are relative to this referenced ELF entity.  self_offset
+    // therefore remains correct even when the outer entry starts elsewhere.
+    section_table: ref Elf64SectionTable(header.section_header_count)
+        from data at self_offset(header.section_header_offset)
+        within bytes(header.section_header_count * header.section_header_size)
+        key header.section_header_offset
+        follow
+        cover decoded
+}
+
+entry ELF64References from data {
+    // input_offset is absolute in the bound input. This strong edge represents
+    // the complete ELF entity and cover region deliberately includes every
+    // byte in its bounded region.
+    file: ref Elf64File(remaining)
+        from data at input_offset(0)
+        within bytes(remaining)
+        key 0
+        follow
+        cover region
+
+    // A weak root-relative shortcut is useful when only the ELF header is
+    // wanted. Explicit deref below reads this bounded 64-byte target because a
+    // later semantic value genuinely needs the machine field.
+    header_shortcut: ref Elf64Header
+        from data at root_offset(0)
+        within bytes(ELF64_HEADER_BYTES)
+        key 0
+        weak
+        cover decoded
+
+    computed file_key: u64 = file.@key
+    computed file_address: u64 = file.@address
+    computed file_length: u64 = file.@length
+    computed file_is_null: bool = file.@is_null
+    computed machine_via_deref: u16le = deref(header_shortcut).machine
+}
+
+default entry ELF64References

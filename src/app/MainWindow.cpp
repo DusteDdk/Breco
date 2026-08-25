@@ -1102,16 +1102,15 @@ MainWindow::MainWindow(QWidget* parent)
         }
     }
     if (rememberedSourceLoaded && rememberedSchemaLoaded) {
-        QMetaObject::invokeMethod(
-            this,
+        QTimer::singleShot(
+            0, this,
             [this, restoredSourceOffset]() {
                 if (isSingleFileModeActive() &&
                     !m_textHoverBuffer.data.isEmpty()) {
                     m_brecoLangPanel->setDecodeOffset(restoredSourceOffset);
                     m_brecoLangPanel->decodeSelected();
                 }
-            },
-            Qt::QueuedConnection);
+            });
     }
 }
 

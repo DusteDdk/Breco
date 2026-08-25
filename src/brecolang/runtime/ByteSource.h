@@ -6,6 +6,7 @@
 #include <QIODevice>
 #include <QString>
 #include <QTemporaryFile>
+#include <QThread>
 #include <QtGlobal>
 
 #include <memory>
@@ -36,6 +37,16 @@ struct ByteReadResult {
     bool ok() const { return status == ByteReadStatus::Ok; }
 };
 
+struct ByteSourceIdentity {
+    QString path;
+    std::optional<quint64> size;
+    qint64 modifiedMilliseconds = 0;
+    quint64 generation = 0;
+
+    friend bool operator==(const ByteSourceIdentity&,
+                           const ByteSourceIdentity&) = default;
+};
+
 class ByteSource {
 public:
     virtual ~ByteSource() = default;
@@ -44,10 +55,17 @@ public:
     virtual std::optional<quint64> size() const = 0;
     virtual bool randomAccess() const = 0;
     virtual QString path() const = 0;
+    virtual ByteSourceIdentity identity() const;
     virtual quint64 absoluteOffset(quint64 logicalOffset) const;
     virtual void releaseBefore(quint64 offset);
 
     ByteReadResult readByte(quint64 offset);
+
+protected:
+    void assertThreadAffinity() const;
+
+private:
+    Qt::HANDLE m_ownerThread = QThread::currentThreadId();
 };
 
 class BorrowedWindowSource final : public ByteSource {
@@ -59,6 +77,7 @@ public:
     std::optional<quint64> size() const override;
     bool randomAccess() const override { return true; }
     QString path() const override { return m_path; }
+    ByteSourceIdentity identity() const override;
     quint64 absoluteOffset(quint64 logicalOffset) const override;
 
 private:
@@ -75,9 +94,10 @@ public:
                                                  int residentPages = 16);
 
     ByteReadResult read(quint64 offset, qsizetype length) override;
-    std::optional<quint64> size() const override { return m_size; }
+    std::optional<quint64> size() const override;
     bool randomAccess() const override { return true; }
     QString path() const override { return m_path; }
+    ByteSourceIdentity identity() const override;
 
 private:
     PagedFileSource(QString path, qsizetype pageBytes, int residentPages);
@@ -102,6 +122,7 @@ public:
     std::optional<quint64> size() const override;
     bool randomAccess() const override { return false; }
     QString path() const override { return m_path; }
+    ByteSourceIdentity identity() const override;
     void releaseBefore(quint64 offset) override;
 
 private:
@@ -124,6 +145,7 @@ public:
     std::optional<quint64> size() const override;
     bool randomAccess() const override { return true; }
     QString path() const override { return m_path; }
+    ByteSourceIdentity identity() const override;
 
 private:
     ByteReadStatus fillThrough(quint64 endExclusive, QString* error);

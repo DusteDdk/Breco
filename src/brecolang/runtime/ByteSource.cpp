@@ -36,12 +36,23 @@ const char* ByteView::data() const {
 }
 
 quint64 ByteSource::absoluteOffset(quint64 logicalOffset) const {
+    assertThreadAffinity();
     return logicalOffset;
 }
 
-void ByteSource::releaseBefore(quint64) {}
+void ByteSource::releaseBefore(quint64) { assertThreadAffinity(); }
+
+void ByteSource::assertThreadAffinity() const {
+    Q_ASSERT(m_ownerThread == QThread::currentThreadId());
+}
+
+ByteSourceIdentity ByteSource::identity() const {
+    assertThreadAffinity();
+    return {path(), size(), 0, 0};
+}
 
 ByteReadResult ByteSource::readByte(quint64 offset) {
+    assertThreadAffinity();
     return read(offset, 1);
 }
 
@@ -52,6 +63,7 @@ BorrowedWindowSource::BorrowedWindowSource(QByteArray bytes, QString sourcePath,
       m_baseOffset(baseOffset) {}
 
 ByteReadResult BorrowedWindowSource::read(quint64 offset, qsizetype length) {
+    assertThreadAffinity();
     const quint64 total = static_cast<quint64>(m_bytes->size());
     if (!validRange(offset, length, total)) {
         return endOfInput();
@@ -61,14 +73,22 @@ ByteReadResult BorrowedWindowSource::read(quint64 offset, qsizetype length) {
 }
 
 std::optional<quint64> BorrowedWindowSource::size() const {
+    assertThreadAffinity();
     return static_cast<quint64>(m_bytes->size());
 }
 
 quint64 BorrowedWindowSource::absoluteOffset(quint64 logicalOffset) const {
+    assertThreadAffinity();
     if (logicalOffset > std::numeric_limits<quint64>::max() - m_baseOffset) {
         return std::numeric_limits<quint64>::max();
     }
     return m_baseOffset + logicalOffset;
+}
+
+ByteSourceIdentity BorrowedWindowSource::identity() const {
+    assertThreadAffinity();
+    return {m_path, static_cast<quint64>(m_bytes->size()), 0,
+            static_cast<quint64>(reinterpret_cast<quintptr>(m_bytes.get()))};
 }
 
 PagedFileSource::PagedFileSource(QString path, qsizetype pageBytes,
@@ -97,6 +117,21 @@ std::shared_ptr<PagedFileSource> PagedFileSource::open(
     }
     source->m_size = static_cast<quint64>(fileSize);
     return source;
+}
+
+std::optional<quint64> PagedFileSource::size() const {
+    assertThreadAffinity();
+    return m_size;
+}
+
+ByteSourceIdentity PagedFileSource::identity() const {
+    assertThreadAffinity();
+    const QFileInfo info(m_path);
+    return {m_path,
+            info.exists() && info.size() >= 0
+                ? std::optional<quint64>(static_cast<quint64>(info.size()))
+                : std::nullopt,
+            info.lastModified().toMSecsSinceEpoch(), 0};
 }
 
 void PagedFileSource::touch(quint64 pageIndex) {
@@ -144,6 +179,7 @@ std::shared_ptr<const QByteArray> PagedFileSource::page(quint64 pageIndex,
 }
 
 ByteReadResult PagedFileSource::read(quint64 offset, qsizetype length) {
+    assertThreadAffinity();
     if (!validRange(offset, length, m_size)) {
         return endOfInput();
     }
@@ -227,6 +263,7 @@ ByteReadStatus SequentialSource::fillThrough(quint64 endExclusive,
 }
 
 ByteReadResult SequentialSource::read(quint64 offset, qsizetype length) {
+    assertThreadAffinity();
     if (length < 0 || offset < m_baseOffset ||
         offset > std::numeric_limits<quint64>::max() -
                                    static_cast<quint64>(length)) {
@@ -243,6 +280,7 @@ ByteReadResult SequentialSource::read(quint64 offset, qsizetype length) {
 }
 
 std::optional<quint64> SequentialSource::size() const {
+    assertThreadAffinity();
     if (m_eof) {
         return m_baseOffset + static_cast<quint64>(m_buffer->size());
     }
@@ -256,6 +294,7 @@ std::optional<quint64> SequentialSource::size() const {
 }
 
 void SequentialSource::releaseBefore(quint64 offset) {
+    assertThreadAffinity();
     const quint64 end = m_baseOffset + static_cast<quint64>(m_buffer->size());
     const quint64 clamped = qBound(m_baseOffset, offset, end);
     const quint64 amount = clamped - m_baseOffset;
@@ -269,6 +308,12 @@ void SequentialSource::releaseBefore(quint64 offset) {
     m_baseOffset = clamped;
 }
 
+ByteSourceIdentity SequentialSource::identity() const {
+    assertThreadAffinity();
+    return {m_path, std::nullopt, 0,
+            static_cast<quint64>(reinterpret_cast<quintptr>(m_device.get()))};
+}
+
 SpoolingSource::SpoolingSource(std::shared_ptr<QIODevice> device,
                                QString sourcePath)
     : m_device(std::move(device)), m_path(std::move(sourcePath)) {
@@ -276,6 +321,7 @@ SpoolingSource::SpoolingSource(std::shared_ptr<QIODevice> device,
 }
 
 bool SpoolingSource::isOpen() const {
+    assertThreadAffinity();
     return m_device && m_device->isOpen() && m_spool.isOpen();
 }
 
@@ -317,6 +363,7 @@ ByteReadStatus SpoolingSource::fillThrough(quint64 endExclusive,
 }
 
 ByteReadResult SpoolingSource::read(quint64 offset, qsizetype length) {
+    assertThreadAffinity();
     if (length < 0 || offset > std::numeric_limits<quint64>::max() -
                                    static_cast<quint64>(length)) {
         return readError(QStringLiteral("Invalid spooled read range"));
@@ -340,6 +387,7 @@ ByteReadResult SpoolingSource::read(quint64 offset, qsizetype length) {
 }
 
 std::optional<quint64> SpoolingSource::size() const {
+    assertThreadAffinity();
     if (m_eof) {
         return m_spooledBytes;
     }
@@ -350,6 +398,12 @@ std::optional<quint64> SpoolingSource::size() const {
         }
     }
     return std::nullopt;
+}
+
+ByteSourceIdentity SpoolingSource::identity() const {
+    assertThreadAffinity();
+    return {m_path, std::nullopt, 0,
+            static_cast<quint64>(reinterpret_cast<quintptr>(m_device.get()))};
 }
 
 }  // namespace breco::lang
