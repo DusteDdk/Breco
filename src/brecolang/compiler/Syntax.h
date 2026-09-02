@@ -157,6 +157,8 @@ struct SyntaxStatement {
     SourceSpan span;
     QString name;
     SourceSpan nameSpan;
+    bool inlineSelect = false;
+    bool anonymousRecord = false;
     QString secondaryName;
     SourceSpan secondaryNameSpan;
     SyntaxType type;

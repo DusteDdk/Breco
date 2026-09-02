@@ -15,7 +15,7 @@ set(CMAKE_AUTOUIC_SEARCH_PATHS "${CMAKE_CURRENT_SOURCE_DIR}/ui")
 include(CTest)
 include(GNUInstallDirs)
 
-find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets)
+find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets OpenGL)
 
 if(WIN32)
     add_compile_definitions(WINVER=0x0A00 _WIN32_WINNT=0x0A00)
@@ -43,6 +43,9 @@ set(BRECO_SOURCES
     src/panel/ResultsTablePanel.cpp
     src/panel/ScanControlsPanel.cpp
     src/panel/TextViewPanel.cpp
+    src/panel/VisualizePanel.cpp
+    src/panel/EditsPanel.cpp
+    src/edit/EditQueue.cpp
     src/scan/ScanController.cpp
     src/scan/ScanProgress.cpp
     src/scan/ScanWorker.cpp
@@ -51,13 +54,19 @@ set(BRECO_SOURCES
     src/model/ResultModel.cpp
     src/panel/MainTabsPanel.cpp
     src/view/BitmapViewWidget.cpp
+    src/view/Cartesian2DView.cpp
+    src/view/Cartesian3DView.cpp
+    src/view/ResizableBitmapCanvas.cpp
+    src/view/VisualizeBitmapCanvas.cpp
     src/view/TextViewWidget.cpp
+    src/visualize/VisualizeData.cpp
     src/io/FileEnumerator.cpp
     src/io/OpenFilePool.cpp
     src/io/ProtectedSourceOpener.cpp
     src/io/ShiftedWindowLoader.cpp
     src/image/EmbeddedImageScanner.cpp
     src/settings/AppSettings.cpp
+    src/settings/PathSelect.cpp
     src/text/TextSequenceAnalyzer.cpp
     src/text/StringModeRules.cpp
 )
@@ -85,6 +94,9 @@ set(BRECO_HEADERS
     src/panel/ResultsTablePanel.h
     src/panel/ScanControlsPanel.h
     src/panel/TextViewPanel.h
+    src/panel/VisualizePanel.h
+    src/panel/EditsPanel.h
+    src/edit/EditQueue.h
     src/scan/ScanController.h
     src/scan/ScanProgress.h
     src/scan/ScanWorker.h
@@ -95,13 +107,19 @@ set(BRECO_HEADERS
     src/model/ResultTypes.h
     src/model/ResultModel.h
     src/view/BitmapViewWidget.h
+    src/view/Cartesian2DView.h
+    src/view/Cartesian3DView.h
+    src/view/ResizableBitmapCanvas.h
+    src/view/VisualizeBitmapCanvas.h
     src/view/TextViewWidget.h
+    src/visualize/VisualizeData.h
     src/io/FileEnumerator.h
     src/io/OpenFilePool.h
     src/io/ProtectedSourceOpener.h
     src/io/ShiftedWindowLoader.h
     src/image/EmbeddedImageScanner.h
     src/settings/AppSettings.h
+    src/settings/PathSelect.h
     src/text/TextSequenceAnalyzer.h
     src/text/StringModeRules.h
 )
@@ -127,13 +145,15 @@ set(BRECO_UI
     ui/ResultsTablePanel.ui
     ui/ScanControlsPanel.ui
     ui/TextViewPanel.ui
+    ui/VisualizePanel.ui
 )
 
 set(BRECO_RESOURCES
     res/icons.qrc
 )
 
-set(BRECO_QT_LIBS Qt6::Core Qt6::Gui Qt6::Widgets)
+set(BRECO_QT_LIBS
+    Qt6::Core Qt6::Gui Qt6::Widgets Qt6::OpenGL)
 if(BRECO_ENABLE_LINUX_PRIVILEGED_OPEN)
     list(APPEND BRECO_QT_LIBS Qt6::DBus Qt6::Network)
 endif()
@@ -158,11 +178,13 @@ add_library(brecolang_runtime STATIC
     src/brecolang/runtime/ByteSource.cpp
     src/brecolang/runtime/DecodedData.cpp
     src/brecolang/runtime/DecodeDocument.cpp
+    src/brecolang/runtime/DecodeTarget.cpp
     src/brecolang/runtime/Interpreter.cpp
     src/brecolang/runtime/JsonWriter.cpp
     src/brecolang/runtime/ByteSource.h
     src/brecolang/runtime/DecodedData.h
     src/brecolang/runtime/DecodeDocument.h
+    src/brecolang/runtime/DecodeTarget.h
     src/brecolang/runtime/DecodeTypes.h
     src/brecolang/runtime/Interpreter.h
     src/brecolang/runtime/JsonWriter.h
@@ -315,8 +337,9 @@ END
             )
         endif()
         add_custom_target(dist
-            COMMAND "${CMAKE_COMMAND}" -E rm -rf "${BRECO_DIST_DIR}"
-            COMMAND "${CMAKE_COMMAND}" -E make_directory "${BRECO_DIST_DIR}"
+            COMMAND "${CMAKE_COMMAND}"
+                    -D "DIR=${BRECO_DIST_DIR}"
+                    -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/clear_directory_contents.cmake"
             COMMAND "${CMAKE_COMMAND}" -E copy "$<TARGET_FILE:breco>" "${BRECO_DIST_DIR}/breco.exe"
             COMMAND "${CMAKE_COMMAND}" -E copy "$<TARGET_FILE:brecodump>" "${BRECO_DIST_DIR}/brecodump.exe"
             ${BRECO_DIST_SYMBOL_COMMANDS}
@@ -389,12 +412,15 @@ qt_add_executable(breco_unit_tests
     src/io/ShiftedWindowLoader.cpp
     src/image/EmbeddedImageScanner.cpp
     src/settings/AppSettings.cpp
+    src/settings/PathSelect.cpp
     src/text/TextSequenceAnalyzer.cpp
     src/text/StringModeRules.cpp
     src/view/BitmapViewWidget.cpp
     src/view/BitmapViewWidget.h
     src/view/TextViewWidget.cpp
     src/view/TextViewWidget.h
+    src/edit/EditQueue.cpp
+    src/edit/EditQueue.h
 )
 target_include_directories(breco_unit_tests PRIVATE src)
 target_link_libraries(breco_unit_tests PRIVATE Qt6::Core Qt6::Gui Qt6::Widgets)
@@ -418,6 +444,16 @@ target_compile_definitions(
 target_link_libraries(
     brecolang_runtime_tests PRIVATE brecolang_runtime Qt6::Core Qt6::Test)
 add_test(NAME brecolang_runtime_tests COMMAND brecolang_runtime_tests)
+
+qt_add_executable(breco_visualize_tests
+    tests/visualize_tests.cpp
+    src/visualize/VisualizeData.cpp
+    src/visualize/VisualizeData.h
+)
+target_include_directories(breco_visualize_tests PRIVATE src)
+target_link_libraries(
+    breco_visualize_tests PRIVATE brecolang_runtime Qt6::Core Qt6::Gui Qt6::Test)
+add_test(NAME breco_visualize_tests COMMAND breco_visualize_tests)
 
 qt_add_executable(brecodump_cli_tests
     tests/brecodump_cli_tests.cpp

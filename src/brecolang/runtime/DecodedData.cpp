@@ -112,7 +112,7 @@ void DecodedTree::finalizeTopology() {
     }
     for (DecodedNodeId id = 0; id < static_cast<DecodedNodeId>(nodes.size()); ++id) {
         DecodedNode& node = nodes[id];
-        if (node.parent == kInvalidId ||
+        if (node.hidden || node.parent == kInvalidId ||
             node.parent >= static_cast<DecodedNodeId>(nodes.size())) {
             continue;
         }
@@ -200,6 +200,7 @@ QString DecodedTree::displayValue(DecodedValueId id,
         case DecodedValueKind::Object:
             return QStringLiteral("%1 fields").arg(value.fields.count);
         case DecodedValueKind::Sequence:
+        case DecodedValueKind::Aggregate:
             return QStringLiteral("%1 items").arg(value.logicalCount);
         case DecodedValueKind::Reference: {
             if (value.payload >= static_cast<quint32>(references.size())) {

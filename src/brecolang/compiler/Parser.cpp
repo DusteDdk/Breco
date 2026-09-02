@@ -400,6 +400,12 @@ public:
                 advance();
             }
         }
+        if (!m_hasInputsDeclaration) {
+            SyntaxInput input;
+            input.name = QStringLiteral("data");
+            input.isDefault = true;
+            m_result.syntax.inputs.push_back(std::move(input));
+        }
         return std::move(m_result);
     }
 
@@ -486,9 +492,8 @@ private:
 
     void parseLanguageHeader() {
         if (!matchKeyword(u"language")) {
-            report(QStringLiteral("BP0100"),
-                   QStringLiteral("File must begin with 'language breco 0.1'"),
-                   peek().span);
+            m_result.syntax.languageName = QStringLiteral("breco");
+            m_result.syntax.languageVersion = QStringLiteral("0.1");
             return;
         }
         const Token name = expectIdentifier(QStringLiteral("Expected language name"));
@@ -517,6 +522,7 @@ private:
 
     bool parseTopLevel() {
         if (matchKeyword(u"inputs")) {
+            m_hasInputsDeclaration = true;
             parseInputs();
             return true;
         }
@@ -837,6 +843,19 @@ private:
         if (matchKeyword(u"break")) {
             return parseLoopControl(SyntaxStatementKind::Break, previous().span);
         }
+        if (matchKeyword(u"select")) {
+            SyntaxStatement statement;
+            statement.kind = SyntaxStatementKind::Select;
+            statement.inlineSelect = true;
+            const SourceSpan start = previous().span;
+            if (!check(TokenKind::LeftBrace)) {
+                statement.expression = parseExpression();
+            }
+            parseSelectCases(&statement);
+            consumeOptionalSemicolon();
+            statement.span = spanning(start, previous().span);
+            return appendStatement(std::move(statement));
+        }
         if (check(TokenKind::Identifier) && peek(1).kind == TokenKind::Colon) {
             return parseNamedField();
         }
@@ -921,7 +940,12 @@ private:
         statement.name = name.text;
         statement.nameSpan = name.span;
 
-        if (matchKeyword(u"ref")) {
+        if (check(TokenKind::LeftBrace)) {
+            statement.kind = SyntaxStatementKind::Field;
+            statement.anonymousRecord = true;
+            statement.statements = parseStatementBlock(false);
+            parseFieldModifiers(&statement);
+        } else if (matchKeyword(u"ref")) {
             statement.kind = SyntaxStatementKind::Reference;
             statement.type = parseType();
             parseReferenceModifiers(&statement);
@@ -1404,6 +1428,7 @@ private:
                 checkKeyword(u"match") || checkKeyword(u"computed") ||
                 checkKeyword(u"preserve") || checkKeyword(u"raw") ||
                 checkKeyword(u"continue") || checkKeyword(u"break") ||
+                checkKeyword(u"select") ||
                 checkKeyword(u"emit") || checkKeyword(u"let") ||
                 checkKeyword(u"if") || checkKeyword(u"for") ||
                 (check(TokenKind::Identifier) &&
@@ -1417,6 +1442,7 @@ private:
     QStringView m_source;
     LexResult m_lexed;
     qsizetype m_position = 0;
+    bool m_hasInputsDeclaration = false;
     ParseSyntaxResult m_result;
 };
 

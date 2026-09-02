@@ -180,6 +180,16 @@ Evidence:
 - Regions and `within` cursors cannot advance beyond their declared bounds.
 - Uncommitted alternatives restore cursor, values, nodes, diagnostics, and
   probe anchors. Streaming transactional scopes trial silently and replay once.
+- Named selects retain one variant value and `Select` node. Bare selects add
+  only the chosen arm's named fields to the current object; their statement ID
+  remains in materialization locators even though no wrapper node is visible.
+- Same-named yields from separate bare selects in one object share an ordered
+  aggregate. The tree always exposes one sequence container, while JSON keeps
+  a singleton's original shape and flattens sequence contributions after
+  promotion.
+- Streaming defers only aggregate members until their owner closes. Their
+  memory cost is proportional to the aggregate's encoded output; unrelated
+  members remain incremental.
 - Repeat and while failures do not emit partial sequence JSON.
 - Parse depth, loop iteration, node, recovery probe, and transform-output limits
   are enforced at runtime.

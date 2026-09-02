@@ -40,6 +40,7 @@ enum class TypeKind {
     Shape,
     Bitfield,
     Sequence,
+    Aggregate,
     Optional,
     Variant,
     Node,
@@ -68,6 +69,7 @@ struct FieldDesc {
     SymbolId name = kInvalidId;
     TypeId type = kInvalidId;
     StatementId statement = kInvalidId;
+    quint32 aggregate = kInvalidId;
     bool optional = false;
 };
 
@@ -211,6 +213,24 @@ struct SelectCase {
     TypeId resultType = kInvalidId;
     IdRange arguments;
     IdRange statements;
+    IdRange yields;
+};
+
+struct SelectYield {
+    SymbolId name = kInvalidId;
+    TypeId contributionType = kInvalidId;
+    StatementId contributionStatement = kInvalidId;
+    quint32 sourceSlot = kInvalidId;
+    quint32 targetSlot = kInvalidId;
+    quint32 aggregate = kInvalidId;
+};
+
+struct AggregateFieldDesc {
+    SymbolId name = kInvalidId;
+    TypeId type = kInvalidId;
+    TypeId elementType = kInvalidId;
+    quint32 resultSlot = kInvalidId;
+    StatementId locatorStatement = kInvalidId;
 };
 
 struct Alternative {
@@ -253,6 +273,7 @@ struct Statement {
     quint32 itemExtent = kInvalidId;
     quint32 staticItemTemplate = kInvalidId;
     ReferenceTemplateId reference = kInvalidId;
+    bool inlineSelect = false;
     LoopScanPlan loopScanPlan = LoopScanPlan::ExecuteItems;
     ReferenceEffectScanPlan referenceEffectScanPlan =
         ReferenceEffectScanPlan::None;
@@ -353,6 +374,8 @@ public:
     QVector<Statement> statements;
     QVector<Expression> expressions;
     QVector<SelectCase> selectCases;
+    QVector<SelectYield> selectYields;
+    QVector<AggregateFieldDesc> aggregateFields;
     QVector<Alternative> alternatives;
     QVector<BitMember> bitMembers;
     QVector<BytePattern> bytePatterns;

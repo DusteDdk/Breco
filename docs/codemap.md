@@ -41,13 +41,18 @@
 - `src/brecolang/gui/DecodedTreeModel.*` adapts the flat decoded tree to Qt.
 - `src/brecolang/gui/BrecoLangLibrary.*` indexes `.breco` schemas and reports
   older files requiring manual migration without modifying them.
+- `src/visualize/VisualizeData.*` resolves visualization windows, wraps compact
+  structure bodies as schemas, runs the existing compiler/interpreter, and
+  extracts numeric x/y/z series from decoded lists.
 
 ## Application orchestration
 
 - `src/app/MainWindow.*` coordinates sources, scans, results, raw previews,
   image scanning, BrecoLang navigation, and persisted settings.
-- `src/panel/MainTabsPanel.*` owns `Scan`, `Raw`, `BrecoLang`, and `Image` tabs,
-  including detach/reattach behavior.
+- `src/panel/MainTabsPanel.*` owns `Scan`, `Raw`, `BrecoLang`, `Visualize`, and
+  `Image` tabs, including detach/reattach behavior.
+- `src/panel/VisualizePanel.*` hosts the 2D, 3D, and bitmap canvases in one
+  dockable result container and loads `Visualize.breco` from the schema library.
 - `src/settings/AppSettings.*` persists general UI state plus the last schema
   and schema-library directory.
 
@@ -69,7 +74,9 @@
 - `src/image/EmbeddedImageScanner.*` validates and decodes embedded image
   candidates asynchronously.
 - `src/model/ResultModel.*` presents scan matches.
-- `src/view/` contains text and bitmap byte views.
+- `src/view/` contains text and bitmap byte views, the horizontally resizable
+  and scrollable visualization bitmap canvas, painter-based 2D, and native-child
+  `QOpenGLWindow` 3D cartesian views.
 - `src/panel/` contains the remaining raw, scan, result, image, byte-info, and
   tab wrappers.
 - `src/text/` contains text sequence classification and display rules.
@@ -86,3 +93,5 @@
   multi-view/export behavior, schema scanning, library migration notice, and
   the raw/image workflows.
 - `tests/unit_tests.cpp` covers non-language runtime utilities.
+- `tests/visualize_tests.cpp` covers visualization range, schema wrapping,
+  BrecoLang decoding, and x/y/z extraction behavior.

@@ -436,7 +436,8 @@ private:
     QVector<ValueRef> elements(ValueRef ref) const {
         QVector<ValueRef> result;
         if (const DecodedValue* value = baseValue(ref)) {
-            if (value->kind != DecodedValueKind::Sequence ||
+            if ((value->kind != DecodedValueKind::Sequence &&
+                 value->kind != DecodedValueKind::Aggregate) ||
                 value->elements.first >
                     static_cast<quint32>(m_tree.valueRefs.size()) ||
                 value->elements.count >

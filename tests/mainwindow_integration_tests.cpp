@@ -4,9 +4,11 @@
 #include <QColor>
 #include <QComboBox>
 #include <QCompleter>
+#include <QCursor>
 #include <QDir>
 #include <QDialog>
 #include <QDialogButtonBox>
+#include <QDockWidget>
 #include <QEnterEvent>
 #include <QElapsedTimer>
 #include <QFile>
@@ -18,6 +20,7 @@
 #include <QLineEdit>
 #include <QListWidget>
 #include <QMessageBox>
+#include <QMainWindow>
 #include <QMenu>
 #include <QPixmap>
 #include <QPlainTextEdit>
@@ -26,9 +29,11 @@
 #include <QPushButton>
 #include <QRadioButton>
 #include <QSettings>
+#include <QSignalSpy>
 #include <QSize>
 #include <QSplitter>
 #include <QSpinBox>
+#include <QStandardItemModel>
 #include <QStatusBar>
 #include <QTableView>
 #include <QTableWidget>
@@ -65,7 +70,12 @@
 #include "panel/MainTabsPanel.h"
 #include "panel/ResultsTablePanel.h"
 #include "panel/ScanControlsPanel.h"
+#include "panel/VisualizePanel.h"
+#include "settings/AppSettings.h"
+#include "view/BitmapViewWidget.h"
+#include "view/Cartesian2DView.h"
 #include "view/TextViewWidget.h"
+#include "view/VisualizeBitmapCanvas.h"
 
 namespace {
 
@@ -96,17 +106,17 @@ public:
 class SettingsValueGuard {
 public:
     explicit SettingsValueGuard(QString key) : m_key(std::move(key)) {
-        QSettings settings(QStringLiteral("breco"), QStringLiteral("breco"));
-        m_existed = settings.contains(m_key);
-        m_value = settings.value(m_key);
+        const auto settings = breco::AppSettings::open();
+        m_existed = settings->contains(m_key);
+        m_value = settings->value(m_key);
     }
 
     ~SettingsValueGuard() {
-        QSettings settings(QStringLiteral("breco"), QStringLiteral("breco"));
+        const auto settings = breco::AppSettings::open();
         if (m_existed) {
-            settings.setValue(m_key, m_value);
+            settings->setValue(m_key, m_value);
         } else {
-            settings.remove(m_key);
+            settings->remove(m_key);
         }
     }
 
@@ -171,12 +181,20 @@ class MainWindowIntegrationTests : public QObject {
 
 private slots:
     void initTestCase();
+    void settingsAreIsolatedFromNativeStore();
     void lifecycleCardLogsAndResetsPerScan();
     void selectingResultRowUpdatesPreviewBuffers();
     void twoColumnCompositionAndDataViewToolbar();
-    void brecoLangPanelDecodesRealFileWithoutAutomaticExpandAll();
+    void visualizeProgramPersistsAndCanvasInteracts();
+    void cartesian2DStylesRender();
+    void brecoLangPanelDecodesRealFileAndExpandsRecords();
+    void brecoLangSelectorGroupsAndPreservesDecodeTargets();
+    void brecoLangRecordTargetDecodesAndScansCurrentFile();
+    void brecoLangInputsFollowActiveSourceAndViewSelection();
     void brecoDecodeWorkerOwnsSlowSourceAndCancellationStaysResponsive();
     void millionItemBrecoViewPaintsAndPagesExplicitly();
+    void nestedListsExpandFirstFiveItemsRecursively();
+    void inlineAggregateListsPageAsOneContainer();
     void variableSequenceModelPassesSuccessorContinuation();
     void referenceRowsExpandAliasesAndTerminateCycles();
     void navigatorLabelsAndDataViewEndianFollowSelection();
@@ -213,6 +231,28 @@ QByteArray makePngBytes() {
 
 void MainWindowIntegrationTests::initTestCase() {
     qputenv("QT_QPA_PLATFORM", QByteArray("offscreen"));
+}
+
+void MainWindowIntegrationTests::settingsAreIsolatedFromNativeStore() {
+    const auto isolated = breco::AppSettings::open();
+    QVERIFY2(isolated->format() == QSettings::IniFormat,
+             "Tests must use an isolated INI, not the user settings store");
+    const QString isolatedFile = QFileInfo(isolated->fileName()).absoluteFilePath();
+    QVERIFY2(isolatedFile.contains(QStringLiteral("breco_test_settings")),
+             qPrintable(isolatedFile));
+
+    QSettings native(QStringLiteral("breco"), QStringLiteral("breco"));
+    const QVariant nativePathBefore =
+        native.value(QStringLiteral("ui/rememberedSingleFilePath"));
+
+    const QString sentinel =
+        QStringLiteral("C:/breco-isolated-settings-sentinel.bin");
+    breco::AppSettings::setRememberedSingleFilePath(sentinel);
+    QCOMPARE(breco::AppSettings::rememberedSingleFilePath(), sentinel);
+
+    native.sync();
+    QCOMPARE(native.value(QStringLiteral("ui/rememberedSingleFilePath")),
+             nativePathBefore);
 }
 
 void MainWindowIntegrationTests::brecoLangRuleRunsThroughAsyncScanPipeline() {
@@ -407,14 +447,15 @@ void MainWindowIntegrationTests::selectingResultRowUpdatesPreviewBuffers() {
     QCOMPARE(window.m_activePreviewRow, 0);
     QVERIFY(!window.m_textHoverBuffer.data.isEmpty());
     QVERIFY(!window.m_bitmapHoverBuffer.data.isEmpty());
-    QVERIFY(window.m_sharedCenterOffset >= match.offset);
+    QCOMPARE(window.m_sharedCenterOffset, window.strideAlignedOffset(match.offset));
 }
 
 void MainWindowIntegrationTests::twoColumnCompositionAndDataViewToolbar() {
-    QSettings settings(QStringLiteral("breco"), QStringLiteral("breco"));
-    settings.remove(QStringLiteral("ui/dataViewImageMaxPixelsK"));
-    settings.remove(QStringLiteral("ui/dataViewImageMaxResults"));
-    settings.remove(QStringLiteral("ui/dataViewImageJobs"));
+    const auto settings = breco::AppSettings::open();
+    settings->remove(QStringLiteral("ui/dataViewImageMaxPixelsK"));
+    settings->remove(QStringLiteral("ui/dataViewImageMaxResults"));
+    settings->remove(QStringLiteral("ui/dataViewImageJobs"));
+    settings->remove(QStringLiteral("ui/visualizeModeIndex"));
 
     breco::MainWindow window;
     window.show();
@@ -429,26 +470,128 @@ void MainWindowIntegrationTests::twoColumnCompositionAndDataViewToolbar() {
     QVERIFY(window.m_dataViewByteAndBitmapPanel != nullptr);
     QVERIFY(window.m_dataViewImagePanel != nullptr);
     QVERIFY(window.m_brecoLangPanel != nullptr);
+    QVERIFY(window.m_visualizePanel != nullptr);
+    QVERIFY(window.m_visualizePanel->cartesian3DView() == nullptr);
     QTabWidget* tabs = window.m_mainTabsPanel->mainTabWidget();
-    QCOMPARE(tabs->count(), 4);
+    QCOMPARE(tabs->count(), 5);
     QCOMPARE(tabs->tabText(0), QStringLiteral("Scan"));
     QCOMPARE(tabs->tabText(1), QStringLiteral("Raw"));
     QCOMPARE(tabs->tabText(2), QStringLiteral("BrecoLang"));
-    QCOMPARE(tabs->tabText(3), QStringLiteral("Image"));
+    QCOMPARE(tabs->tabText(3), QStringLiteral("Visualize"));
+    QCOMPARE(tabs->tabText(4), QStringLiteral("Image"));
     QCOMPARE(tabs->indexOf(window.m_mainTabsPanel->rawDataTab()), 1);
     QCOMPARE(tabs->indexOf(window.m_mainTabsPanel->brecoLangTab()), 2);
-    QCOMPARE(tabs->indexOf(window.m_mainTabsPanel->imageDataTab()), 3);
+    QCOMPARE(tabs->indexOf(window.m_mainTabsPanel->visualizeTab()), 3);
+    QCOMPARE(tabs->indexOf(window.m_mainTabsPanel->imageDataTab()), 4);
     QVERIFY(window.m_rawDataViewShellPanel->bodyHost()->isAncestorOf(
         window.m_dataViewByteAndBitmapPanel));
     QVERIFY(window.m_mainTabsPanel->brecoLangHost()->isAncestorOf(
         window.m_brecoLangPanel));
+    QVERIFY(window.m_mainTabsPanel->visualizeHost()->isAncestorOf(
+        window.m_visualizePanel));
     QVERIFY(window.m_mainTabsPanel->imageDataHost()->isAncestorOf(
         window.m_dataViewImagePanel));
     QVERIFY(!window.m_rawDataViewShellPanel->bitmapModeComboBox()->isHidden());
     QVERIFY(!window.m_rawDataViewShellPanel->zoomInButton()->isHidden());
 
+    window.m_mainTabsPanel->activateTab(
+        window.m_mainTabsPanel->visualizeTab());
+    window.m_visualizePanel->setVisualizationMode(
+        breco::VisualizationMode::Cartesian2D);
+    QCoreApplication::processEvents();
+    QVERIFY(window.m_visualizePanel->findChild<QWidget*>(
+                QStringLiteral("schemaEditorRowWidget")) == nullptr);
+    QVERIFY(window.m_visualizePanel->findChild<QWidget*>(
+                QStringLiteral("cartesianStyleRowWidget")) == nullptr);
+    QVERIFY(window.m_visualizePanel->findChild<QWidget*>(
+                QStringLiteral("bitmapStyleRowWidget")) == nullptr);
+    window.m_visualizePanel->bitmapRadioButton()->setChecked(true);
+    QCoreApplication::processEvents();
+    auto* bitmapCanvas = window.m_visualizePanel->bitmapCanvas();
+    QVERIFY(bitmapCanvas != nullptr);
+    window.m_visualizePanel->setSchemaText(QStringLiteral(R"BRECO(
+record Bitmap { Color: { r: u8 g: u8 b: u8 } }
+)BRECO"));
+    window.m_visualizePanel->setData(QByteArray(60, '\x7f'), 0);
+    QCoreApplication::processEvents();
+    QVERIFY(!bitmapCanvas->hasPlot());
+    QCOMPARE(bitmapCanvas->logicalImageSize(), QSize(4, 5));
+    bitmapCanvas->setSequentialColumns(5);
+    QCOMPARE(bitmapCanvas->logicalImageSize(), QSize(5, 4));
+
+    QMainWindow* visualizeWorkspace =
+        window.m_visualizePanel->workspaceWindow();
+    QDockWidget* visualizeSchemaDock =
+        window.m_visualizePanel->schemaDockWidget();
+    QDockWidget* resultDock = window.m_visualizePanel->resultDockWidget();
+    QVERIFY(visualizeWorkspace != nullptr);
+    QVERIFY(visualizeSchemaDock != nullptr);
+    QVERIFY(resultDock != nullptr);
+    QVERIFY(!(visualizeWorkspace->windowFlags() & Qt::Window));
+    QCOMPARE(visualizeWorkspace->dockWidgetArea(visualizeSchemaDock),
+             Qt::LeftDockWidgetArea);
+    QCOMPARE(visualizeWorkspace->dockWidgetArea(resultDock),
+             Qt::LeftDockWidgetArea);
+    QTRY_VERIFY(window.m_visualizePanel->schemaEditor()->isVisible());
+    QVERIFY(visualizeSchemaDock->geometry().right() <
+            resultDock->geometry().left());
+    const int visualizeDockWidth =
+        visualizeSchemaDock->width() + resultDock->width();
+    QVERIFY(qAbs(visualizeSchemaDock->width() * 3 - visualizeDockWidth) <
+            visualizeDockWidth / 5);
+    QVERIFY(!(visualizeSchemaDock->features() &
+              QDockWidget::DockWidgetClosable));
+    QVERIFY(!(resultDock->features() & QDockWidget::DockWidgetClosable));
+    QVERIFY(resultDock->isVisible());
+    resultDock->setFloating(true);
+    QCoreApplication::processEvents();
+    QVERIFY(resultDock->isFloating());
+    QVERIFY(resultDock->features() & QDockWidget::DockWidgetClosable);
+    resultDock->close();
+    QCoreApplication::processEvents();
+    QVERIFY(!resultDock->isFloating());
+    QVERIFY(!resultDock->isHidden());
+    QVERIFY(!(resultDock->features() & QDockWidget::DockWidgetClosable));
+
+    window.m_mainTabsPanel->activateTab(
+        window.m_mainTabsPanel->brecoLangTab());
+    QCoreApplication::processEvents();
+
+    QMainWindow* brecoWorkspace =
+        window.m_brecoLangPanel->workspaceWindow();
+    QDockWidget* schemaDock =
+        window.m_brecoLangPanel->schemaDockWidget();
+    QDockWidget* decodeDock =
+        window.m_brecoLangPanel->decodeDockWidget();
+    QVERIFY(brecoWorkspace != nullptr);
+    QVERIFY(schemaDock != nullptr);
+    QVERIFY(decodeDock != nullptr);
+    QVERIFY(!(brecoWorkspace->windowFlags() & Qt::Window));
+    QCOMPARE(brecoWorkspace->dockWidgetArea(schemaDock),
+             Qt::LeftDockWidgetArea);
+    QCOMPARE(brecoWorkspace->dockWidgetArea(decodeDock),
+             Qt::LeftDockWidgetArea);
+    QTRY_VERIFY(decodeDock->isVisible());
+    QTRY_VERIFY(schemaDock->isVisible());
+    QTRY_VERIFY(window.m_brecoLangPanel->treeView()->isVisible());
+    QTRY_VERIFY(window.m_brecoLangPanel->schemaEditor()->isVisible());
+    QVERIFY(decodeDock->width() > 50);
+    QVERIFY(schemaDock->width() > 50);
+    for (QDockWidget* dock : {schemaDock, decodeDock}) {
+        dock->setFloating(true);
+        QCoreApplication::processEvents();
+        QVERIFY(dock->isFloating());
+        dock->close();
+        QCoreApplication::processEvents();
+        QVERIFY(!dock->isFloating());
+        QVERIFY(!dock->isHidden());
+        QVERIFY(brecoWorkspace->dockWidgetArea(dock) !=
+                Qt::NoDockWidgetArea);
+    }
+
     for (QWidget* page : {window.m_mainTabsPanel->rawDataTab(),
                           window.m_mainTabsPanel->brecoLangTab(),
+                          window.m_mainTabsPanel->visualizeTab(),
                           window.m_mainTabsPanel->imageDataTab()}) {
         QVERIFY(window.m_mainTabsPanel->detachTab(tabs->indexOf(page)));
         QVERIFY(window.m_mainTabsPanel->isTabDetached(page));
@@ -459,13 +602,16 @@ void MainWindowIntegrationTests::twoColumnCompositionAndDataViewToolbar() {
     QCoreApplication::processEvents();
     window.m_mainTabsPanel->detachedWindow(window.m_mainTabsPanel->rawDataTab())->close();
     QCoreApplication::processEvents();
+    window.m_mainTabsPanel->detachedWindow(window.m_mainTabsPanel->visualizeTab())->close();
+    QCoreApplication::processEvents();
     window.m_mainTabsPanel->detachedWindow(window.m_mainTabsPanel->brecoLangTab())->close();
     QCoreApplication::processEvents();
-    QCOMPARE(tabs->count(), 4);
+    QCOMPARE(tabs->count(), 5);
     QCOMPARE(tabs->tabText(0), QStringLiteral("Scan"));
     QCOMPARE(tabs->tabText(1), QStringLiteral("Raw"));
     QCOMPARE(tabs->tabText(2), QStringLiteral("BrecoLang"));
-    QCOMPARE(tabs->tabText(3), QStringLiteral("Image"));
+    QCOMPARE(tabs->tabText(3), QStringLiteral("Visualize"));
+    QCOMPARE(tabs->tabText(4), QStringLiteral("Image"));
 
     QCOMPARE(window.m_dataViewImagePanel->maxPixelsKSpinBox()->value(), 4096);
     QCOMPARE(window.m_dataViewImagePanel->maxResultsSpinBox()->value(), 5);
@@ -487,7 +633,236 @@ void MainWindowIntegrationTests::twoColumnCompositionAndDataViewToolbar() {
     QVERIFY(!window.m_rawDataViewShellPanel->zoomInButton()->isHidden());
 }
 
-void MainWindowIntegrationTests::brecoLangPanelDecodesRealFileWithoutAutomaticExpandAll() {
+void MainWindowIntegrationTests::visualizeProgramPersistsAndCanvasInteracts() {
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString programPath =
+        directory.filePath(QStringLiteral("Visualize.breco"));
+
+    breco::VisualizePanel panel;
+    panel.setProgramDirectory(directory.path());
+    panel.resize(640, 480);
+    panel.show();
+    QCoreApplication::processEvents();
+
+    QVERIFY(panel.schemaText().contains(QStringLiteral("record VisCfg")));
+    QVERIFY(panel.schemaEditor() != nullptr);
+    QVERIFY(panel.schemaEditor()->isVisible());
+    QVERIFY(!QFileInfo::exists(programPath));
+
+    const QString program = QStringLiteral(R"BRECO(
+record VisCfg {
+    computed NumBytesOnNoSelection: u32 = 64
+    computed Style: string = "dot"
+}
+record Cart2D {
+    Points: { y: u8 }
+}
+record Bitmap {
+    Color: { r: u8 }
+}
+)BRECO");
+    panel.schemaEditor()->setPlainText(program);
+    QTRY_VERIFY_WITH_TIMEOUT(QFileInfo::exists(programPath), 2000);
+    QTRY_COMPARE_WITH_TIMEOUT(panel.defaultWindowBytes(), 64ULL, 2000);
+    QFile stored(programPath);
+    QVERIFY(stored.open(QIODevice::ReadOnly));
+    QCOMPARE(QString::fromUtf8(stored.readAll()), program);
+    stored.close();
+
+    panel.setVisualizationMode(breco::VisualizationMode::Cartesian2D);
+    panel.setData(QByteArray::fromHex("102030"), 0, false, 4096);
+    QCOMPARE(panel.cartesian2DView()->style(),
+             breco::CartesianStyle::Dot);
+
+    panel.setVisualizationMode(breco::VisualizationMode::Bitmap);
+    panel.setData(QByteArray(256, '\x10'), 0, false, 4096);
+    QCoreApplication::processEvents();
+    auto* canvas = panel.bitmapCanvas();
+    QVERIFY(canvas != nullptr);
+    QVERIFY(!canvas->hasPlot());
+    QCOMPARE(canvas->bitsPerPixel(), 8);
+    QCOMPARE(canvas->logicalImageSize(), QSize(16, 16));
+    const QImage checkerboard = canvas->grab().toImage();
+    QCOMPARE(checkerboard.pixelColor(0, 0), QColor(0x99, 0x99, 0x99));
+    QCOMPARE(checkerboard.pixelColor(8, 0), QColor(0xcc, 0xcc, 0xcc));
+    canvas->setSequentialColumns(8);
+    QCOMPARE(canvas->logicalImageSize(), QSize(8, 32));
+
+    const QPointF edgeHover(
+        canvas->imageRect().right(), canvas->imageRect().center().y());
+    QMouseEvent edgeHoverMove(
+        QEvent::MouseMove, edgeHover,
+        canvas->mapToGlobal(edgeHover.toPoint()), Qt::NoButton, Qt::NoButton,
+        Qt::NoModifier);
+    QApplication::sendEvent(canvas, &edgeHoverMove);
+    QCOMPARE(canvas->cursor().shape(), Qt::SizeHorCursor);
+
+    const QPointF cornerHover = canvas->imageRect().bottomRight();
+    QMouseEvent cornerHoverMove(
+        QEvent::MouseMove, cornerHover,
+        canvas->mapToGlobal(cornerHover.toPoint()), Qt::NoButton,
+        Qt::NoButton, Qt::NoModifier);
+    QApplication::sendEvent(canvas, &cornerHoverMove);
+    QCOMPARE(canvas->cursor().shape(), Qt::SizeFDiagCursor);
+
+    const QRectF beforeResize = canvas->imageRect();
+    const QPointF resizeStart(beforeResize.right(), beforeResize.center().y());
+    QMouseEvent resizePress(
+        QEvent::MouseButtonPress, resizeStart,
+        canvas->mapToGlobal(resizeStart.toPoint()), Qt::LeftButton,
+        Qt::LeftButton, Qt::NoModifier);
+    QApplication::sendEvent(canvas, &resizePress);
+    const QPointF resizeEnd = resizeStart + QPointF(4.0, 0.0);
+    QMouseEvent resizeMove(
+        QEvent::MouseMove, resizeEnd,
+        canvas->mapToGlobal(resizeEnd.toPoint()), Qt::NoButton,
+        Qt::LeftButton, Qt::NoModifier);
+    QApplication::sendEvent(canvas, &resizeMove);
+    QMouseEvent resizeRelease(
+        QEvent::MouseButtonRelease, resizeEnd,
+        canvas->mapToGlobal(resizeEnd.toPoint()), Qt::LeftButton,
+        Qt::NoButton, Qt::NoModifier);
+    QApplication::sendEvent(canvas, &resizeRelease);
+    QCOMPARE(canvas->sequentialColumns(), 12);
+    QCOMPARE(canvas->logicalImageSize(), QSize(12, 22));
+
+    const QPointF oldOrigin = canvas->imageRect().topLeft();
+    const QPointF panStart = canvas->imageRect().center();
+    const QPointF panEnd = panStart + QPointF(12.0, 9.0);
+    QMouseEvent panPress(
+        QEvent::MouseButtonPress, panStart,
+        canvas->mapToGlobal(panStart.toPoint()), Qt::MiddleButton,
+        Qt::MiddleButton, Qt::NoModifier);
+    QApplication::sendEvent(canvas, &panPress);
+    QMouseEvent panMove(
+        QEvent::MouseMove, panEnd, canvas->mapToGlobal(panEnd.toPoint()),
+        Qt::NoButton, Qt::MiddleButton, Qt::NoModifier);
+    QApplication::sendEvent(canvas, &panMove);
+    QMouseEvent panRelease(
+        QEvent::MouseButtonRelease, panEnd,
+        canvas->mapToGlobal(panEnd.toPoint()), Qt::MiddleButton,
+        Qt::NoButton, Qt::NoModifier);
+    QApplication::sendEvent(canvas, &panRelease);
+    QCOMPARE(canvas->imageRect().topLeft(), oldOrigin + QPointF(12.0, 9.0));
+
+    const double oldZoom = canvas->zoom();
+    const QPointF wheelPosition = canvas->imageRect().center();
+    QWheelEvent wheel(
+        wheelPosition, canvas->mapToGlobal(wheelPosition.toPoint()), {},
+        QPoint(0, 120), Qt::NoButton, Qt::NoModifier,
+        Qt::ScrollUpdate, false);
+    QApplication::sendEvent(canvas, &wheel);
+    QVERIFY(canvas->zoom() > oldZoom);
+
+    const double zoomAfterWheel = canvas->zoom();
+    const QSize packedSize = canvas->logicalImageSize();
+    panel.setVisualizationMode(breco::VisualizationMode::Cartesian2D);
+    QCoreApplication::processEvents();
+    panel.setVisualizationMode(breco::VisualizationMode::Bitmap);
+    QCoreApplication::processEvents();
+    QCOMPARE(canvas->zoom(), zoomAfterWheel);
+    QCOMPARE(canvas->logicalImageSize(), packedSize);
+
+    QSignalSpy windowSpy(&panel, &breco::VisualizePanel::inputWindowRequested);
+    const QRectF beforeCorner = canvas->imageRect();
+    const QPointF cornerStart = beforeCorner.bottomRight();
+    QMouseEvent cornerPress(
+        QEvent::MouseButtonPress, cornerStart,
+        canvas->mapToGlobal(cornerStart.toPoint()), Qt::LeftButton,
+        Qt::LeftButton, Qt::NoModifier);
+    QApplication::sendEvent(canvas, &cornerPress);
+    const QPointF cornerEnd = cornerStart + QPointF(-20.0, -20.0);
+    QMouseEvent cornerMove(
+        QEvent::MouseMove, cornerEnd,
+        canvas->mapToGlobal(cornerEnd.toPoint()), Qt::NoButton,
+        Qt::LeftButton, Qt::NoModifier);
+    QApplication::sendEvent(canvas, &cornerMove);
+    QMouseEvent cornerRelease(
+        QEvent::MouseButtonRelease, cornerEnd,
+        canvas->mapToGlobal(cornerEnd.toPoint()), Qt::LeftButton,
+        Qt::NoButton, Qt::NoModifier);
+    QApplication::sendEvent(canvas, &cornerRelease);
+    QVERIFY(panel.statusLabel()->text().contains(QStringLiteral("bytes")));
+    QCOMPARE(windowSpy.count(), 0);
+
+    const QRectF afterShrink = canvas->imageRect();
+    const QPointF expandStart = afterShrink.bottomRight();
+    QMouseEvent expandHover(
+        QEvent::MouseMove, expandStart,
+        canvas->mapToGlobal(expandStart.toPoint()), Qt::NoButton,
+        Qt::NoButton, Qt::NoModifier);
+    QApplication::sendEvent(canvas, &expandHover);
+    QCOMPARE(canvas->cursor().shape(), Qt::SizeFDiagCursor);
+    QMouseEvent expandPress(
+        QEvent::MouseButtonPress, expandStart,
+        canvas->mapToGlobal(expandStart.toPoint()), Qt::LeftButton,
+        Qt::LeftButton, Qt::NoModifier);
+    QApplication::sendEvent(canvas, &expandPress);
+    const QPointF expandEnd = expandStart + QPointF(40.0, 40.0);
+    QMouseEvent expandMove(
+        QEvent::MouseMove, expandEnd,
+        canvas->mapToGlobal(expandEnd.toPoint()), Qt::NoButton,
+        Qt::LeftButton, Qt::NoModifier);
+    QApplication::sendEvent(canvas, &expandMove);
+    QMouseEvent expandRelease(
+        QEvent::MouseButtonRelease, expandEnd,
+        canvas->mapToGlobal(expandEnd.toPoint()), Qt::LeftButton,
+        Qt::NoButton, Qt::NoModifier);
+    QApplication::sendEvent(canvas, &expandRelease);
+    QVERIFY(windowSpy.count() >= 1);
+    QCOMPARE(windowSpy.last().at(0).toULongLong(), 0ULL);
+    QVERIFY(windowSpy.last().at(1).toULongLong() > 0ULL);
+
+    panel.setSchemaText(breco::builtinVisualizeProgramSource());
+    panel.setData(QByteArray::fromHex("102030400506"), 0);
+    QCoreApplication::processEvents();
+    QVERIFY(canvas->hasPlot());
+    QCOMPARE(canvas->logicalImageSize(), QSize(6, 7));
+    const qsizetype scatterColumns = canvas->sequentialColumns();
+    canvas->setSequentialColumns(1);
+    QCOMPARE(canvas->sequentialColumns(), scatterColumns);
+    canvas->setVisualization(
+        {{-2, -3, QColor(Qt::white)}, {1, 2, QColor(Qt::white)}}, {}, 8,
+        true);
+    QCOMPARE(canvas->logicalImageSize(), QSize(4, 6));
+
+    const QSize lastSuccessfulSize = canvas->logicalImageSize();
+    panel.setSchemaText(QStringLiteral("language breco 0.1\nrecord {"));
+    QCOMPARE(canvas->logicalImageSize(), lastSuccessfulSize);
+    QVERIFY(!panel.statusLabel()->text().isEmpty());
+
+    panel.setSchemaText({});
+    panel.flushProgram();
+    QVERIFY(!QFileInfo::exists(programPath));
+    QTRY_COMPARE_WITH_TIMEOUT(panel.defaultWindowBytes(), 1024ULL, 2000);
+}
+
+void MainWindowIntegrationTests::cartesian2DStylesRender() {
+    breco::Cartesian2DView view;
+    view.resize(320, 240);
+    view.show();
+    view.setPoints({
+        {-1.0, -1.0, 0.0, QColor(30, 144, 255)},
+        {0.0, 1.0, 0.0, QColor(30, 144, 255)},
+        {1.0, -1.0, 0.0, QColor(30, 144, 255)},
+    });
+
+    view.setStyle(breco::CartesianStyle::Area);
+    const QImage area = view.grab().toImage();
+    view.setStyle(breco::CartesianStyle::Skin);
+    const QImage skin = view.grab().toImage();
+    QCOMPARE(area, skin);
+
+    view.setPoints({{1.0, 1.0, 0.0, QColor(30, 144, 255)}});
+    view.setStyle(breco::CartesianStyle::Line);
+    const QImage line = view.grab().toImage();
+    view.setStyle(breco::CartesianStyle::Bar);
+    const QImage bar = view.grab().toImage();
+    QVERIFY(line != bar);
+}
+
+void MainWindowIntegrationTests::brecoLangPanelDecodesRealFileAndExpandsRecords() {
     QTemporaryDir directory;
     QVERIFY(directory.isValid());
     const QString schemaPath = directory.filePath(QStringLiteral("packet.breco"));
@@ -512,9 +887,14 @@ outform Summary(root: Inspect) text { emit "${root.packet.marker}" }
     input.close();
 
     breco::MainWindow window;
+    window.show();
+    QVERIFY(window.selectSingleFileSource(inputPath));
+    window.m_mainTabsPanel->activateTab(
+        window.m_mainTabsPanel->brecoLangTab());
+    QCoreApplication::processEvents();
     QVERIFY(window.m_brecoLangPanel != nullptr);
     QVERIFY(window.m_brecoLangPanel->loadSchemaFile(schemaPath));
-    QVERIFY(window.m_brecoLangPanel->setInputPath(u"data", inputPath));
+    QVERIFY(window.m_brecoLangPanel->inputTable()->isHidden());
     QVERIFY(window.m_brecoLangPanel->selectEntry(u"Inspect"));
     QVERIFY2(window.m_brecoLangPanel->decodeSelected(),
              qPrintable(window.m_brecoLangPanel->statusText()));
@@ -527,14 +907,36 @@ outform Summary(root: Inspect) text { emit "${root.packet.marker}" }
     QVERIFY(view->isExpanded(root));
     const QModelIndex packet = model->index(0, 0, root);
     QVERIFY(packet.isValid());
-    QVERIFY(!view->isExpanded(packet));
+    QVERIFY(view->isExpanded(packet));
     window.m_brecoLangPanel->expandAllButton()->click();
     QVERIFY(view->isExpanded(packet));
     QVERIFY(window.m_brecoLangPanel->statusText().contains(
         QStringLiteral("Resolved 5 bytes")));
 
-    QVERIFY(window.m_brecoLangPanel->pinCurrentView());
+    QTRY_COMPARE_WITH_TIMEOUT(model->rowCount(packet), 2, 5000);
+    const QModelIndex marker = model->index(0, 0, packet);
+    QVERIFY(marker.isValid());
+    QVERIFY(QMetaObject::invokeMethod(
+        view, "clicked", Qt::DirectConnection,
+        Q_ARG(QModelIndex, marker)));
+    QTRY_COMPARE_WITH_TIMEOUT(window.m_brecoLangPanel->viewTabs()->count(), 2,
+                              5000);
     QCOMPARE(window.m_brecoLangPanel->viewTabs()->count(), 2);
+    QCOMPARE(window.m_brecoLangPanel->viewTabs()->currentIndex(), 1);
+    QTRY_VERIFY_WITH_TIMEOUT(window.m_activeTextSelectionRange.has_value(),
+                             5000);
+    QCOMPARE(window.m_activeTextSelectionRange->first, 0ULL);
+    QCOMPARE(window.m_activeTextSelectionRange->second, 1ULL);
+    QCOMPARE(window.m_brecoLangPanel->treeModel()
+                 ->data(window.m_brecoLangPanel->treeView()->currentIndex())
+                 .toString(),
+             QStringLiteral("marker"));
+
+    window.onTextByteClicked(1);
+    QCOMPARE(window.m_brecoLangPanel->viewTabs()->currentIndex(), 0);
+    QCOMPARE(window.m_brecoLangPanel->decodeOffset(), 1ULL);
+    window.m_brecoLangPanel->viewTabs()->setCurrentIndex(1);
+
     QBuffer json;
     QVERIFY(json.open(QIODevice::WriteOnly));
     QString error;
@@ -542,6 +944,8 @@ outform Summary(root: Inspect) text { emit "${root.packet.marker}" }
              qPrintable(error));
     QVERIFY(json.data().contains("\"marker\":126"));
 
+    window.m_brecoLangPanel->treeView()->setCurrentIndex(
+        window.m_brecoLangPanel->treeModel()->index(0, 0));
     QBuffer binary;
     QVERIFY(binary.open(QIODevice::WriteOnly));
     QVERIFY2(window.m_brecoLangPanel->exportBinary(&binary, &error),
@@ -554,6 +958,292 @@ outform Summary(root: Inspect) text { emit "${root.packet.marker}" }
                                                      &error),
              qPrintable(error));
     QCOMPARE(outform.data(), QByteArray("126"));
+}
+
+void MainWindowIntegrationTests::brecoLangSelectorGroupsAndPreservesDecodeTargets() {
+    breco::MainWindow window;
+    const QString source = QString::fromUtf8(R"BRECO(
+record Zulu { value: u8 }
+record Parameterized(seed: u8) { computed value: u8 = seed }
+record Alpha {
+    Nested: { value: u8 }
+}
+entry ZuluEntry from data { value: u8 }
+entry AlphaEntry from data { value: u8 }
+default entry ZuluEntry
+)BRECO");
+    QVERIFY(window.m_brecoLangPanel->loadSchemaText(source));
+
+    QComboBox* combo = window.m_brecoLangPanel->entryComboBox();
+    auto* model = qobject_cast<QStandardItemModel*>(combo->model());
+    QVERIFY(model != nullptr);
+    QCOMPARE(combo->count(), 7);
+    QCOMPARE(combo->itemText(0), QStringLiteral("-- Entries --"));
+    QCOMPARE(combo->itemText(1), QStringLiteral("AlphaEntry"));
+    QCOMPARE(combo->itemText(2), QStringLiteral("ZuluEntry"));
+    QCOMPARE(combo->itemText(3), QStringLiteral("-- Records --"));
+    QCOMPARE(combo->itemText(4), QStringLiteral("Alpha"));
+    QCOMPARE(combo->itemText(5), QStringLiteral("Zulu"));
+    QVERIFY(combo->itemText(6).startsWith(
+        QStringLiteral("$anon_record_Alpha.Nested[")));
+    QVERIFY(!(model->item(0)->flags() & Qt::ItemIsEnabled));
+    QVERIFY(!(model->item(3)->flags() & Qt::ItemIsEnabled));
+    QCOMPARE(combo->itemData(1, Qt::UserRole).toInt(),
+             static_cast<int>(breco::lang::DecodeTargetKind::Entry));
+    QCOMPARE(combo->itemData(4, Qt::UserRole).toInt(),
+             static_cast<int>(breco::lang::DecodeTargetKind::Record));
+    QCOMPARE(combo->findText(QStringLiteral("Parameterized")), -1);
+    QCOMPARE(combo->currentText(), QStringLiteral("ZuluEntry"));
+
+    combo->setCurrentIndex(4);
+    QCOMPARE(combo->currentText(), QStringLiteral("Alpha"));
+    const auto beforeSuccessfulRecompile =
+        window.m_brecoLangPanel->program();
+    window.m_brecoLangPanel->schemaEditor()->setPlainText(
+        source + QStringLiteral("\n// successful recompile\n"));
+    QTRY_VERIFY_WITH_TIMEOUT(
+        window.m_brecoLangPanel->program() != beforeSuccessfulRecompile,
+        5000);
+    QTRY_COMPARE_WITH_TIMEOUT(combo->currentText(), QStringLiteral("Alpha"),
+                              5000);
+
+    window.m_brecoLangPanel->schemaEditor()->setPlainText(
+        QStringLiteral("record"));
+    QTRY_VERIFY_WITH_TIMEOUT(window.m_brecoLangPanel->program() == nullptr,
+                             5000);
+    QCOMPARE(combo->count(), 0);
+    window.m_brecoLangPanel->schemaEditor()->setPlainText(source);
+    QTRY_VERIFY_WITH_TIMEOUT(window.m_brecoLangPanel->program() != nullptr,
+                             5000);
+    QTRY_COMPARE_WITH_TIMEOUT(combo->currentText(), QStringLiteral("Alpha"),
+                              5000);
+
+    QVERIFY(window.m_brecoLangPanel->loadSchemaText(source));
+    QCOMPARE(combo->currentText(), QStringLiteral("ZuluEntry"));
+
+    combo->setCurrentIndex(combo->findText(QStringLiteral("Alpha")));
+    const auto beforeRemovedSelection =
+        window.m_brecoLangPanel->program();
+    window.m_brecoLangPanel->schemaEditor()->setPlainText(
+        QString::fromUtf8(R"BRECO(
+entry ZuluEntry from data { value: u8 }
+entry AlphaEntry from data { value: u8 }
+default entry ZuluEntry
+)BRECO"));
+    QTRY_VERIFY_WITH_TIMEOUT(
+        window.m_brecoLangPanel->program() != beforeRemovedSelection, 5000);
+    QTRY_COMPARE_WITH_TIMEOUT(combo->currentIndex(), -1, 5000);
+
+    const QString multiInputSource = QString::fromUtf8(R"BRECO(
+inputs {
+    input primary { default }
+    input auxiliary { }
+}
+entry Inspect from primary {
+    value: u8
+    external: u8 from auxiliary at 0
+}
+default entry Inspect
+)BRECO");
+    QVERIFY(window.m_brecoLangPanel->loadSchemaText(multiInputSource));
+    QVERIFY(window.m_brecoLangPanel->setInputPath(
+        u"primary", QStringLiteral("primary-preserved.bin")));
+    QVERIFY(window.m_brecoLangPanel->setInputPath(
+        u"auxiliary", QStringLiteral("auxiliary-preserved.bin")));
+    const auto inputPathAt = [&window](int row) {
+        auto* edit = qobject_cast<QLineEdit*>(
+            window.m_brecoLangPanel->inputTable()->cellWidget(row, 2));
+        return edit != nullptr ? edit->text() : QString();
+    };
+    const auto beforeInputRecompile = window.m_brecoLangPanel->program();
+    window.m_brecoLangPanel->schemaEditor()->setPlainText(
+        multiInputSource + QStringLiteral("\n// preserve bindings\n"));
+    QTRY_VERIFY_WITH_TIMEOUT(
+        window.m_brecoLangPanel->program() != beforeInputRecompile, 5000);
+    QCOMPARE(inputPathAt(0), QStringLiteral("primary-preserved.bin"));
+    QCOMPARE(inputPathAt(1), QStringLiteral("auxiliary-preserved.bin"));
+    window.m_brecoLangPanel->schemaEditor()->setPlainText(
+        QStringLiteral("entry"));
+    QTRY_VERIFY_WITH_TIMEOUT(window.m_brecoLangPanel->program() == nullptr,
+                             5000);
+    window.m_brecoLangPanel->schemaEditor()->setPlainText(multiInputSource);
+    QTRY_VERIFY_WITH_TIMEOUT(window.m_brecoLangPanel->program() != nullptr,
+                             5000);
+    QCOMPARE(inputPathAt(0), QStringLiteral("primary-preserved.bin"));
+    QCOMPARE(inputPathAt(1), QStringLiteral("auxiliary-preserved.bin"));
+
+    QVERIFY(window.m_brecoLangPanel->loadSchemaText(
+        QStringLiteral("record Only { value: u8 }")));
+    QCOMPARE(combo->count(), 2);
+    QCOMPARE(combo->itemText(0), QStringLiteral("-- Entries --"));
+    QCOMPARE(combo->itemText(1), QStringLiteral("Only"));
+    QCOMPARE(combo->currentText(), QStringLiteral("Only"));
+
+    QVERIFY(window.m_brecoLangPanel->loadSchemaText(QString()));
+    QVERIFY(window.m_brecoLangPanel->program() != nullptr);
+    QCOMPARE(combo->count(), 0);
+    QVERIFY(!window.m_brecoLangPanel->decodeSelected());
+}
+
+void MainWindowIntegrationTests::brecoLangRecordTargetDecodesAndScansCurrentFile() {
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString inputPath =
+        directory.filePath(QStringLiteral("record-target.bin"));
+    QFile input(inputPath);
+    QVERIFY(input.open(QIODevice::WriteOnly));
+    QCOMPARE(input.write(QByteArray::fromHex("0042004200")), 5LL);
+    input.close();
+
+    breco::MainWindow window;
+    window.show();
+    QVERIFY(window.selectSingleFileSource(inputPath));
+    QVERIFY(window.m_brecoLangPanel->loadSchemaText(QString::fromUtf8(R"BRECO(
+record Container { Nested: { value: u8 } }
+record Other { value: u8 }
+record Hit {
+    identify { magic: u8 match magic == 0x42 else "not a hit" }
+    commit
+}
+outform Magic(root: Hit) text { emit "${root.magic}" }
+)BRECO")));
+
+    QComboBox* combo = window.m_brecoLangPanel->entryComboBox();
+    QCOMPARE(combo->currentIndex(), -1);
+    int anonymousIndex = -1;
+    for (int index = 0; index < combo->count(); ++index) {
+        if (combo->itemText(index).startsWith(
+                QStringLiteral("$anon_record_Container.Nested["))) {
+            anonymousIndex = index;
+            break;
+        }
+    }
+    QVERIFY(anonymousIndex >= 0);
+    combo->setCurrentIndex(anonymousIndex);
+    window.m_brecoLangPanel->setDecodeOffset(1);
+    QVERIFY(window.m_brecoLangPanel->decodeSelected());
+    QTRY_VERIFY_WITH_TIMEOUT(
+        window.m_brecoLangPanel->tree() != nullptr &&
+            window.m_brecoLangPanel->tree()->name(
+                window.m_brecoLangPanel->tree()->nodes.first().name) ==
+                combo->itemText(anonymousIndex),
+        5000);
+
+    const int hitIndex = combo->findText(QStringLiteral("Hit"));
+    QVERIFY(hitIndex >= 0);
+    combo->setCurrentIndex(hitIndex);
+    window.m_brecoLangPanel->setDecodeOffset(1);
+    QVERIFY(window.m_brecoLangPanel->decodeSelected());
+    QTRY_VERIFY_WITH_TIMEOUT(
+        window.m_brecoLangPanel->tree() != nullptr &&
+            window.m_brecoLangPanel->tree()->name(
+                window.m_brecoLangPanel->tree()->nodes.first().name) ==
+                QStringLiteral("Hit"),
+        5000);
+    const auto tree = window.m_brecoLangPanel->tree();
+    QVERIFY(tree != nullptr);
+    QCOMPARE(tree->nodes.first().kind, breco::lang::DecodedNodeKind::Entry);
+    QCOMPARE(tree->name(tree->nodes.first().name), QStringLiteral("Hit"));
+
+    QBuffer json;
+    QVERIFY(json.open(QIODevice::WriteOnly));
+    QString error;
+    QVERIFY2(window.m_brecoLangPanel->exportJson(&json, &error),
+             qPrintable(error));
+    QVERIFY(json.data().contains("\"magic\":66"));
+    QBuffer binary;
+    QVERIFY(binary.open(QIODevice::WriteOnly));
+    QVERIFY2(window.m_brecoLangPanel->exportBinary(&binary, &error),
+             qPrintable(error));
+    QCOMPARE(binary.data(), QByteArray::fromHex("42"));
+    QBuffer outform;
+    QVERIFY(outform.open(QIODevice::WriteOnly));
+    QVERIFY2(window.m_brecoLangPanel->renderOutform(u"Magic", &outform, &error),
+             qPrintable(error));
+    QCOMPARE(outform.data(), QByteArray("66"));
+    QCOMPARE(window.m_brecoLangPanel->viewTabs()->count(), 1);
+    QVERIFY(window.m_brecoLangPanel->pinCurrentView());
+    QCOMPARE(window.m_brecoLangPanel->viewTabs()->count(), 2);
+
+    const auto plan = window.m_brecoLangPanel->probeScanPlan(&error);
+    QVERIFY2(plan.has_value(), qPrintable(error));
+    QCOMPARE(plan->entryName, QStringLiteral("Hit"));
+    QCOMPARE(plan->primaryInput, 0U);
+    QCOMPARE(plan->program->entries.size(), 1);
+
+    window.m_mainTabsPanel->activateTab(
+        window.m_mainTabsPanel->brecoLangTab());
+    window.m_brecoLangPanel->scanButton()->click();
+    QVERIFY(window.m_scanController.isRunning());
+    QTRY_VERIFY_WITH_TIMEOUT(!window.m_scanController.isRunning(), 10000);
+    QCOMPARE(window.m_resultModel.rowCount(), 3);
+    QCOMPARE(window.m_resultModel.matchAt(1)->offset, 1ULL);
+    QCOMPARE(window.m_resultModel.matchAt(2)->offset, 3ULL);
+}
+
+void MainWindowIntegrationTests::brecoLangInputsFollowActiveSourceAndViewSelection() {
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString primaryPath =
+        directory.filePath(QStringLiteral("primary.bin"));
+    const QString auxiliaryPath =
+        directory.filePath(QStringLiteral("auxiliary.bin"));
+    for (const QString& path : {primaryPath, auxiliaryPath}) {
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        QCOMPARE(file.write(QByteArray(4, '\x2a')), 4LL);
+    }
+
+    breco::MainWindow window;
+    window.show();
+    QVERIFY(window.selectSingleFileSource(primaryPath));
+    window.m_mainTabsPanel->activateTab(
+        window.m_mainTabsPanel->brecoLangTab());
+    QVERIFY(window.m_brecoLangPanel->loadSchemaText(QString::fromUtf8(R"BRECO(
+language breco 0.1
+inputs { input primary { default } input auxiliary { } }
+entry Inspect from primary {
+    first: u8
+    second: u8 from auxiliary at 0
+}
+default entry Inspect
+)BRECO")));
+
+    QTableWidget* table = window.m_brecoLangPanel->inputTable();
+    QVERIFY(!table->isHidden());
+    QCOMPARE(table->columnCount(), 3);
+    QCOMPARE(table->rowCount(), 2);
+    QCOMPARE(table->horizontalHeaderItem(0)->text(), QStringLiteral("View"));
+    QCOMPARE(table->item(0, 1)->text(), QStringLiteral("primary"));
+    QCOMPARE(table->item(1, 1)->text(), QStringLiteral("auxiliary"));
+    auto* primaryEdit =
+        qobject_cast<QLineEdit*>(table->cellWidget(0, 2));
+    auto* auxiliaryEdit =
+        qobject_cast<QLineEdit*>(table->cellWidget(1, 2));
+    QVERIFY(primaryEdit != nullptr);
+    QVERIFY(auxiliaryEdit != nullptr);
+    QCOMPARE(primaryEdit->text(), primaryPath);
+    auxiliaryEdit->setText(auxiliaryPath);
+
+    auto* primaryRadio =
+        table->cellWidget(0, 0)->findChild<QRadioButton*>();
+    auto* auxiliaryRadio =
+        table->cellWidget(1, 0)->findChild<QRadioButton*>();
+    QVERIFY(primaryRadio != nullptr);
+    QVERIFY(auxiliaryRadio != nullptr);
+    QVERIFY(primaryRadio->isChecked());
+    QTest::mouseClick(auxiliaryRadio, Qt::LeftButton);
+    QTRY_VERIFY_WITH_TIMEOUT(auxiliaryRadio->isChecked(), 5000);
+    QTRY_COMPARE_WITH_TIMEOUT(window.m_sourceFiles.size(), 1, 5000);
+    QCOMPARE(QFileInfo(window.m_sourceFiles.first()).absoluteFilePath(),
+             QFileInfo(auxiliaryPath).absoluteFilePath());
+
+    const auto buttons =
+        window.m_brecoLangPanel->findChildren<QPushButton*>();
+    for (const QPushButton* button : buttons) {
+        QVERIFY(!button->text().contains(
+            QStringLiteral("Bind selected input")));
+    }
 }
 
 void MainWindowIntegrationTests::brecoDecodeWorkerOwnsSlowSourceAndCancellationStaysResponsive() {
@@ -670,24 +1360,24 @@ default entry Run
     QTRY_VERIFY_WITH_TIMEOUT(
         model->rowCount() == 1 &&
             model->rowCount(model->index(0, 0)) == 1 &&
-            model->rowCount(model->index(0, 0, model->index(0, 0))) == 65,
+            model->rowCount(model->index(0, 0, model->index(0, 0))) == 6,
         5000);
     QVERIFY(firstEventTurnPainted);
     const QModelIndex root = model->index(0, 0);
     const QModelIndex sequence = model->index(0, 0, root);
-    QCOMPARE(model->rowCount(sequence), 65);
-    const QModelIndex footer = model->index(64, 0, sequence);
+    QCOMPARE(model->rowCount(sequence), 6);
+    const QModelIndex footer = model->index(5, 0, sequence);
     QVERIFY(model->isContinuationRow(footer));
     QVERIFY(model->data(footer).toString().contains(
-        QStringLiteral("Show next 128 items")));
+        QStringLiteral("Show next 64 items")));
 
     const QPersistentModelIndex firstItem(model->index(0, 0, sequence));
     QVERIFY(model->requestMore(footer));
-    QTRY_COMPARE_WITH_TIMEOUT(model->rowCount(sequence), 193, 5000);
+    QTRY_COMPARE_WITH_TIMEOUT(model->rowCount(sequence), 70, 5000);
     QVERIFY(firstItem.isValid());
-    const QModelIndex nextFooter = model->index(192, 0, sequence);
+    const QModelIndex nextFooter = model->index(69, 0, sequence);
     QVERIFY(model->data(nextFooter).toString().contains(
-        QStringLiteral("Show next 384 items")));
+        QStringLiteral("Show next 138 items")));
     QVERIFY(window.m_brecoLangPanel->statusText().contains(
         QStringLiteral("Resolved 1000000 bytes")));
 }
@@ -728,8 +1418,8 @@ default entry Run
         5000);
     const QModelIndex root = model->index(0, 0);
     const QModelIndex sequence = model->index(0, 0, root);
-    QTRY_COMPARE_WITH_TIMEOUT(model->rowCount(sequence), 65, 5000);
-    const QModelIndex footer = model->index(64, 0, sequence);
+    QTRY_COMPARE_WITH_TIMEOUT(model->rowCount(sequence), 6, 5000);
+    const QModelIndex footer = model->index(5, 0, sequence);
     QVERIFY(model->isContinuationRow(footer));
 
     breco::lang::SequenceWindow outgoing;
@@ -739,10 +1429,10 @@ default entry Run
             });
     QVERIFY(model->requestMore(footer));
     QVERIFY(outgoing.successor.has_value());
-    QCOMPARE(outgoing.successor->nextItem, 64ULL);
-    QCOMPARE(outgoing.firstItem, 64ULL);
-    QCOMPARE(outgoing.itemCount, 66ULL);
-    QTRY_COMPARE_WITH_TIMEOUT(model->rowCount(sequence), 130, 5000);
+    QCOMPARE(outgoing.successor->nextItem, 5ULL);
+    QCOMPARE(outgoing.firstItem, 5ULL);
+    QCOMPARE(outgoing.itemCount, 64ULL);
+    QTRY_COMPARE_WITH_TIMEOUT(model->rowCount(sequence), 70, 5000);
 }
 
 void MainWindowIntegrationTests::referenceRowsExpandAliasesAndTerminateCycles() {
@@ -752,8 +1442,9 @@ void MainWindowIntegrationTests::referenceRowsExpandAliasesAndTerminateCycles() 
         directory.filePath(QStringLiteral("references.bin"));
     QFile input(inputPath);
     QVERIFY(input.open(QIODevice::WriteOnly));
-    QByteArray bytes(6, '\0');
+    QByteArray bytes(76, '\0');
     bytes[0] = '\x02';
+    bytes[1] = '\x06';
     bytes[2] = static_cast<char>(0xa1);
     bytes[3] = '\x04';
     bytes[4] = static_cast<char>(0xb2);
@@ -775,8 +1466,12 @@ record Node {
         key next_offset
         follow
 }
+record List {
+    items: repeat 70 { value: u8 }
+}
 entry Run from data {
     first_offset: u8
+    list_offset: u8
     first: ref Node
         from data at root_offset(first_offset)
         within bytes(2)
@@ -787,6 +1482,11 @@ entry Run from data {
         within bytes(2)
         key first_offset
         follow
+    list: ref List
+        from data at root_offset(list_offset)
+        within bytes(70)
+        key list_offset
+        follow
 }
 default entry Run
 )BRECO")));
@@ -795,44 +1495,181 @@ default entry Run
 
     breco::lang::DecodedTreeModel* model =
         window.m_brecoLangPanel->treeModel();
+    QTreeView* view = window.m_brecoLangPanel->treeView();
     QTRY_VERIFY_WITH_TIMEOUT(model->rowCount() == 1, 5000);
     const QModelIndex root = model->index(0, 0);
-    QTRY_COMPARE_WITH_TIMEOUT(model->rowCount(root), 3, 5000);
-    const QModelIndex first = model->index(1, 0, root);
-    const QModelIndex alias = model->index(2, 0, root);
+    QTRY_COMPARE_WITH_TIMEOUT(model->rowCount(root), 5, 5000);
+    const QPersistentModelIndex persistentRoot(root);
+    const QPersistentModelIndex first(model->index(2, 0, root));
+    const QPersistentModelIndex alias(model->index(3, 0, root));
+    const QPersistentModelIndex list(model->index(4, 0, root));
     QVERIFY(model->isReferenceRow(first));
     QVERIFY(model->isReferenceRow(alias));
-    QCOMPARE(model->rowCount(first), 0);
-    QCOMPARE(model->rowCount(alias), 0);
-    QVERIFY(model->canFetchMore(first));
+    QVERIFY(model->isReferenceRow(list));
+    QVERIFY(view->isExpanded(persistentRoot));
 
-    model->fetchMore(first);
+    QSignalSpy modelResets(model, &QAbstractItemModel::modelReset);
     QTRY_COMPARE_WITH_TIMEOUT(model->rowCount(first), 1, 5000);
+    QTRY_COMPARE_WITH_TIMEOUT(model->rowCount(alias), 1, 5000);
+    QTRY_COMPARE_WITH_TIMEOUT(model->rowCount(list), 1, 5000);
+    QCOMPARE(modelResets.count(), 0);
+    QVERIFY(persistentRoot.isValid());
+    QVERIFY(view->isExpanded(first));
+    QVERIFY(view->isExpanded(alias));
+    QVERIFY(view->isExpanded(list));
+
     const QModelIndex firstTarget = model->index(0, 0, first);
-    QCOMPARE(model->parent(firstTarget), first);
+    QCOMPARE(model->parent(firstTarget), QModelIndex(first));
+    QVERIFY(view->isExpanded(firstTarget));
     QTRY_COMPARE_WITH_TIMEOUT(model->rowCount(firstTarget), 3, 5000);
     const QModelIndex firstNext = model->index(2, 0, firstTarget);
     QVERIFY(model->isReferenceRow(firstNext));
-    QVERIFY(model->canFetchMore(firstNext));
 
-    model->fetchMore(alias);
-    QTRY_COMPARE_WITH_TIMEOUT(model->rowCount(alias), 1, 5000);
     const QModelIndex aliasTarget = model->index(0, 0, alias);
-    QCOMPARE(model->parent(aliasTarget), alias);
+    QCOMPARE(model->parent(aliasTarget), QModelIndex(alias));
+    QVERIFY(view->isExpanded(aliasTarget));
     QVERIFY(firstTarget != aliasTarget);
     QVERIFY(model->treeForIndex(firstTarget) ==
             model->treeForIndex(aliasTarget));
 
-    model->fetchMore(firstNext);
+    const QModelIndex listTarget = model->index(0, 0, list);
+    QVERIFY(view->isExpanded(listTarget));
+    const QModelIndex listSequence = model->index(0, 0, listTarget);
+    QTRY_COMPARE_WITH_TIMEOUT(model->rowCount(listSequence), 6, 5000);
+    const QModelIndex listFooter = model->index(5, 0, listSequence);
+    QVERIFY(model->isContinuationRow(listFooter));
+    QVERIFY(model->data(listFooter).toString().contains(
+        QStringLiteral("Show next 64 items")));
+    QVERIFY(view->isExpanded(persistentRoot));
+    QVERIFY(view->isExpanded(first));
+
     QTRY_COMPARE_WITH_TIMEOUT(model->rowCount(firstNext), 1, 5000);
     const QModelIndex secondTarget = model->index(0, 0, firstNext);
+    QVERIFY(view->isExpanded(secondTarget));
     QTRY_COMPARE_WITH_TIMEOUT(model->rowCount(secondTarget), 3, 5000);
     const QModelIndex backReference = model->index(2, 0, secondTarget);
     QVERIFY(model->isReferenceRow(backReference));
     QVERIFY(!model->canFetchMore(backReference));
+    QVERIFY(!model->hasChildren(backReference));
     QVERIFY(model->data(backReference.siblingAtColumn(2)).toString().contains(
         QStringLiteral("back-reference")));
     QCOMPARE(model->rowCount(backReference), 0);
+}
+
+void MainWindowIntegrationTests::nestedListsExpandFirstFiveItemsRecursively() {
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString inputPath = directory.filePath(QStringLiteral("nested.bin"));
+    QFile input(inputPath);
+    QVERIFY(input.open(QIODevice::WriteOnly));
+    QByteArray bytes;
+    bytes.resize(24);
+    for (int i = 0; i < bytes.size(); ++i) {
+        bytes[i] = static_cast<char>(i + 1);
+    }
+    QCOMPARE(input.write(bytes), bytes.size());
+    input.close();
+
+    breco::MainWindow window;
+    window.show();
+    QVERIFY(window.m_brecoLangPanel->loadSchemaText(QString::fromUtf8(R"BRECO(
+language breco 0.1
+inputs { input data { default } }
+record Inner {
+    values: repeat 8 { value: u8 }
+}
+entry Run from data {
+    groups: repeat 3 {
+        inner: Inner
+    }
+}
+default entry Run
+)BRECO")));
+    QVERIFY(window.m_brecoLangPanel->setInputPath(u"data", inputPath));
+    QVERIFY(window.m_brecoLangPanel->decodeSelected());
+
+    breco::lang::DecodedTreeModel* model =
+        window.m_brecoLangPanel->treeModel();
+    QTreeView* view = window.m_brecoLangPanel->treeView();
+    QTRY_VERIFY_WITH_TIMEOUT(model->rowCount() == 1, 5000);
+    const QModelIndex root = model->index(0, 0);
+    QVERIFY(view->isExpanded(root));
+    QTRY_COMPARE_WITH_TIMEOUT(model->rowCount(root), 1, 5000);
+    const QModelIndex groups = model->index(0, 0, root);
+    QVERIFY(view->isExpanded(groups));
+    QTRY_COMPARE_WITH_TIMEOUT(model->rowCount(groups), 3, 5000);
+
+    for (int group = 0; group < 3; ++group) {
+        const QModelIndex item = model->index(group, 0, groups);
+        QVERIFY(item.isValid());
+        QVERIFY(view->isExpanded(item));
+        QTRY_COMPARE_WITH_TIMEOUT(model->rowCount(item), 1, 5000);
+        const QModelIndex inner = model->index(0, 0, item);
+        QVERIFY(view->isExpanded(inner));
+        QTRY_COMPARE_WITH_TIMEOUT(model->rowCount(inner), 1, 5000);
+        const QModelIndex values = model->index(0, 0, inner);
+        QVERIFY(view->isExpanded(values));
+        QTRY_COMPARE_WITH_TIMEOUT(model->rowCount(values), 5, 5000);
+        QVERIFY(!model->isContinuationRow(model->index(0, 0, values)));
+        QVERIFY(!model->isContinuationRow(model->index(4, 0, values)));
+    }
+}
+
+void MainWindowIntegrationTests::inlineAggregateListsPageAsOneContainer() {
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString inputPath =
+        directory.filePath(QStringLiteral("inline-aggregate.bin"));
+    QFile input(inputPath);
+    QVERIFY(input.open(QIODevice::WriteOnly));
+    QCOMPARE(input.write(QByteArray::fromHex("0102030405060708")), 8LL);
+    input.close();
+
+    breco::MainWindow window;
+    window.show();
+    QVERIFY(window.m_brecoLangPanel->loadSchemaText(QString::fromUtf8(R"BRECO(
+language breco 0.1
+inputs { input data { default } }
+entry Run from data {
+    select { when true => { items: u8 } else => { } }
+    select {
+        when true => { items: repeat 3 { value: u8 } }
+        else => { }
+    }
+    select {
+        when true => { items: repeat 4 { value: u8 } }
+        else => { }
+    }
+}
+default entry Run
+)BRECO")));
+    QVERIFY(window.m_brecoLangPanel->setInputPath(u"data", inputPath));
+    QVERIFY(window.m_brecoLangPanel->decodeSelected());
+
+    breco::lang::DecodedTreeModel* model =
+        window.m_brecoLangPanel->treeModel();
+    QTreeView* view = window.m_brecoLangPanel->treeView();
+    QTRY_VERIFY_WITH_TIMEOUT(
+        model->rowCount() == 1 &&
+            model->rowCount(model->index(0, 0)) == 1,
+        5000);
+    const QModelIndex root = model->index(0, 0);
+    const QModelIndex items = model->index(0, 0, root);
+    QVERIFY(view->isExpanded(root));
+    QVERIFY(view->isExpanded(items));
+    QTRY_COMPARE_WITH_TIMEOUT(model->rowCount(items), 6, 5000);
+    for (int row = 0; row < 5; ++row) {
+        QCOMPARE(model->data(model->index(row, 0, items)).toString(),
+                 QStringLiteral("[%1]").arg(row));
+    }
+    const QModelIndex footer = model->index(5, 0, items);
+    QVERIFY(model->isContinuationRow(footer));
+    QVERIFY(model->requestMore(footer));
+    QTRY_COMPARE_WITH_TIMEOUT(model->rowCount(items), 8, 5000);
+    for (int row = 0; row < 8; ++row) {
+        QCOMPARE(model->data(model->index(row, 0, items)).toString(),
+                 QStringLiteral("[%1]").arg(row));
+    }
 }
 
 void MainWindowIntegrationTests::navigatorLabelsAndDataViewEndianFollowSelection() {
@@ -898,10 +1735,10 @@ void MainWindowIntegrationTests::hexViewDefaultsPersistAcrossWindows() {
     SettingsValueGuard showAsGuard(QStringLiteral("ui/hexShowAsIndex"));
     SettingsValueGuard byteLineGuard(QStringLiteral("ui/textByteLineModeIndex"));
     SettingsValueGuard legacyByteModeGuard(QStringLiteral("ui/textByteModeEnabled"));
-    QSettings settings(QStringLiteral("breco"), QStringLiteral("breco"));
-    settings.remove(QStringLiteral("ui/hexShowAsIndex"));
-    settings.remove(QStringLiteral("ui/textByteLineModeIndex"));
-    settings.remove(QStringLiteral("ui/textByteModeEnabled"));
+    const auto settings = breco::AppSettings::open();
+    settings->remove(QStringLiteral("ui/hexShowAsIndex"));
+    settings->remove(QStringLiteral("ui/textByteLineModeIndex"));
+    settings->remove(QStringLiteral("ui/textByteModeEnabled"));
 
     {
         breco::MainWindow window;
@@ -1092,9 +1929,9 @@ void MainWindowIntegrationTests::currentBytePanelShowsEndianAndWidthAwareValues(
 }
 
 void MainWindowIntegrationTests::shiftMarksCurrentBufferDirtyAndRestoresOnDeselect() {
-    QSettings settings(QStringLiteral("breco"), QStringLiteral("breco"));
-    settings.remove(QStringLiteral("ui/hexShiftBitsValue"));
-    settings.setValue(QStringLiteral("ui/hexShiftBitsValue"), 42);
+    const auto settings = breco::AppSettings::open();
+    settings->remove(QStringLiteral("ui/hexShiftBitsValue"));
+    settings->setValue(QStringLiteral("ui/hexShiftBitsValue"), 42);
 
     QTemporaryDir tempDir;
     QVERIFY(tempDir.isValid());
@@ -1148,7 +1985,7 @@ void MainWindowIntegrationTests::shiftMarksCurrentBufferDirtyAndRestoresOnDesele
     QCOMPARE(window.m_activePreviewRow, -1);
     QVERIFY(!window.m_resultBuffers.at(0).dirty);
     QCOMPARE(window.m_resultBuffers.at(0).bytes, bytes);
-    settings.remove(QStringLiteral("ui/hexShiftBitsValue"));
+    settings->remove(QStringLiteral("ui/hexShiftBitsValue"));
 }
 
 void MainWindowIntegrationTests::binarySelectionMenuContainsBothFileActions() {
@@ -1629,9 +2466,9 @@ void MainWindowIntegrationTests::protectedSourceOpenElevatesAutomaticallyAndRepo
     QVERIFY(chunk.has_value());
     QCOMPARE(chunk.value(), bytes);
 
-    QSettings settings(QStringLiteral("breco"), QStringLiteral("breco"));
-    QVERIFY(!settings.contains(QStringLiteral("ui/rememberedSingleFilePath")));
-    QVERIFY(!settings.contains(QStringLiteral("ui/rememberedSingleFileOffset")));
+    const auto settings = breco::AppSettings::open();
+    QVERIFY(!settings->contains(QStringLiteral("ui/rememberedSingleFilePath")));
+    QVERIFY(!settings->contains(QStringLiteral("ui/rememberedSingleFileOffset")));
 }
 #endif
 
@@ -1639,9 +2476,9 @@ void MainWindowIntegrationTests::brecoLangLibraryMigrationAndStartupRestore() {
     SettingsValueGuard schemaGuard(QStringLiteral("ui/lastBrecoLangSchemaPath"));
     SettingsValueGuard libraryGuard(
         QStringLiteral("ui/brecoLangLibraryDirectory"));
-    QSettings settings(QStringLiteral("breco"), QStringLiteral("breco"));
-    settings.remove(QStringLiteral("ui/lastBrecoLangSchemaPath"));
-    settings.remove(QStringLiteral("ui/brecoLangLibraryDirectory"));
+    const auto settings = breco::AppSettings::open();
+    settings->remove(QStringLiteral("ui/lastBrecoLangSchemaPath"));
+    settings->remove(QStringLiteral("ui/brecoLangLibraryDirectory"));
 
     QTemporaryDir directory;
     QVERIFY(directory.isValid());
@@ -1674,10 +2511,10 @@ default entry Inspect
         QVERIFY(window.m_brecoLangPanel->loadSchemaFile(schemaPath));
     }
     QVERIFY(QFileInfo::exists(olderPath));
-    QCOMPARE(settings.value(QStringLiteral("ui/lastBrecoLangSchemaPath"))
+    QCOMPARE(settings->value(QStringLiteral("ui/lastBrecoLangSchemaPath"))
                  .toString(),
              QFileInfo(schemaPath).absoluteFilePath());
-    QCOMPARE(settings.value(QStringLiteral("ui/brecoLangLibraryDirectory"))
+    QCOMPARE(settings->value(QStringLiteral("ui/brecoLangLibraryDirectory"))
                  .toString(),
              QFileInfo(directory.path()).absoluteFilePath());
 
@@ -1847,5 +2684,23 @@ void MainWindowIntegrationTests::imagePanelAnimatesGifAndHighlightsHover() {
 
 }  // namespace
 
-QTEST_MAIN(MainWindowIntegrationTests)
+int main(int argc, char** argv) {
+    qputenv("QT_QPA_PLATFORM", QByteArray("offscreen"));
+    QTEST_SET_MAIN_SOURCE_PATH
+    QApplication app(argc, argv);
+    QTemporaryDir settingsDir(
+        QDir::temp().filePath(QStringLiteral("breco_test_settings-XXXXXX")));
+    settingsDir.setAutoRemove(true);
+    if (!settingsDir.isValid()) {
+        qCritical("Could not create isolated settings directory");
+        return 1;
+    }
+    breco::AppSettings::useIsolatedIni(
+        settingsDir.filePath(QStringLiteral("breco.ini")));
+    MainWindowIntegrationTests testCase;
+    const int exitCode = QTest::qExec(&testCase, argc, argv);
+    breco::AppSettings::useIsolatedIni(QString());
+    return exitCode;
+}
+
 #include "mainwindow_integration_tests.moc"

@@ -1,20 +1,22 @@
 #pragma once
 
 #include <QList>
+#include <QSettings>
 #include <QString>
+
+#include <memory>
 
 namespace breco {
 
 class AppSettings {
 public:
-    static QString lastFileDialogPath();
-    static QString lastDirectoryDialogPath();
-    static QString lastBrowseDialogDirectory();
+    static void useIsolatedIni(const QString& filePath);
+    static std::unique_ptr<QSettings> open();
+    static QString lastSelectedPath(const QString& activityKey);
     static QString rememberedSingleFilePath();
     static quint64 rememberedSingleFileOffset();
-    static void setLastFileDialogPath(const QString& path);
-    static void setLastDirectoryDialogPath(const QString& path);
-    static void setLastBrowseDialogDirectory(const QString& path);
+    static void setLastSelectedPath(const QString& activityKey,
+                                    const QString& path);
     static void setRememberedSingleFilePath(const QString& path);
     static void setRememberedSingleFileOffset(quint64 offset);
     static void clearRememberedSingleFilePath();
@@ -49,6 +51,7 @@ public:
     static int dataViewImageMaxResults();
     static int dataViewImageJobs(int defaultValue);
     static QList<int> dataViewByteAndBitmapSplitterSizes();
+    static int visualizeModeIndex();
     static bool viewScanLogVisible();
     static bool viewEditsVisible();
     static QString lastBrecoLangSchemaPath();
@@ -85,6 +88,7 @@ public:
     static void setDataViewImageMaxResults(int value);
     static void setDataViewImageJobs(int value);
     static void setDataViewByteAndBitmapSplitterSizes(const QList<int>& sizes);
+    static void setVisualizeModeIndex(int index);
     static void setViewScanLogVisible(bool visible);
     static void setViewEditsVisible(bool visible);
 };

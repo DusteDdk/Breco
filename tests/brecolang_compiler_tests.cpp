@@ -108,9 +108,9 @@ record AMMOSFrame {
     commit
     data_header: IFDataHeader
     body: region bytes((frame_length_words - AMMOS_FRAME_HEADER_WORDS) * WORD_BYTES) {
-        data_blocks: select frame_type {
+        select frame_type {
             FrameType.SplitIQ16 => {
-                blocks: repeat data_header.datablock_count {
+                data_blocks: repeat data_header.datablock_count {
                     block: IFDataBlock16(data_header.datablock_length_words)
                 }
             }
@@ -227,12 +227,15 @@ class BrecoLangCompilerTests : public QObject {
 private slots:
     void lexerRecognizesCoreTokensAndUnits();
     void completeLanguageProgramCompiles();
+    void omittedBoilerplateUsesImplicitDefaults();
+    void anonymousRecordFieldsLowerToOrdinaryRecords();
     void resolvedProgramContainsTransactionalAndOutformPlans();
     void extentAndEffectAnalysisPropagatesUsefulFacts();
     void loopScanPlanIsConservativeAndKeepsItemExtent();
     void referencesLowerToExplicitIrAndKeepStructuralBatchPlan();
     void parserAndResolverBatchIndependentDiagnostics();
     void parserRecoversToLaterTopLevelDeclarations();
+    void inlineSelectsMergeFieldsAndBuildAggregateMetadata();
     void shippedExamplesCompile();
 };
 
@@ -282,6 +285,193 @@ void BrecoLangCompilerTests::completeLanguageProgramCompiles() {
              256ULL * 1024ULL * 1024ULL);
     QCOMPARE(result.program->symbol(result.program->defaultEntry),
              QStringLiteral("SplitRecording2019"));
+}
+
+void BrecoLangCompilerTests::omittedBoilerplateUsesImplicitDefaults() {
+    const CompileResult implicit = compileBrecoLang(QString::fromUtf8(R"BRECO(
+record Vis {
+    computed MyString: string = "Test"
+    computed MyNumber: i16 = 123
+    A: u8
+    B: u8
+    C: u8
+}
+)BRECO"));
+    QVERIFY2(implicit.success(),
+             qPrintable(diagnosticsText(implicit.diagnostics)));
+    QCOMPARE(implicit.program->languageVersion, QStringLiteral("0.1"));
+    QCOMPARE(implicit.program->inputs.size(), 1);
+    QCOMPARE(implicit.program->symbol(implicit.program->inputs.first().name),
+             QStringLiteral("data"));
+    QVERIFY(implicit.program->inputs.first().isDefault);
+    QCOMPARE(implicit.program->records.size(), 1);
+    QCOMPARE(implicit.program->entries.size(), 1);
+    QCOMPARE(implicit.program->symbol(implicit.program->entries.first().name),
+             QStringLiteral("Vis"));
+    QCOMPARE(implicit.program->entries.first().resultType,
+             implicit.program->records.first().type);
+    QCOMPARE(implicit.program->defaultEntry,
+             implicit.program->entries.first().name);
+
+    const CompileResult implicitInput = compileBrecoLang(QString::fromUtf8(R"BRECO(
+entry Main from data { value: u8 }
+)BRECO"));
+    QVERIFY2(implicitInput.success(),
+             qPrintable(diagnosticsText(implicitInput.diagnostics)));
+    QCOMPARE(implicitInput.program->inputs.size(), 1);
+    QCOMPARE(implicitInput.program->entries.size(), 1);
+
+    const CompileResult ambiguous = compileBrecoLang(QString::fromUtf8(R"BRECO(
+record First { value: u8 }
+record Second { value: u8 }
+)BRECO"));
+    QVERIFY2(ambiguous.success(),
+             qPrintable(diagnosticsText(ambiguous.diagnostics)));
+    QVERIFY(ambiguous.program->entries.isEmpty());
+    QCOMPARE(ambiguous.program->defaultEntry, kInvalidId);
+
+    const CompileResult emptyInputs = compileBrecoLang(QString::fromUtf8(R"BRECO(
+inputs { }
+record Only { value: u8 }
+)BRECO"));
+    QVERIFY(!emptyInputs.success());
+    QVERIFY(diagnosticsText(emptyInputs.diagnostics)
+                .contains(QStringLiteral("BR0201")));
+
+    const CompileResult wrongLanguage =
+        compileBrecoLang(QStringLiteral("language other 0.1"));
+    QVERIFY(!wrongLanguage.success());
+    QVERIFY(diagnosticsText(wrongLanguage.diagnostics)
+                .contains(QStringLiteral("BP0101")));
+
+    const CompileResult wrongVersion =
+        compileBrecoLang(QStringLiteral("language breco 0.2"));
+    QVERIFY(!wrongVersion.success());
+    QVERIFY(diagnosticsText(wrongVersion.diagnostics)
+                .contains(QStringLiteral("BP0102")));
+}
+
+void BrecoLangCompilerTests::anonymousRecordFieldsLowerToOrdinaryRecords() {
+    const CompileResult compiled = compileBrecoLang(QString::fromUtf8(R"BRECO(
+record TopRecord {
+    enabled: u8
+    SomeField: {
+        X: u8
+        Nested: { Y: u16le }
+    }
+    Empty: { }
+    Optional: { Z: u8 } when enabled != 0
+    External: { W: u8 } from data at 0 within bytes(1)
+    Items: repeat 4 {
+        Item: { A: u8 B: u8 }
+    }
+}
+)BRECO"));
+    QVERIFY2(compiled.success(),
+             qPrintable(diagnosticsText(compiled.diagnostics)));
+    QCOMPARE(compiled.program->entries.size(), 1);
+
+    const RecordDesc* topRecord = nullptr;
+    for (const RecordDesc& record : compiled.program->records) {
+        if (compiled.program->symbol(record.name) == QStringLiteral("TopRecord")) {
+            topRecord = &record;
+            break;
+        }
+    }
+    QVERIFY(topRecord != nullptr);
+    QCOMPARE(compiled.program->entries.first().resultType, topRecord->type);
+
+    const auto findField = [&](TypeId owner,
+                               QStringView name) -> const FieldDesc* {
+        const TypeDesc& type = compiled.program->types.at(owner);
+        for (quint32 i = 0; i < type.fields.count; ++i) {
+            const FieldDesc& field = compiled.program->fields.at(
+                compiled.program->fieldRefs.at(type.fields.first + i));
+            if (compiled.program->symbol(field.name) == name) {
+                return &field;
+            }
+        }
+        return nullptr;
+    };
+    const auto recordForType = [&](TypeId type) -> const RecordDesc* {
+        for (const RecordDesc& record : compiled.program->records) {
+            if (record.type == type) {
+                return &record;
+            }
+        }
+        return nullptr;
+    };
+
+    const FieldDesc* someField = findField(topRecord->type, u"SomeField");
+    QVERIFY(someField != nullptr);
+    QCOMPARE(compiled.program->types.at(someField->type).kind,
+             TypeKind::Record);
+    QCOMPARE(compiled.program->symbol(
+                 compiled.program->types.at(someField->type).name),
+             QStringLiteral("$anon_record_TopRecord.SomeField[%1]")
+                 .arg(someField->type));
+    QCOMPARE(compiled.program->statements.at(someField->statement).kind,
+             StatementKind::Field);
+    const RecordDesc* someRecord = recordForType(someField->type);
+    QVERIFY(someRecord != nullptr);
+    QCOMPARE(compiled.program->extents.at(someRecord->extent).exactBytes,
+             std::optional<quint64>(3));
+
+    const FieldDesc* nested = findField(someField->type, u"Nested");
+    QVERIFY(nested != nullptr);
+    QCOMPARE(compiled.program->types.at(nested->type).kind, TypeKind::Record);
+    QVERIFY(nested->type != someField->type);
+    QCOMPARE(compiled.program->symbol(
+                 compiled.program->types.at(nested->type).name),
+             QStringLiteral("$anon_record_TopRecord.SomeField.Nested[%1]")
+                 .arg(nested->type));
+
+    const FieldDesc* empty = findField(topRecord->type, u"Empty");
+    QVERIFY(empty != nullptr);
+    const RecordDesc* emptyRecord = recordForType(empty->type);
+    QVERIFY(emptyRecord != nullptr);
+    QCOMPARE(compiled.program->extents.at(emptyRecord->extent).exactBytes,
+             std::optional<quint64>(0));
+
+    const FieldDesc* optional = findField(topRecord->type, u"Optional");
+    QVERIFY(optional != nullptr);
+    QVERIFY(optional->optional);
+    QCOMPARE(compiled.program->types.at(optional->type).kind,
+             TypeKind::Optional);
+    QCOMPARE(compiled.program->types.at(
+                 compiled.program->types.at(optional->type).elementType)
+                 .kind,
+             TypeKind::Record);
+
+    const FieldDesc* external = findField(topRecord->type, u"External");
+    QVERIFY(external != nullptr);
+    const Statement& externalStatement =
+        compiled.program->statements.at(external->statement);
+    QVERIFY(externalStatement.input != kInvalidId);
+    QVERIFY(externalStatement.expression != kInvalidId);
+    QVERIFY(externalStatement.secondaryExpression != kInvalidId);
+
+    const Statement* items = nullptr;
+    for (const Statement& statement : compiled.program->statements) {
+        if (compiled.program->symbol(statement.name) == QStringLiteral("Items")) {
+            items = &statement;
+            break;
+        }
+    }
+    QVERIFY(items != nullptr);
+    QCOMPARE(items->loopScanPlan, LoopScanPlan::BatchAdvance);
+
+    const CompileResult coexistence =
+        compileBrecoLang(QString::fromUtf8(R"BRECO(
+record Shared { Named: u8 }
+record Container {
+    Shared: { Inline: u8 }
+    Referenced: Shared
+}
+entry Main from data { value: Container }
+)BRECO"));
+    QVERIFY2(coexistence.success(),
+             qPrintable(diagnosticsText(coexistence.diagnostics)));
 }
 
 void BrecoLangCompilerTests::resolvedProgramContainsTransactionalAndOutformPlans() {
@@ -545,25 +735,140 @@ outform GoodText(root: GoodEntry) text { emit "${root.good.value}" }
                         }));
 }
 
-void BrecoLangCompilerTests::shippedExamplesCompile() {
-    QDirIterator files(QStringLiteral(BRECO_SOURCE_DIR "/examples"),
-                       {QStringLiteral("*.breco")}, QDir::Files,
-                       QDirIterator::Subdirectories);
-    int count = 0;
-    while (files.hasNext()) {
-        const QString path = files.next();
-        QFile file(path);
-        QVERIFY2(file.open(QIODevice::ReadOnly), qPrintable(file.errorString()));
-        const CompileResult result =
-            compileBrecoLang(QString::fromUtf8(file.readAll()), path);
-        QVERIFY2(result.success(),
-                 qPrintable(path + QStringLiteral(": ") +
-                            (result.diagnostics.isEmpty()
-                                 ? QStringLiteral("unknown compiler failure")
-                                 : result.diagnostics.first().message)));
-        ++count;
+void BrecoLangCompilerTests::inlineSelectsMergeFieldsAndBuildAggregateMetadata() {
+    const QString source = QString::fromUtf8(R"BRECO(
+language breco 0.1
+inputs { input data { default } }
+record InlineChoice {
+    tag: u8
+    select tag {
+        1 => { value: u16le left: u8 }
+        default => { value: u32le }
     }
-    QVERIFY(count >= 5);
+    computed has_left: bool = present(left)
+    computed early_value_count: u64 = count(value)
+    select {
+        when tag > 0 => { value: u8 }
+        else => { }
+    }
+    computed value_count: u64 = count(value)
+    boxed: select tag {
+        1 => { selected: u8 }
+        default => { fallback: u8 }
+    }
+}
+entry Main from data { root: InlineChoice }
+outform Values(root: InlineChoice) text {
+    for item in root.value { emit "${item}" }
+}
+)BRECO");
+    const CompileResult result = compileBrecoLang(source);
+    QVERIFY2(result.success(), qPrintable(diagnosticsText(result.diagnostics)));
+
+    int inlineSelects = 0;
+    int boxedSelects = 0;
+    for (const Statement& statement : result.program->statements) {
+        if (statement.kind != StatementKind::Select) {
+            continue;
+        }
+        if (statement.inlineSelect) {
+            ++inlineSelects;
+            QVERIFY(statement.name == kInvalidId);
+            QVERIFY(statement.selectCases.count >= 2);
+        } else {
+            ++boxedSelects;
+            QVERIFY(statement.name != kInvalidId);
+        }
+    }
+    QCOMPARE(inlineSelects, 2);
+    QCOMPARE(boxedSelects, 1);
+    QCOMPARE(result.program->aggregateFields.size(), 1);
+    QVERIFY(std::any_of(result.program->selectYields.cbegin(),
+                        result.program->selectYields.cend(),
+                        [](const SelectYield& yield) {
+                            return yield.aggregate != kInvalidId;
+                        }));
+
+    const CompileResult directType = compileBrecoLang(QString::fromUtf8(R"BRECO(
+language breco 0.1
+inputs { input data { default } }
+entry Main from data {
+    tag: u8
+    select tag { 1 => u8 default => { value: u8 } }
+}
+)BRECO"));
+    QVERIFY(!directType.success());
+    QVERIFY(diagnosticsText(directType.diagnostics).contains(
+        QStringLiteral("bare select type arm"), Qt::CaseInsensitive));
+
+    const CompileResult collision = compileBrecoLang(QString::fromUtf8(R"BRECO(
+language breco 0.1
+inputs { input data { default } }
+entry Main from data {
+    value: u8
+    select { when true => { value: u8 } else => { } }
+}
+)BRECO"));
+    QVERIFY(!collision.success());
+    QVERIFY(diagnosticsText(collision.diagnostics).contains(
+        QStringLiteral("Duplicate field 'value'")));
+
+    const CompileResult ambiguous = compileBrecoLang(QString::fromUtf8(R"BRECO(
+language breco 0.1
+inputs { input data { default } }
+entry Main from data {
+    select { when true => { value: u8 } else => { } }
+    computed invalid_scalar_use: u64 = value + 1
+    select { when false => { value: u8 } else => { } }
+}
+)BRECO"));
+    QVERIFY(!ambiguous.success());
+    QVERIFY(diagnosticsText(ambiguous.diagnostics).contains(
+        QStringLiteral("numeric operands")));
+
+    const CompileResult identifyAmbiguous =
+        compileBrecoLang(QString::fromUtf8(R"BRECO(
+language breco 0.1
+inputs { input data { default } }
+entry Main from data {
+    select { when true => { value: u8 } else => { } }
+    computed invalid_scalar_use: u64 = value + 1
+    identify {
+        select { when false => { value: u8 } else => { } }
+        match true else "unreachable"
+    }
+}
+)BRECO"));
+    QVERIFY(!identifyAmbiguous.success());
+    QVERIFY(diagnosticsText(identifyAmbiguous.diagnostics).contains(
+        QStringLiteral("numeric operands")));
+}
+
+void BrecoLangCompilerTests::shippedExamplesCompile() {
+    int count = 0;
+    const QStringList roots{
+        QStringLiteral(BRECO_SOURCE_DIR "/examples"),
+        QStringLiteral(BRECO_SOURCE_DIR "/../HES-Breco/HES-BrecoLang"),
+        QStringLiteral(BRECO_SOURCE_DIR "/../HES-Breco/IQDW_BrecoLang")};
+    for (const QString& root : roots) {
+        QDirIterator files(root, {QStringLiteral("*.breco")}, QDir::Files,
+                           QDirIterator::Subdirectories);
+        while (files.hasNext()) {
+            const QString path = files.next();
+            QFile file(path);
+            QVERIFY2(file.open(QIODevice::ReadOnly),
+                     qPrintable(file.errorString()));
+            const CompileResult result =
+                compileBrecoLang(QString::fromUtf8(file.readAll()), path);
+            QVERIFY2(result.success(),
+                     qPrintable(path + QStringLiteral(": ") +
+                                (result.diagnostics.isEmpty()
+                                     ? QStringLiteral("unknown compiler failure")
+                                     : result.diagnostics.first().message)));
+            ++count;
+        }
+    }
+    QVERIFY(count >= 12);
 }
 
 }  // namespace

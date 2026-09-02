@@ -27,7 +27,14 @@ enum class DecodedValueKind {
     OwnedBytes,
     Object,
     Sequence,
+    Aggregate,
     Reference,
+};
+
+enum class DecodedAggregateShape : quint8 {
+    SingleScalar,
+    SingleSequence,
+    PromotedSequence,
 };
 
 struct ByteSpanValue {
@@ -53,6 +60,8 @@ struct DecodedValue {
     IdRange elements;
     quint64 logicalCount = 0;
     DecodedNodeId node = kInvalidId;
+    DecodedAggregateShape aggregateShape =
+        DecodedAggregateShape::SingleScalar;
 };
 
 enum class StorageLayoutKind {
@@ -94,6 +103,7 @@ enum class DecodedNodeKind {
 struct DecodedNode {
     DecodedNodeKind kind = DecodedNodeKind::Field;
     DecodedNodeId parent = kInvalidId;
+    DecodedNodeId replacement = kInvalidId;
     DecodedNodeId firstChild = kInvalidId;
     DecodedNodeId nextSibling = kInvalidId;
     quint32 rowInParent = 0;
@@ -108,6 +118,7 @@ struct DecodedNode {
     quint64 length = 0;
     bool hasSourceSpan = false;
     bool valid = true;
+    bool hidden = false;
 };
 
 struct DecodedTreeCheckpoint {

@@ -2,6 +2,8 @@
 
 #include "ui_HexViewControlsPanel.h"
 
+#include <QCheckBox>
+
 namespace breco {
 
 HexViewControlsPanel::HexViewControlsPanel(QWidget* parent)
@@ -46,6 +48,10 @@ QCheckBox* HexViewControlsPanel::wrapCheckBox() const { return m_ui->wrapCheckBo
 QCheckBox* HexViewControlsPanel::breatheCheckBox() const { return m_ui->breatheCheckBox; }
 
 QCheckBox* HexViewControlsPanel::collapseCheckBox() const { return m_ui->collapseCheckBox; }
+
+QCheckBox* HexViewControlsPanel::allowEditingCheckBox() const {
+    return m_ui->allowEditingCheckBox;
+}
 
 QSpinBox* HexViewControlsPanel::shiftBitsSpinBox() const { return m_ui->shiftBitsSpinBox; }
 

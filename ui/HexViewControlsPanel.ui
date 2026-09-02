@@ -308,6 +308,13 @@
           </property>
          </widget>
         </item>
+        <item row="2" column="1">
+         <widget class="QCheckBox" name="allowEditingCheckBox">
+          <property name="text">
+           <string>Allow editing</string>
+          </property>
+         </widget>
+        </item>
        </layout>
       </item>
       <item row="6" column="0">

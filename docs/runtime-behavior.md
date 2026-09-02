@@ -65,26 +65,37 @@ Notable startup behavior:
 
 `MainWindow::onOpenFile()`:
 
-1. prompts file chooser with `AppSettings::lastFileDialogPath()`
-2. calls `FileEnumerator::enumerateSingleFile()`
-3. sets source mode + display text
-4. rebuilds scan targets via `buildScanTargets()`
-5. clears results/cache/hover/interval state
-6. persists chosen path to `AppSettings`
-7. refreshes summary labels
-8. attempts `loadNotEmptyPreview()` for immediate single-file preview
+1. prompts the file chooser through `promptForPath()` with the
+   `OpenMainFile` activity
+2. restores and persists only that activity's last selected path
+3. calls `FileEnumerator::enumerateSingleFile()`
+4. sets source mode + display text
+5. rebuilds scan targets via `buildScanTargets()`
+6. clears results/cache/hover/interval state
+7. persists the selected source for session restoration
+8. refreshes summary labels
+9. attempts `loadNotEmptyPreview()` for immediate single-file preview
 
 ### Open directory flow
 
 `MainWindow::onOpenDirectory()`:
 
-1. prompts directory chooser with `AppSettings::lastDirectoryDialogPath()`
-2. calls `FileEnumerator::enumerateRecursive()`
-3. sets source mode + display text
-4. rebuilds scan targets via `buildScanTargets()`
-5. clears results/cache/hover/interval state
-6. persists chosen path to `AppSettings`
+1. prompts the directory chooser through `promptForPath()` with the
+   `OpenScanDir` activity; files remain visible but are not accepted as
+   directory choices
+2. restores and persists only that activity's last selected directory
+3. calls `FileEnumerator::enumerateRecursive()`
+4. sets source mode + display text
+5. rebuilds scan targets via `buildScanTargets()`
+6. clears results/cache/hover/interval state
 7. refreshes summary labels
+
+All file, directory, and save dialogs have independent
+`ui/lastSelectedPath/<activity>` settings. A configured path that disappeared
+is reduced to its nearest existing parent directory, without suggesting the
+missing filename. If no usable configured path remains, dialogs use the
+process current directory when an interactive terminal is available and the
+user's home directory otherwise.
 
 `buildScanTargets()` filters entries to existing, readable regular files with `size > 0`.
 

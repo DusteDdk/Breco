@@ -13,6 +13,7 @@
 #include "brecolang/render/OutformRenderer.h"
 #include "brecolang/runtime/ByteSource.h"
 #include "brecolang/runtime/DecodeDocument.h"
+#include "brecolang/runtime/DecodeTarget.h"
 #include "brecolang/runtime/Interpreter.h"
 
 namespace {
@@ -337,7 +338,11 @@ class BrecoLangRuntimeTests : public QObject {
     Q_OBJECT
 
 private slots:
+    void recordOnlySchemaDecodesWithImplicitDefaults();
+    void anonymousRecordFieldsDecodeAsNestedObjects();
+    void recordTargetsAdaptToTheEntryPipeline();
     void treeModeDecodesRecordsRegionsBitfieldsComputedSelectAndInputs();
+    void inlineSelectsYieldTransparentAndAggregatedFields();
     void probeModeExecutesWithoutConstructingNodes();
     void oneOfRollsBackAndCommitStopsAlternation();
     void manyStopsOnUncommittedMismatch();
@@ -351,6 +356,7 @@ private slots:
     void outformsRenderNestedTextAndRealBinary();
     void fixedStrideWindowsAreGoldenEquivalentToLegacyTree();
     void millionByteSequenceResolvesAndMaterializesConstantSize();
+    void inlineAggregatePagingUsesStableContainerLocator();
     void variableContinuationPreservesSemanticStateAndColdReplay();
     void variableReplayBudgetPausesAtCommittedBoundaries();
     void manyAndRecoverUseForwardContinuations();
@@ -411,6 +417,278 @@ QHash<InstanceLocator, QString> canonicalNodes(
         }
     }
     return result;
+}
+
+void BrecoLangRuntimeTests::recordOnlySchemaDecodesWithImplicitDefaults() {
+    const CompileResult compiled = compileBrecoLang(QString::fromUtf8(R"BRECO(
+record Vis {
+    computed MyString: string = "Test"
+    computed MyNumber: i16 = 123
+    A: u8
+    B: u8
+    C: u8
+}
+)BRECO"));
+    QVERIFY2(compiled.success(),
+             qPrintable(compilerDiagnostics(compiled.diagnostics)));
+
+    const DecodeResult result =
+        decode(compiled.program, {}, {{QStringLiteral("data"),
+                                       QByteArray::fromHex("010203")}});
+    QVERIFY2(result.success(), qPrintable(runtimeDiagnostics(result.diagnostics)));
+    QVERIFY(result.tree != nullptr);
+    QCOMPARE(result.endOffset, 3ULL);
+
+    const DecodedTree& tree = *result.tree;
+    const DecodedValueId myString =
+        field(tree, *compiled.program, result.rootValue, u"MyString");
+    const DecodedValueId myNumber =
+        field(tree, *compiled.program, result.rootValue, u"MyNumber");
+    const DecodedValueId a =
+        field(tree, *compiled.program, result.rootValue, u"A");
+    const DecodedValueId b =
+        field(tree, *compiled.program, result.rootValue, u"B");
+    const DecodedValueId c =
+        field(tree, *compiled.program, result.rootValue, u"C");
+    QVERIFY(myString != kInvalidId);
+    QVERIFY(myNumber != kInvalidId);
+    QCOMPARE(tree.displayValue(myString, *compiled.program),
+             QStringLiteral("Test"));
+    QCOMPARE(tree.values.at(myNumber).signedValue, 123);
+    QCOMPARE(tree.values.at(a).unsignedValue, 1ULL);
+    QCOMPARE(tree.values.at(b).unsignedValue, 2ULL);
+    QCOMPARE(tree.values.at(c).unsignedValue, 3ULL);
+}
+
+void BrecoLangRuntimeTests::anonymousRecordFieldsDecodeAsNestedObjects() {
+    const CompileResult compiled = compileBrecoLang(QString::fromUtf8(R"BRECO(
+record TopRecord {
+    computed StaticString: string = "Stuff"
+    Settings: {
+        computed staticInt: i16 = 123
+    }
+    data: {
+        A: u8
+        B: u8
+    }
+}
+)BRECO"));
+    QVERIFY2(compiled.success(),
+             qPrintable(compilerDiagnostics(compiled.diagnostics)));
+
+    const QByteArray bytes = QByteArray::fromHex("1122");
+    const DecodeResult result =
+        decode(compiled.program, {}, {{QStringLiteral("data"), bytes}});
+    QVERIFY2(result.success(), qPrintable(runtimeDiagnostics(result.diagnostics)));
+    QVERIFY(result.tree != nullptr);
+    QCOMPARE(result.endOffset, 2ULL);
+
+    const DecodedTree& tree = *result.tree;
+    const DecodedValueId settings =
+        field(tree, *compiled.program, result.rootValue, u"Settings");
+    const DecodedValueId data =
+        field(tree, *compiled.program, result.rootValue, u"data");
+    QVERIFY(settings != kInvalidId);
+    QVERIFY(data != kInvalidId);
+    QCOMPARE(tree.values.at(field(tree, *compiled.program, settings,
+                                  u"staticInt"))
+                 .signedValue,
+             123);
+    QCOMPARE(tree.values.at(field(tree, *compiled.program, data, u"A"))
+                 .unsignedValue,
+             0x11ULL);
+    QCOMPARE(tree.values.at(field(tree, *compiled.program, data, u"B"))
+                 .unsignedValue,
+             0x22ULL);
+
+    int nestedRecordNodes = 0;
+    for (const DecodedNode& node : tree.nodes) {
+        const QString name = tree.name(node.name);
+        if ((name == QStringLiteral("Settings") ||
+             name == QStringLiteral("data")) &&
+            node.kind == DecodedNodeKind::Record) {
+            ++nestedRecordNodes;
+        }
+    }
+    QCOMPARE(nestedRecordNodes, 2);
+
+    RecordingOutput output;
+    DecodeRequest request;
+    request.program = compiled.program;
+    request.mode = DecodeMode::Streaming;
+    request.output = &output;
+    request.inputs.resize(compiled.program->inputs.size());
+    request.inputs[0] = std::make_shared<BorrowedWindowSource>(
+        bytes, QStringLiteral("anonymous-records.bin"));
+    const DecodeResult streamed = decodeBrecoProgram(request);
+    QVERIFY2(streamed.success(),
+             qPrintable(runtimeDiagnostics(streamed.diagnostics)));
+    const QJsonObject json = QJsonDocument::fromJson(output.bytes).object();
+    QCOMPARE(json.value(QStringLiteral("StaticString")).toString(),
+             QStringLiteral("Stuff"));
+    QCOMPARE(json.value(QStringLiteral("Settings"))
+                 .toObject()
+                 .value(QStringLiteral("staticInt"))
+                 .toInt(),
+             123);
+    QCOMPARE(json.value(QStringLiteral("data"))
+                 .toObject()
+                 .value(QStringLiteral("A"))
+                 .toInt(),
+             0x11);
+    QCOMPARE(json.value(QStringLiteral("data"))
+                 .toObject()
+                 .value(QStringLiteral("B"))
+                 .toInt(),
+             0x22);
+
+    const CompileResult coexistence =
+        compileBrecoLang(QString::fromUtf8(R"BRECO(
+record Shared { Named: u8 }
+record Container {
+    Shared: { Inline: u8 }
+    Referenced: Shared
+}
+entry Main from data { value: Container }
+)BRECO"));
+    QVERIFY2(coexistence.success(),
+             qPrintable(compilerDiagnostics(coexistence.diagnostics)));
+    const DecodeResult coexistenceResult = decode(
+        coexistence.program, QStringLiteral("Main"),
+        {{QStringLiteral("data"), QByteArray::fromHex("3344")}});
+    QVERIFY2(coexistenceResult.success(),
+             qPrintable(runtimeDiagnostics(coexistenceResult.diagnostics)));
+    const DecodedValueId container = field(
+        *coexistenceResult.tree, *coexistence.program,
+        coexistenceResult.rootValue, u"value");
+    const DecodedValueId inlineRecord = field(
+        *coexistenceResult.tree, *coexistence.program, container, u"Shared");
+    const DecodedValueId referencedRecord = field(
+        *coexistenceResult.tree, *coexistence.program, container, u"Referenced");
+    QCOMPARE(coexistenceResult.tree->values.at(
+                 field(*coexistenceResult.tree, *coexistence.program,
+                       inlineRecord, u"Inline"))
+                 .unsignedValue,
+             0x33ULL);
+    QCOMPARE(coexistenceResult.tree->values.at(
+                 field(*coexistenceResult.tree, *coexistence.program,
+                       referencedRecord, u"Named"))
+                 .unsignedValue,
+             0x44ULL);
+}
+
+void BrecoLangRuntimeTests::recordTargetsAdaptToTheEntryPipeline() {
+    const CompileResult compiled = compileBrecoLang(QString::fromUtf8(R"BRECO(
+inputs {
+    input primary { default }
+    input auxiliary { }
+}
+record Plain {
+    value: u8
+    Nested: { nested: u8 }
+    external: u8 from auxiliary at 0
+}
+record NeedsParameter(seed: u8) {
+    computed value: u8 = seed
+}
+)BRECO"));
+    QVERIFY2(compiled.success(),
+             qPrintable(compilerDiagnostics(compiled.diagnostics)));
+    QVERIFY(compiled.program->entries.isEmpty());
+
+    QString error;
+    const ResolvedDecodeTarget target = resolveDecodeTarget(
+        compiled.program, DecodeTargetKind::Record, u"Plain", &error);
+    QVERIFY2(target.isValid(), qPrintable(error));
+    QCOMPARE(target.primaryInput, 0U);
+    QVERIFY(target.program != compiled.program);
+    QCOMPARE(target.program->entries.size(), 1);
+    QCOMPARE(target.program->symbol(target.program->entries.first().name),
+             QStringLiteral("Plain"));
+
+    const DecodeResult decoded = decode(
+        target.program, target.entryName,
+        {{QStringLiteral("primary"), QByteArray::fromHex("1133")},
+         {QStringLiteral("auxiliary"), QByteArray::fromHex("22")}});
+    QVERIFY2(decoded.success(),
+             qPrintable(runtimeDiagnostics(decoded.diagnostics)));
+    QCOMPARE(decoded.endOffset, 2ULL);
+    QCOMPARE(decoded.tree->nodes.first().kind, DecodedNodeKind::Entry);
+    QCOMPARE(decoded.tree->values.at(
+                 field(*decoded.tree, *target.program, decoded.rootValue,
+                       u"value"))
+                 .unsignedValue,
+             0x11ULL);
+    QCOMPARE(decoded.tree->values.at(
+                 field(*decoded.tree, *target.program, decoded.rootValue,
+                       u"external"))
+                 .unsignedValue,
+             0x22ULL);
+
+    const RecordDesc* anonymous = nullptr;
+    for (const RecordDesc& record : compiled.program->records) {
+        if (compiled.program->symbol(record.name)
+                .startsWith(QStringLiteral("$anon_record_"))) {
+            anonymous = &record;
+            break;
+        }
+    }
+    QVERIFY(anonymous != nullptr);
+    error.clear();
+    const ResolvedDecodeTarget anonymousTarget = resolveDecodeTarget(
+        compiled.program, DecodeTargetKind::Record,
+        compiled.program->symbol(anonymous->name), &error);
+    QVERIFY2(anonymousTarget.isValid(), qPrintable(error));
+    const DecodeResult anonymousDecoded = decode(
+        anonymousTarget.program, anonymousTarget.entryName,
+        {{QStringLiteral("primary"), QByteArray::fromHex("44")},
+         {QStringLiteral("auxiliary"), QByteArray::fromHex("22")}});
+    QVERIFY2(anonymousDecoded.success(),
+             qPrintable(runtimeDiagnostics(anonymousDecoded.diagnostics)));
+    QCOMPARE(anonymousDecoded.tree->values.at(
+                 field(*anonymousDecoded.tree, *anonymousTarget.program,
+                       anonymousDecoded.rootValue, u"nested"))
+                 .unsignedValue,
+             0x44ULL);
+
+    error.clear();
+    const ResolvedDecodeTarget parameterized = resolveDecodeTarget(
+        compiled.program, DecodeTargetKind::Record, u"NeedsParameter", &error);
+    QVERIFY(!parameterized.isValid());
+    QVERIFY(error.contains(QStringLiteral("requires parameters")));
+
+    const CompileResult ambiguous = compileBrecoLang(QString::fromUtf8(R"BRECO(
+inputs { input left { } input right { } }
+record First { value: u8 }
+record Second { value: u8 }
+)BRECO"));
+    QVERIFY2(ambiguous.success(),
+             qPrintable(compilerDiagnostics(ambiguous.diagnostics)));
+    error.clear();
+    const ResolvedDecodeTarget noDefault = resolveDecodeTarget(
+        ambiguous.program, DecodeTargetKind::Record, u"First", &error);
+    QVERIFY(!noDefault.isValid());
+    QVERIFY(error.contains(QStringLiteral("default input")));
+
+    const CompileResult implicit =
+        compileBrecoLang(QStringLiteral("record Only { value: u8 }"));
+    QVERIFY2(implicit.success(),
+             qPrintable(compilerDiagnostics(implicit.diagnostics)));
+    error.clear();
+    const ResolvedDecodeTarget existing = resolveDecodeTarget(
+        implicit.program, DecodeTargetKind::Record, u"Only", &error);
+    QVERIFY2(existing.isValid(), qPrintable(error));
+    QCOMPARE(existing.program, implicit.program);
+
+    const CompileResult declared =
+        compileBrecoLang(QStringLiteral("entry Main from data { value: u8 }"));
+    QVERIFY2(declared.success(),
+             qPrintable(compilerDiagnostics(declared.diagnostics)));
+    error.clear();
+    const ResolvedDecodeTarget entry = resolveDecodeTarget(
+        declared.program, DecodeTargetKind::Entry, u"Main", &error);
+    QVERIFY2(entry.isValid(), qPrintable(error));
+    QCOMPARE(entry.program, declared.program);
 }
 
 void BrecoLangRuntimeTests::treeModeDecodesRecordsRegionsBitfieldsComputedSelectAndInputs() {
@@ -484,6 +762,127 @@ void BrecoLangRuntimeTests::treeModeDecodesRecordsRegionsBitfieldsComputedSelect
         }
     }
     QVERIFY(invalidPacket);
+}
+
+void BrecoLangRuntimeTests::inlineSelectsYieldTransparentAndAggregatedFields() {
+    const QString source = QString::fromUtf8(R"BRECO(
+language breco 0.1
+inputs { input data { default } }
+entry Main from data {
+    tag: u8
+    select tag {
+        1 => { direct: u8 shared: u8 }
+        default => {
+            fallback: u8
+            shared: repeat 2 { part: u8 }
+        }
+    }
+    select {
+        when tag == 1 => { shared: repeat 2 { part: u8 } }
+        else => { }
+    }
+    select { when tag == 1 => { solo: u8 } else => { } }
+    select { when tag == 2 => { solo: u8 } else => { } }
+    select { when tag == 9 => { never: u8 } else => { } }
+    select { when tag == 8 => { never: u8 } else => { } }
+    select { when true => { conditional: u8 when false } else => { } }
+    select { when true => { conditional: u8 } else => { } }
+    computed total: u64 = count(shared)
+    computed has_never: bool = present(never)
+}
+)BRECO");
+    const CompileResult compiled = compileBrecoLang(source);
+    QVERIFY2(compiled.success(),
+             qPrintable(compilerDiagnostics(compiled.diagnostics)));
+
+    const QByteArray bytes = QByteArray::fromHex("01112233445566");
+    const DecodeResult tree =
+        decode(compiled.program, QStringLiteral("Main"),
+               {{QStringLiteral("data"), bytes}});
+    QVERIFY2(tree.success(), qPrintable(runtimeDiagnostics(tree.diagnostics)));
+    const DecodedValueId direct =
+        field(*tree.tree, *compiled.program, tree.rootValue, u"direct");
+    QCOMPARE(tree.tree->values.at(direct).unsignedValue, 0x11ULL);
+    const DecodedValueId shared =
+        field(*tree.tree, *compiled.program, tree.rootValue, u"shared");
+    QCOMPARE(tree.tree->values.at(shared).kind,
+             DecodedValueKind::Aggregate);
+    QCOMPARE(tree.tree->values.at(shared).logicalCount, 3ULL);
+    QCOMPARE(tree.tree->values.at(shared).aggregateShape,
+             DecodedAggregateShape::PromotedSequence);
+    const DecodedValueId solo =
+        field(*tree.tree, *compiled.program, tree.rootValue, u"solo");
+    QCOMPARE(tree.tree->values.at(solo).kind,
+             DecodedValueKind::Aggregate);
+    QCOMPARE(tree.tree->values.at(solo).logicalCount, 1ULL);
+    QCOMPARE(tree.tree->values.at(solo).aggregateShape,
+             DecodedAggregateShape::SingleScalar);
+    const DecodedValueId conditional =
+        field(*tree.tree, *compiled.program, tree.rootValue, u"conditional");
+    QCOMPARE(tree.tree->values.at(conditional).kind,
+             DecodedValueKind::Aggregate);
+    QCOMPARE(tree.tree->values.at(conditional).logicalCount, 1ULL);
+    QCOMPARE(tree.tree->values.at(conditional).aggregateShape,
+             DecodedAggregateShape::SingleScalar);
+    QCOMPARE(field(*tree.tree, *compiled.program, tree.rootValue, u"never"),
+             kInvalidId);
+    QCOMPARE(tree.tree->values.at(
+                 field(*tree.tree, *compiled.program, tree.rootValue, u"total"))
+                 .unsignedValue,
+             3ULL);
+    QVERIFY(!tree.tree->values.at(
+                  field(*tree.tree, *compiled.program, tree.rootValue,
+                        u"has_never"))
+                  .booleanValue);
+
+    int sharedContainers = 0;
+    int soloContainers = 0;
+    for (const DecodedNode& node : tree.tree->nodes) {
+        if (node.hidden) {
+            continue;
+        }
+        QVERIFY(node.kind != DecodedNodeKind::Select);
+        if (tree.tree->name(node.name) == QStringLiteral("shared")) {
+            ++sharedContainers;
+            QCOMPARE(node.kind, DecodedNodeKind::Sequence);
+        }
+        if (tree.tree->name(node.name) == QStringLiteral("solo")) {
+            ++soloContainers;
+            QCOMPARE(node.kind, DecodedNodeKind::Sequence);
+        }
+    }
+    QCOMPARE(sharedContainers, 1);
+    QCOMPARE(soloContainers, 1);
+
+    RecordingOutput output;
+    DecodeRequest request;
+    request.program = compiled.program;
+    request.entryName = QStringLiteral("Main");
+    request.mode = DecodeMode::Streaming;
+    request.output = &output;
+    request.inputs.resize(compiled.program->inputs.size());
+    request.inputs[0] = std::make_shared<BorrowedWindowSource>(
+        bytes, QStringLiteral("inline.bin"));
+    const DecodeResult streamed = decodeBrecoProgram(request);
+    QVERIFY2(streamed.success(),
+             qPrintable(runtimeDiagnostics(streamed.diagnostics)));
+    const QJsonObject object = QJsonDocument::fromJson(output.bytes).object();
+    QCOMPARE(object.value(QStringLiteral("direct")).toInt(), 0x11);
+    QCOMPARE(object.value(QStringLiteral("solo")).toInt(), 0x55);
+    QCOMPARE(object.value(QStringLiteral("conditional")).toInt(), 0x66);
+    QVERIFY(!object.contains(QStringLiteral("never")));
+    const QJsonArray sharedJson =
+        object.value(QStringLiteral("shared")).toArray();
+    QCOMPARE(sharedJson.size(), 3);
+    QCOMPARE(sharedJson.at(0).toInt(), 0x22);
+    QCOMPARE(sharedJson.at(1).toObject()
+                 .value(QStringLiteral("part")).toInt(),
+             0x33);
+    QCOMPARE(sharedJson.at(2).toObject()
+                 .value(QStringLiteral("part")).toInt(),
+             0x44);
+    QVERIFY(output.bytes.indexOf("\"shared\"") >
+            output.bytes.indexOf("\"total\""));
 }
 
 void BrecoLangRuntimeTests::probeModeExecutesWithoutConstructingNodes() {
@@ -978,7 +1377,12 @@ void BrecoLangRuntimeTests::millionByteSequenceResolvesAndMaterializesConstantSi
     const QString source = QString::fromUtf8(R"BRECO(
 language breco 0.1
 inputs { input data { default } }
-entry Run from data { items: repeat 1000000 { value: u8 } }
+entry Run from data {
+    select {
+        when true => { items: repeat 1000000 { value: u8 } }
+        else => { }
+    }
+}
 )BRECO");
     const CompileResult compiled = compileBrecoLang(source);
     QVERIFY2(compiled.success(), qPrintable(compilerDiagnostics(compiled.diagnostics)));
@@ -1011,6 +1415,76 @@ entry Run from data { items: repeat 1000000 { value: u8 } }
     QCOMPARE(page.metrics.replayedItems, 64ULL);
     QCOMPARE(page.metrics.materializedNodes, 130ULL);
     QVERIFY(page.deltas.first().tree->nodes.size() < 200);
+}
+
+void BrecoLangRuntimeTests::inlineAggregatePagingUsesStableContainerLocator() {
+    const QString source = QString::fromUtf8(R"BRECO(
+language breco 0.1
+inputs { input data { default } }
+entry Run from data {
+    select { when true => { items: repeat 3 { value: u8 } } else => { } }
+    select { when true => { items: repeat 3 { value: u8 } } else => { } }
+}
+)BRECO");
+    const CompileResult compiled = compileBrecoLang(source);
+    QVERIFY2(compiled.success(),
+             qPrintable(compilerDiagnostics(compiled.diagnostics)));
+    DecodeRequest request;
+    request.program = compiled.program;
+    request.entryName = QStringLiteral("Run");
+    request.inputs = {std::make_shared<BorrowedWindowSource>(
+        QByteArray::fromHex("010203040506"), QStringLiteral("aggregate.bin"))};
+
+    DecodeDocument document({19}, 43);
+    const DecodeResult resolved = document.resolve(request);
+    QVERIFY2(resolved.success(),
+             qPrintable(runtimeDiagnostics(resolved.diagnostics)));
+    QCOMPARE(resolved.shape->sequences.size(), 2);
+
+    auto containerLocator =
+        [&](const ResolvedSequenceShape& sequence) {
+            DisplayPageRequest pageRequest;
+            pageRequest.document = {19};
+            pageRequest.root = resolved.shape->root;
+            pageRequest.sequenceWindows = {{sequence.locator, 0, 2}};
+            const DisplayPageResult page =
+                document.requestDisplayPage(pageRequest);
+            MaterializationLocator result;
+            if (!page.success()) {
+                return QPair<bool, MaterializationLocator>{false, result};
+            }
+            for (const MaterializedPageDelta& delta : page.deltas) {
+                if (!delta.tree) {
+                    continue;
+                }
+                for (DecodedNodeId id = 0;
+                     id < static_cast<DecodedNodeId>(
+                              delta.tree->nodes.size());
+                     ++id) {
+                    const DecodedNode& node = delta.tree->nodes.at(id);
+                    if (!node.hidden &&
+                        delta.tree->name(node.name) ==
+                            QStringLiteral("items")) {
+                        if (node.kind != DecodedNodeKind::Sequence) {
+                            return QPair<bool, MaterializationLocator>{
+                                false, {}};
+                        }
+                        result = delta.tree->locators.at(id);
+                        break;
+                    }
+                }
+            }
+            return QPair<bool, MaterializationLocator>{result.isValid(),
+                                                       result};
+        };
+
+    const auto first =
+        containerLocator(resolved.shape->sequences.at(0));
+    const auto second =
+        containerLocator(resolved.shape->sequences.at(1));
+    QVERIFY(first.first);
+    QVERIFY(second.first);
+    QCOMPARE(first.second, second.second);
 }
 
 void BrecoLangRuntimeTests::variableContinuationPreservesSemanticStateAndColdReplay() {

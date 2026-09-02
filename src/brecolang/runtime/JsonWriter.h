@@ -27,6 +27,7 @@ public:
     bool signedInteger(qint64 value);
     bool floatingPoint(double value);
     bool string(QStringView value);
+    bool rawValue(QByteArrayView encoded);
     bool sourceBytesHex(ByteSource* source, quint64 offset, quint64 length);
 
     bool finish();

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QByteArray>
+#include <QHash>
 #include <QKeyEvent>
 #include <QMouseEvent>
 #include <QPair>
@@ -86,6 +87,12 @@ public:
     std::optional<quint64> selectedOffset() const;
     std::optional<quint64> selectionStartOffset() const;
     std::optional<QPair<quint64, quint64>> selectionRangeOffsets() const;
+    int effectiveBytesPerLine() const;
+    void setQueuedEditRanges(QVector<QPair<quint64, quint64>> ranges,
+                             QVector<bool> matchesOriginal = {});
+    void setEditingEnabled(bool enabled);
+    bool editingEnabled() const;
+    void setPendingByteOverlay(quint64 offset, const QByteArray& bytes);
 
 signals:
     void centerAnchorOffsetChanged(quint64 offset);
@@ -104,6 +111,10 @@ signals:
     void viewportFirstByteOffsetChanged(bool hasOffset, quint64 offset);
     void saveBinarySelectionRequested(quint64 startOffset, quint64 endOffsetExclusive);
     void saveBinaryFromHereRequested(quint64 startOffset);
+    void hexEditBytesRequested(quint64 startOffset);
+    void hexEditNumberRequested(quint64 startOffset, int byteWidth, bool signedValue);
+    void hexEditStringRequested(quint64 startOffset);
+    void queuedByteEditCommitted(quint64 offset, QByteArray newBytes);
 
 protected:
     void resizeEvent(QResizeEvent* event) override;
@@ -178,6 +189,14 @@ private:
     bool shouldBreakAfterByte(int index, const QByteArray& data, bool byteIsVisible) const;
     void emitSelectionRangeChanged();
     void showSelectionContextMenu(const QPoint& localPos);
+    void applyAbsoluteSelection(quint64 startOffset, quint64 endOffsetExclusive);
+    void syncVisibleSelectionFromAbsolute();
+    void syncAbsoluteSelectionFromVisible();
+    bool tokenOverlapsAbsoluteSelection(quint64 tokenStart, quint64 tokenEnd) const;
+    QByteArray bytesFromAbsoluteRange(quint64 startOffset, quint64 endOffsetExclusive) const;
+    bool beginShiftRangeExtend(quint64 clickedOffset);
+    void clearHexEditSession();
+    bool handleHexEditKey(QKeyEvent* event);
     void showGutterContextMenu(const QPoint& localPos);
     int tokenVisualWidth(const Token& token) const;
     int classicAsciiStartX(const DisplayLine& line) const;
@@ -229,6 +248,17 @@ private:
     int m_selectionStartVisibleIndex = -1;
     int m_selectionEndVisibleIndex = -1;
     int m_clickPressVisibleIndex = -1;
+    std::optional<QPair<quint64, quint64>> m_absoluteSelectionRange;
+    QVector<QPair<quint64, quint64>> m_queuedEditRanges;
+    QVector<bool> m_queuedEditMatchesOriginal;
+    QHash<quint64, unsigned char> m_pendingByteOverlay;
+    bool m_editingEnabled = false;
+    enum class HexEditMode { None, DirectHex, Number, String };
+    HexEditMode m_hexEditMode = HexEditMode::None;
+    quint64 m_hexEditOffset = 0;
+    int m_hexEditWidth = 1;
+    bool m_hexEditSigned = false;
+    QString m_hexEditBuffer;
     bool m_verticalSliderDragInProgress = false;
 
     QVector<DisplayLine> m_lines;

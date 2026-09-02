@@ -53,6 +53,7 @@ struct DecodeRequest {
     QIODevice* output = nullptr;
     quint64 documentGeneration = 1;
     QVector<SequenceWindow> sequenceWindows;
+    quint32 defaultSequenceItems = 0;
     std::shared_ptr<const ResolvedShapeSnapshot> resolvedShape;
     quint64 maxMaterializedNodes = std::numeric_limits<quint64>::max();
     WorkBudget workBudget;

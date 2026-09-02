@@ -15,6 +15,7 @@
 #include <QStyle>
 
 #include "debug/SelectionTrace.h"
+#include "edit/EditQueue.h"
 #include "text/StringModeRules.h"
 
 namespace breco {
@@ -240,6 +241,7 @@ void TextViewWidget::setData(const QByteArray& bytes, quint64 baseOffset,
     m_hasSelection = false;
     m_selectionStartVisibleIndex = -1;
     m_selectionEndVisibleIndex = -1;
+    m_absoluteSelectionRange.reset();
     m_selecting = false;
     m_lastHoveredAbsoluteOffset = -1;
     m_hoverAnchorOffset.reset();
@@ -473,35 +475,12 @@ void TextViewWidget::setSelectedOffset(quint64 absoluteOffset, bool centerInView
 }
 
 bool TextViewWidget::setSelectionRange(quint64 startOffset, quint64 endOffsetExclusive) {
-    if (endOffsetExclusive <= startOffset || m_lines.isEmpty()) {
+    if (endOffsetExclusive <= startOffset) {
         return false;
     }
-
-    int firstVisibleIndex = -1;
-    int lastVisibleIndex = -1;
-    for (const DisplayLine& line : m_lines) {
-        for (const Token& token : line.tokens) {
-            const quint64 tokenLength = static_cast<quint64>(qMax(1, token.byteLen));
-            if (token.absoluteOffset == startOffset) {
-                firstVisibleIndex = token.visibleIndex;
-            }
-            if (token.absoluteOffset <= std::numeric_limits<quint64>::max() - tokenLength &&
-                token.absoluteOffset + tokenLength == endOffsetExclusive) {
-                lastVisibleIndex = token.visibleIndex;
-            }
-        }
-    }
-    if (firstVisibleIndex < 0 || lastVisibleIndex < firstVisibleIndex) {
-        return false;
-    }
-
-    m_selectionStartVisibleIndex = firstVisibleIndex;
-    m_selectionEndVisibleIndex = lastVisibleIndex;
-    m_clickPressVisibleIndex = -1;
-    m_hasSelection = true;
-    m_selecting = false;
     m_selectedOffset = startOffset;
     m_hasSelectedOffset = true;
+    applyAbsoluteSelection(startOffset, endOffsetExclusive);
     m_contentWidget->update();
     m_gutterWidget->update();
     emitSelectionRangeChanged();
@@ -752,18 +731,33 @@ bool TextViewWidget::eventFilter(QObject* watched, QEvent* event) {
                 setFocus(Qt::MouseFocusReason);
                 const std::optional<int> visibleIdx = visibleIndexForPoint(mouseEvent->pos());
                 if (visibleIdx.has_value()) {
+                    const quint64 clickedOffset = m_visibleOffsets.at(visibleIdx.value());
+                    const Qt::KeyboardModifiers mods = mouseEvent->modifiers();
+                    const bool shiftClick = mods.testFlag(Qt::ShiftModifier);
+                    if (shiftClick && beginShiftRangeExtend(clickedOffset)) {
+                        mouseEvent->accept();
+                        return true;
+                    }
+                    if (m_hexEditMode != HexEditMode::None) {
+                        clearHexEditSession();
+                    }
                     m_selectionStartVisibleIndex = visibleIdx.value();
                     m_selectionEndVisibleIndex = visibleIdx.value();
                     m_clickPressVisibleIndex = visibleIdx.value();
                     m_hasSelection = true;
                     m_selecting = true;
-                    m_selectedOffset = m_visibleOffsets.at(visibleIdx.value());
+                    m_selectedOffset = clickedOffset;
                     m_hasSelectedOffset = true;
+                    syncAbsoluteSelectionFromVisible();
                 } else {
+                    if (m_hexEditMode != HexEditMode::None) {
+                        clearHexEditSession();
+                    }
                     m_hasSelection = false;
                     m_selecting = false;
                     m_selectionStartVisibleIndex = -1;
                     m_selectionEndVisibleIndex = -1;
+                    m_absoluteSelectionRange.reset();
                 }
                 m_contentWidget->update();
                 m_gutterWidget->update();
@@ -771,10 +765,22 @@ bool TextViewWidget::eventFilter(QObject* watched, QEvent* event) {
                 mouseEvent->accept();
                 return true;
             }
-            if (mouseEvent->button() == Qt::RightButton && hasSelectionRange()) {
-                showSelectionContextMenu(mouseEvent->pos());
-                mouseEvent->accept();
-                return true;
+            if (mouseEvent->button() == Qt::RightButton) {
+                const std::optional<int> visibleIdx = visibleIndexForPoint(mouseEvent->pos());
+                if (visibleIdx.has_value() && !hasSelectionRange()) {
+                    m_selectionStartVisibleIndex = visibleIdx.value();
+                    m_selectionEndVisibleIndex = visibleIdx.value();
+                    m_hasSelection = true;
+                    m_selectedOffset = m_visibleOffsets.at(visibleIdx.value());
+                    m_hasSelectedOffset = true;
+                    syncAbsoluteSelectionFromVisible();
+                    emitSelectionRangeChanged();
+                }
+                if (hasSelectionRange()) {
+                    showSelectionContextMenu(mouseEvent->pos());
+                    mouseEvent->accept();
+                    return true;
+                }
             }
         } else if (event->type() == QEvent::MouseMove) {
             auto* mouseEvent = static_cast<QMouseEvent*>(event);
@@ -785,6 +791,7 @@ bool TextViewWidget::eventFilter(QObject* watched, QEvent* event) {
                     m_selectionEndVisibleIndex = visibleIdx.value();
                     m_selectedOffset = m_visibleOffsets.at(visibleIdx.value());
                     m_hasSelectedOffset = true;
+                    syncAbsoluteSelectionFromVisible();
                 }
                 m_contentWidget->update();
                 m_gutterWidget->update();
@@ -795,6 +802,7 @@ bool TextViewWidget::eventFilter(QObject* watched, QEvent* event) {
             auto* mouseEvent = static_cast<QMouseEvent*>(event);
             if (mouseEvent->button() == Qt::LeftButton && m_selecting) {
                 m_selecting = false;
+                syncAbsoluteSelectionFromVisible();
                 emitSelectionRangeChanged();
                 if (m_clickPressVisibleIndex >= 0 &&
                     m_selectionStartVisibleIndex == m_selectionEndVisibleIndex &&
@@ -803,6 +811,11 @@ bool TextViewWidget::eventFilter(QObject* watched, QEvent* event) {
                     emit byteClicked(m_visibleOffsets.at(m_clickPressVisibleIndex));
                 }
                 m_clickPressVisibleIndex = -1;
+                mouseEvent->accept();
+                return true;
+            }
+            if (mouseEvent->button() == Qt::LeftButton && m_hexEditMode != HexEditMode::None) {
+                clearHexEditSession();
                 mouseEvent->accept();
                 return true;
             }
@@ -882,6 +895,9 @@ bool TextViewWidget::eventFilter(QObject* watched, QEvent* event) {
 }
 
 void TextViewWidget::keyPressEvent(QKeyEvent* event) {
+    if (handleHexEditKey(event)) {
+        return;
+    }
     if (event->matches(QKeySequence::Copy)) {
         if (!hasSelectionRange()) {
             event->accept();
@@ -1117,9 +1133,11 @@ void TextViewWidget::rebuildLines() {
     m_stringVisibilityMask.clear();
     m_byteClasses.clear();
     if (m_bytes.isEmpty()) {
-        m_hasSelection = false;
         m_selectionStartVisibleIndex = -1;
         m_selectionEndVisibleIndex = -1;
+        if (!m_absoluteSelectionRange.has_value()) {
+            m_hasSelection = false;
+        }
         updateScrollRange();
         if (debug::selectionTraceEnabled()) {
             BRECO_SELTRACE(QStringLiteral("TextViewWidget::rebuildLines: empty bytes, elapsed=%1us")
@@ -1178,18 +1196,23 @@ void TextViewWidget::rebuildLines() {
 
     auto finalizeRebuildState = [&]() {
         if (m_visibleOffsets.isEmpty()) {
-            m_hasSelection = false;
             m_selectionStartVisibleIndex = -1;
             m_selectionEndVisibleIndex = -1;
+            if (!m_absoluteSelectionRange.has_value()) {
+                m_hasSelection = false;
+            }
             updateScrollRange();
             return;
         }
 
-        if (m_hasSelection) {
+        if (m_absoluteSelectionRange.has_value()) {
+            syncVisibleSelectionFromAbsolute();
+        } else if (m_hasSelection) {
             m_selectionStartVisibleIndex =
                 qBound(0, m_selectionStartVisibleIndex, m_visibleOffsets.size() - 1);
             m_selectionEndVisibleIndex =
                 qBound(0, m_selectionEndVisibleIndex, m_visibleOffsets.size() - 1);
+            syncAbsoluteSelectionFromVisible();
         } else {
             m_selectionStartVisibleIndex = -1;
             m_selectionEndVisibleIndex = -1;
@@ -1450,6 +1473,10 @@ bool TextViewWidget::isByteBoxAtVisibleIndex(int visibleIndex) const {
 }
 
 std::optional<quint64> TextViewWidget::selectionStartOffset() const {
+    if (m_absoluteSelectionRange.has_value() &&
+        m_absoluteSelectionRange->second > m_absoluteSelectionRange->first) {
+        return m_absoluteSelectionRange->first;
+    }
     if (!hasSelectionRange()) {
         return std::nullopt;
     }
@@ -1468,6 +1495,10 @@ std::optional<quint64> TextViewWidget::selectedOffset() const {
 }
 
 std::optional<QPair<quint64, quint64>> TextViewWidget::selectionRangeOffsets() const {
+    if (m_absoluteSelectionRange.has_value() &&
+        m_absoluteSelectionRange->second > m_absoluteSelectionRange->first) {
+        return m_absoluteSelectionRange;
+    }
     if (!hasSelectionRange()) {
         return std::nullopt;
     }
@@ -1540,6 +1571,10 @@ void TextViewWidget::updateHoverFromPoint(const QPoint& point) {
 }
 
 bool TextViewWidget::hasSelectionRange() const {
+    if (m_absoluteSelectionRange.has_value() &&
+        m_absoluteSelectionRange->second > m_absoluteSelectionRange->first) {
+        return true;
+    }
     return m_hasSelection && m_selectionStartVisibleIndex >= 0 &&
            m_selectionEndVisibleIndex >= 0;
 }
@@ -1605,6 +1640,10 @@ QVector<quint64> TextViewWidget::selectedVisibleOffsets() const {
 }
 
 std::optional<QPair<quint64, quint64>> TextViewWidget::selectedByteExtentOffsets() const {
+    if (m_absoluteSelectionRange.has_value() &&
+        m_absoluteSelectionRange->second > m_absoluteSelectionRange->first) {
+        return m_absoluteSelectionRange;
+    }
     const QVector<const Token*> selected = selectedTokens();
     if (selected.isEmpty() || selected.first() == nullptr || selected.last() == nullptr) {
         return std::nullopt;
@@ -1652,6 +1691,14 @@ std::optional<quint64> TextViewWidget::lastVisibleByteOffset() const {
 }
 
 unsigned char TextViewWidget::byteAtAbsoluteOffset(quint64 absoluteOffset) const {
+    if (m_pendingByteOverlay.contains(absoluteOffset)) {
+        return m_pendingByteOverlay.value(absoluteOffset);
+    }
+    const qint64 backingRel =
+        static_cast<qint64>(absoluteOffset) - static_cast<qint64>(m_backingBaseOffset);
+    if (backingRel >= 0 && backingRel < m_backingBytes.size()) {
+        return static_cast<unsigned char>(m_backingBytes.at(static_cast<int>(backingRel)));
+    }
     const qint64 relSigned =
         static_cast<qint64>(absoluteOffset) - static_cast<qint64>(m_baseOffset);
     if (relSigned < 0 || relSigned >= m_bytes.size()) {
@@ -1661,6 +1708,10 @@ unsigned char TextViewWidget::byteAtAbsoluteOffset(quint64 absoluteOffset) const
 }
 
 QByteArray TextViewWidget::selectedBytes() const {
+    const auto range = selectedByteExtentOffsets();
+    if (range.has_value()) {
+        return bytesFromAbsoluteRange(range->first, range->second);
+    }
     const QVector<const Token*> selected = selectedTokens();
     if (selected.isEmpty()) {
         return {};
@@ -1927,6 +1978,23 @@ int TextViewWidget::fixedBytesPerLine() const {
     }
 }
 
+int TextViewWidget::effectiveBytesPerLine() const {
+    const int fixed = fixedBytesPerLine();
+    if (fixed > 0) {
+        return fixed;
+    }
+    if (!m_lines.isEmpty()) {
+        int widest = 0;
+        for (const DisplayLine& line : m_lines) {
+            widest = qMax(widest, qMax(1, line.byteLength));
+        }
+        if (widest > 0) {
+            return widest;
+        }
+    }
+    return 16;
+}
+
 bool TextViewWidget::shouldBreakAfterByte(int index, const QByteArray& data,
                                           bool byteIsVisible) const {
     Q_UNUSED(byteIsVisible);
@@ -1974,6 +2042,267 @@ bool TextViewWidget::shouldBreakAfterByte(int index, const QByteArray& data,
     }
 }
 
+void TextViewWidget::applyAbsoluteSelection(quint64 startOffset, quint64 endOffsetExclusive) {
+    m_absoluteSelectionRange = qMakePair(startOffset, endOffsetExclusive);
+    m_hasSelection = true;
+    m_selecting = false;
+    m_clickPressVisibleIndex = -1;
+    syncVisibleSelectionFromAbsolute();
+}
+
+void TextViewWidget::syncVisibleSelectionFromAbsolute() {
+    if (!m_absoluteSelectionRange.has_value() || m_visibleOffsets.isEmpty()) {
+        m_selectionStartVisibleIndex = -1;
+        m_selectionEndVisibleIndex = -1;
+        return;
+    }
+    const quint64 start = m_absoluteSelectionRange->first;
+    const quint64 end = m_absoluteSelectionRange->second;
+    int firstVisible = -1;
+    int lastVisible = -1;
+    for (int i = 0; i < m_visibleOffsets.size(); ++i) {
+        const quint64 offset = m_visibleOffsets.at(i);
+        if (offset >= start && offset < end) {
+            if (firstVisible < 0) {
+                firstVisible = i;
+            }
+            lastVisible = i;
+        }
+    }
+    m_selectionStartVisibleIndex = firstVisible;
+    m_selectionEndVisibleIndex = lastVisible;
+}
+
+void TextViewWidget::syncAbsoluteSelectionFromVisible() {
+    if (!m_hasSelection || m_selectionStartVisibleIndex < 0 ||
+        m_selectionEndVisibleIndex < 0 || m_visibleOffsets.isEmpty()) {
+        m_absoluteSelectionRange.reset();
+        return;
+    }
+    const QPair<int, int> indices = normalizedSelectionVisibleIndices();
+    if (indices.first < 0 || indices.first >= m_visibleOffsets.size() ||
+        indices.second <= indices.first) {
+        m_absoluteSelectionRange.reset();
+        return;
+    }
+    const quint64 start = m_visibleOffsets.at(indices.first);
+    const int lastIndex = indices.second - 1;
+    if (lastIndex < 0 || lastIndex >= m_visibleOffsets.size()) {
+        m_absoluteSelectionRange.reset();
+        return;
+    }
+    m_absoluteSelectionRange = qMakePair(start, m_visibleOffsets.at(lastIndex) + 1ULL);
+}
+
+bool TextViewWidget::tokenOverlapsAbsoluteSelection(quint64 tokenStart,
+                                                    quint64 tokenEnd) const {
+    if (!m_absoluteSelectionRange.has_value()) {
+        return false;
+    }
+    return tokenEnd > m_absoluteSelectionRange->first &&
+           tokenStart < m_absoluteSelectionRange->second;
+}
+
+QByteArray TextViewWidget::bytesFromAbsoluteRange(quint64 startOffset,
+                                                  quint64 endOffsetExclusive) const {
+    if (endOffsetExclusive <= startOffset) {
+        return {};
+    }
+    QByteArray out;
+    const quint64 length = endOffsetExclusive - startOffset;
+    out.resize(static_cast<int>(
+        qMin(length, static_cast<quint64>(std::numeric_limits<int>::max()))));
+    for (int i = 0; i < out.size(); ++i) {
+        out[i] = static_cast<char>(
+            byteAtAbsoluteOffset(startOffset + static_cast<quint64>(i)));
+    }
+    return out;
+}
+
+bool TextViewWidget::beginShiftRangeExtend(quint64 clickedOffset) {
+    const std::optional<quint64> first = selectionStartOffset();
+    if (!first.has_value()) {
+        return false;
+    }
+    const quint64 previousStart = first.value();
+    const quint64 start = qMin(previousStart, clickedOffset);
+    const quint64 end = qMax(previousStart, clickedOffset) + 1ULL;
+    m_selectedOffset = start;
+    m_hasSelectedOffset = true;
+    applyAbsoluteSelection(start, end);
+    m_contentWidget->update();
+    m_gutterWidget->update();
+    emitSelectionRangeChanged();
+    if (start != previousStart) {
+        emit byteClicked(start);
+    }
+    return true;
+}
+
+void TextViewWidget::setQueuedEditRanges(QVector<QPair<quint64, quint64>> ranges,
+                                         QVector<bool> matchesOriginal) {
+    m_queuedEditRanges = std::move(ranges);
+    m_queuedEditMatchesOriginal = std::move(matchesOriginal);
+    m_contentWidget->update();
+}
+
+void TextViewWidget::setEditingEnabled(bool enabled) {
+    m_editingEnabled = enabled;
+    if (!enabled) {
+        clearHexEditSession();
+    }
+}
+
+bool TextViewWidget::editingEnabled() const {
+    return m_editingEnabled;
+}
+
+void TextViewWidget::setPendingByteOverlay(quint64 offset, const QByteArray& bytes) {
+    for (int i = 0; i < bytes.size(); ++i) {
+        m_pendingByteOverlay.insert(offset + static_cast<quint64>(i),
+                                    static_cast<unsigned char>(bytes.at(i)));
+    }
+    m_contentWidget->update();
+}
+
+void TextViewWidget::clearHexEditSession() {
+    m_hexEditMode = HexEditMode::None;
+    m_hexEditBuffer.clear();
+    m_hexEditWidth = 1;
+    m_contentWidget->update();
+}
+
+bool TextViewWidget::handleHexEditKey(QKeyEvent* event) {
+    if (m_hexEditMode == HexEditMode::None) {
+        return false;
+    }
+    if (event->key() == Qt::Key_Escape) {
+        clearHexEditSession();
+        event->accept();
+        return true;
+    }
+    if (m_hexEditMode == HexEditMode::DirectHex) {
+        if (event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter) {
+            if (!m_hexEditBuffer.isEmpty()) {
+                bool ok = false;
+                const uint value = m_hexEditBuffer.toUInt(&ok, 16);
+                if (ok && value <= 255U) {
+                    QByteArray bytes(1, static_cast<char>(value));
+                    setPendingByteOverlay(m_hexEditOffset, bytes);
+                    emit queuedByteEditCommitted(m_hexEditOffset, bytes);
+                }
+            }
+            m_hexEditBuffer.clear();
+            m_hexEditOffset += 1ULL;
+            m_contentWidget->update();
+            event->accept();
+            return true;
+        }
+        const QString text = event->text().toLower();
+        if (text.size() == 1) {
+            const QChar ch = text.at(0);
+            if ((ch >= QLatin1Char('0') && ch <= QLatin1Char('9')) ||
+                (ch >= QLatin1Char('a') && ch <= QLatin1Char('f'))) {
+                if (m_hexEditBuffer.size() >= 2) {
+                    m_hexEditBuffer.clear();
+                }
+                m_hexEditBuffer.append(ch);
+                bool ok = false;
+                const uint value = m_hexEditBuffer.toUInt(&ok, 16);
+                if (ok) {
+                    setPendingByteOverlay(
+                        m_hexEditOffset,
+                        QByteArray(1, static_cast<char>(value)));
+                }
+                event->accept();
+                return true;
+            }
+        }
+        event->accept();
+        return true;
+    }
+    if (m_hexEditMode == HexEditMode::Number) {
+        if (event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter) {
+            const auto packed = packTypedInteger(m_hexEditBuffer, m_hexEditWidth,
+                                                 m_hexEditSigned, m_utf16LittleEndian);
+            if (packed.has_value()) {
+                setPendingByteOverlay(m_hexEditOffset, packed.value());
+                emit queuedByteEditCommitted(m_hexEditOffset, packed.value());
+            }
+            clearHexEditSession();
+            event->accept();
+            return true;
+        }
+        if (event->key() == Qt::Key_Backspace) {
+            if (!m_hexEditBuffer.isEmpty()) {
+                m_hexEditBuffer.chop(1);
+            }
+            event->accept();
+            return true;
+        }
+        const QString text = event->text();
+        if (!text.isEmpty()) {
+            m_hexEditBuffer.append(text);
+            event->accept();
+            return true;
+        }
+        event->accept();
+        return true;
+    }
+    if (m_hexEditMode == HexEditMode::String) {
+        if (event->key() == Qt::Key_Escape) {
+            clearHexEditSession();
+            event->accept();
+            return true;
+        }
+        if (event->key() == Qt::Key_Left) {
+            if (m_hexEditOffset > 0) {
+                --m_hexEditOffset;
+            }
+            m_contentWidget->update();
+            event->accept();
+            return true;
+        }
+        if (event->key() == Qt::Key_Right) {
+            ++m_hexEditOffset;
+            m_contentWidget->update();
+            event->accept();
+            return true;
+        }
+        if (event->key() == Qt::Key_Backspace) {
+            if (m_hexEditOffset > 0) {
+                --m_hexEditOffset;
+            }
+            m_contentWidget->update();
+            event->accept();
+            return true;
+        }
+        if (event->key() == Qt::Key_Delete) {
+            const QByteArray zero(1, '\0');
+            setPendingByteOverlay(m_hexEditOffset, zero);
+            emit queuedByteEditCommitted(m_hexEditOffset, zero);
+            ++m_hexEditOffset;
+            m_contentWidget->update();
+            event->accept();
+            return true;
+        }
+        const QString text = event->text();
+        if (!text.isEmpty() && text.at(0).isPrint()) {
+            const char byte = static_cast<char>(text.at(0).toLatin1());
+            const QByteArray bytes(1, byte);
+            setPendingByteOverlay(m_hexEditOffset, bytes);
+            emit queuedByteEditCommitted(m_hexEditOffset, bytes);
+            ++m_hexEditOffset;
+            m_contentWidget->update();
+            event->accept();
+            return true;
+        }
+        event->accept();
+        return true;
+    }
+    return false;
+}
+
 void TextViewWidget::emitSelectionRangeChanged() {
     const std::optional<QPair<quint64, quint64>> range = selectionRangeOffsets();
     if (!range.has_value()) {
@@ -1997,7 +2326,35 @@ void TextViewWidget::showSelectionContextMenu(const QPoint& localPos) {
     QAction* saveBinary = copyMenu->addAction(QStringLiteral("Binary"));
     QAction* saveBinaryFromHere = copyMenu->addAction(QStringLiteral("Binary (from here)"));
 
+    QAction* editHex = nullptr;
+    QAction* editString = nullptr;
+    QAction* editInt8 = nullptr;
+    QAction* editUInt8 = nullptr;
+    QAction* editInt16 = nullptr;
+    QAction* editUInt16 = nullptr;
+    QAction* editInt32 = nullptr;
+    QAction* editUInt32 = nullptr;
+    QAction* editInt64 = nullptr;
+    QAction* editUInt64 = nullptr;
+    if (m_editingEnabled) {
+        menu.addSeparator();
+        editHex = menu.addAction(QStringLiteral("Edit bytes (Direct, HEX)"));
+        QMenu* numberMenu = menu.addMenu(QStringLiteral("Edit number"));
+        editInt8 = numberMenu->addAction(QStringLiteral("int8"));
+        editUInt8 = numberMenu->addAction(QStringLiteral("uint8"));
+        editInt16 = numberMenu->addAction(QStringLiteral("int16"));
+        editUInt16 = numberMenu->addAction(QStringLiteral("uint16"));
+        editInt32 = numberMenu->addAction(QStringLiteral("int32"));
+        editUInt32 = numberMenu->addAction(QStringLiteral("uint32"));
+        editInt64 = numberMenu->addAction(QStringLiteral("int64"));
+        editUInt64 = numberMenu->addAction(QStringLiteral("uint64"));
+        editString = menu.addAction(QStringLiteral("Edit bytes (string)"));
+    }
+
     QAction* selected = menu.exec(m_contentWidget->mapToGlobal(localPos));
+    const auto range = selectedByteExtentOffsets();
+    const quint64 editOffset =
+        range.has_value() ? range->first : selectionStartOffset().value_or(0);
     if (selected == copyText) {
         copySelectionToClipboard(CopyFormat::TextOnly);
     } else if (selected == copyOffsetHex) {
@@ -2007,15 +2364,65 @@ void TextViewWidget::showSelectionContextMenu(const QPoint& localPos) {
     } else if (selected == copyCHeader) {
         copySelectionToClipboard(CopyFormat::CHeader);
     } else if (selected == saveBinary) {
-        const auto range = selectedByteExtentOffsets();
         if (range.has_value()) {
             emit saveBinarySelectionRequested(range->first, range->second);
         }
     } else if (selected == saveBinaryFromHere) {
-        const auto range = selectedByteExtentOffsets();
         if (range.has_value()) {
             emit saveBinaryFromHereRequested(range->first);
         }
+    } else if (selected != nullptr && selected == editHex) {
+        m_hexEditMode = HexEditMode::DirectHex;
+        m_hexEditOffset = editOffset;
+        m_hexEditBuffer.clear();
+        m_hexEditWidth = 1;
+        setFocus(Qt::OtherFocusReason);
+        m_contentWidget->update();
+        emit hexEditBytesRequested(editOffset);
+    } else if (selected != nullptr && selected == editString) {
+        m_hexEditMode = HexEditMode::String;
+        m_hexEditOffset = editOffset;
+        m_hexEditBuffer.clear();
+        setFocus(Qt::OtherFocusReason);
+        m_contentWidget->update();
+        emit hexEditStringRequested(editOffset);
+    } else if (selected != nullptr &&
+               (selected == editInt8 || selected == editUInt8 || selected == editInt16 ||
+                selected == editUInt16 || selected == editInt32 || selected == editUInt32 ||
+                selected == editInt64 || selected == editUInt64)) {
+        int width = 1;
+        bool signedValue = false;
+        if (selected == editInt8) {
+            width = 1;
+            signedValue = true;
+        } else if (selected == editUInt8) {
+            width = 1;
+        } else if (selected == editInt16) {
+            width = 2;
+            signedValue = true;
+        } else if (selected == editUInt16) {
+            width = 2;
+        } else if (selected == editInt32) {
+            width = 4;
+            signedValue = true;
+        } else if (selected == editUInt32) {
+            width = 4;
+        } else if (selected == editInt64) {
+            width = 8;
+            signedValue = true;
+        } else if (selected == editUInt64) {
+            width = 8;
+        }
+        m_hexEditMode = HexEditMode::Number;
+        m_hexEditOffset = editOffset;
+        m_hexEditWidth = width;
+        m_hexEditSigned = signedValue;
+        m_hexEditBuffer.clear();
+        for (int i = 0; i < width; ++i) {
+            m_pendingByteOverlay.insert(editOffset + static_cast<quint64>(i), 0);
+        }
+        setFocus(Qt::OtherFocusReason);
+        m_contentWidget->update();
     }
 }
 
@@ -2168,8 +2575,11 @@ void TextViewWidget::paintContent() {
             const quint64 tokenEndOffset =
                 token.absoluteOffset + static_cast<quint64>(qMax(1, token.byteLen));
 
-            if (hasSelection && token.visibleIndex >= selection.first &&
-                token.visibleIndex < selection.second) {
+            if (hasSelection &&
+                (m_absoluteSelectionRange.has_value()
+                     ? tokenOverlapsAbsoluteSelection(tokenStartOffset, tokenEndOffset)
+                     : (token.visibleIndex >= selection.first &&
+                        token.visibleIndex < selection.second))) {
                 painter.fillRect(QRect(x, rowRect.top() + 1, token.pixelWidth, lineH - 2),
                                  palette().highlight().color().lighter(120));
             }
@@ -2214,6 +2624,21 @@ void TextViewWidget::paintContent() {
                 }
             }
 
+            for (int queuedIndex = 0; queuedIndex < m_queuedEditRanges.size(); ++queuedIndex) {
+                const auto& queued = m_queuedEditRanges.at(queuedIndex);
+                if (tokenEndOffset > queued.first && tokenStartOffset < queued.second) {
+                    const bool matches =
+                        queuedIndex < m_queuedEditMatchesOriginal.size() &&
+                        m_queuedEditMatchesOriginal.at(queuedIndex);
+                    QPen boxPen(matches ? QColor(40, 160, 70) : QColor(40, 80, 200));
+                    boxPen.setWidth(2);
+                    painter.setPen(boxPen);
+                    painter.setBrush(Qt::NoBrush);
+                    painter.drawRect(
+                        QRect(x + 1, rowRect.top() + 2, qMax(1, token.pixelWidth - 2), lineH - 4));
+                }
+            }
+
             if (m_displayMode == TextDisplayMode::ClassicMode) {
                 const QRect tokenRect(x, rowRect.top() + 2, token.pixelWidth, lineH - 4);
                 painter.setPen(palette().text().color());
@@ -2246,7 +2671,13 @@ void TextViewWidget::paintContent() {
                 }
                 painter.setPen(fg);
                 painter.drawRect(tokenRect);
-                painter.drawText(tokenRect, Qt::AlignCenter, token.text);
+                QString drawText = token.text;
+                if (m_pendingByteOverlay.contains(token.absoluteOffset)) {
+                    drawText = QStringLiteral("%1").arg(
+                        m_pendingByteOverlay.value(token.absoluteOffset), 2, 16,
+                        QLatin1Char('0')).toUpper();
+                }
+                painter.drawText(tokenRect, Qt::AlignCenter, drawText);
                 x += token.pixelWidth + 2;
             }
         }
@@ -2265,8 +2696,11 @@ void TextViewWidget::paintContent() {
                 const QRect asciiRect(asciiStart + tokenIndex * charWidth, rowRect.top() + 1,
                                       charWidth, lineH - 2);
                 const quint64 tokenEnd = token.absoluteOffset + 1ULL;
-                if (hasSelection && token.visibleIndex >= selection.first &&
-                    token.visibleIndex < selection.second) {
+                if (hasSelection &&
+                    (m_absoluteSelectionRange.has_value()
+                         ? tokenOverlapsAbsoluteSelection(token.absoluteOffset, tokenEnd)
+                         : (token.visibleIndex >= selection.first &&
+                            token.visibleIndex < selection.second))) {
                     painter.fillRect(asciiRect, palette().highlight().color().lighter(120));
                 }
                 if (m_resultHighlightEnabled && m_matchLength > 0 &&

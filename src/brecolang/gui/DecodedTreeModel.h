@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QAbstractItemModel>
+#include <QColor>
 #include <QHash>
 
 #include <memory>
@@ -26,6 +27,7 @@ public:
     void setDocument(std::shared_ptr<const BrecoProgram> program,
                      DecodeDocumentHandle document,
                      std::shared_ptr<const ResolvedShapeSnapshot> shape);
+    void copyDocumentFrom(const DecodedTreeModel& source);
     void applyPage(const DisplayPageResult& page);
     void failPage(const SequenceWindow& window, const QString& error);
     void failReference(const ReferencePageRequest& request,
@@ -37,6 +39,7 @@ public:
     QModelIndex parent(const QModelIndex& child) const override;
     int rowCount(const QModelIndex& parent = {}) const override;
     int columnCount(const QModelIndex& parent = {}) const override;
+    bool hasChildren(const QModelIndex& parent = {}) const override;
     bool canFetchMore(const QModelIndex& parent) const override;
     void fetchMore(const QModelIndex& parent) override;
     QVariant data(const QModelIndex& index,
@@ -48,10 +51,29 @@ public:
     std::shared_ptr<const DecodedTree> treeForIndex(
         const QModelIndex& index) const;
     MaterializationLocator locatorForIndex(const QModelIndex& index) const;
+    QVector<MaterializationLocator> expansionPathForIndex(
+        const QModelIndex& index) const;
+    QModelIndex indexForLocator(
+        const MaterializationLocator& locator,
+        const QVector<MaterializationLocator>& expansionPath = {}) const;
     bool isContinuationRow(const QModelIndex& index) const;
     bool isReferenceRow(const QModelIndex& index) const;
     bool requestMore(const QModelIndex& index);
+    QVector<SequenceWindow> takeUnshownSequenceWindows(quint64 count);
     std::shared_ptr<const DecodedTree> tree() const { return m_legacyTree; }
+
+    enum class SourceSpanCoverage { None, Partial, Full };
+    struct SourceSpanHit {
+        QModelIndex index;
+        SourceSpanCoverage coverage = SourceSpanCoverage::None;
+        int depth = 0;
+    };
+    QVector<SourceSpanHit> sourceSpansOverlapping(InputId input, quint64 offset,
+                                                 quint64 length) const;
+    void setSourceSpanHighlights(const QHash<quintptr, QColor>& colors);
+    void clearSourceSpanHighlights();
+
+    static constexpr quint32 kAutoExpandedListItems = 5;
     DecodeDocumentHandle document() const { return m_document; }
     std::shared_ptr<const ResolvedShapeSnapshot> shape() const { return m_shape; }
 
@@ -74,10 +96,20 @@ private:
     };
 
     struct SequenceState {
+        struct Segment {
+            MaterializationLocator locator;
+            quint64 total = 0;
+            quint64 shown = 0;
+            SequenceIndexKind indexKind = SequenceIndexKind::LegacyEager;
+            std::optional<SequenceContinuation> successor;
+        };
+
         quint64 total = 0;
         quint64 shown = 0;
         quint64 pendingEnd = 0;
         SequenceIndexKind indexKind = SequenceIndexKind::LegacyEager;
+        MaterializationLocator requestLocator;
+        QVector<Segment> segments;
         std::optional<SequenceContinuation> successor;
         bool footerVisible = true;
         bool pending = false;
@@ -109,12 +141,26 @@ private:
     ModelNodeId occurrence(
         const MaterializationLocator& locator,
         const QVector<MaterializationLocator>& expansionPath) const;
+    quint64 aggregateLogicalCount(ModelNodeId id) const;
+    quint64 contiguousSequenceItems(ModelNodeId id) const;
     void registerSequences(
         const std::shared_ptr<const ResolvedShapeSnapshot>& shape,
         const QVector<MaterializationLocator>& expansionPath);
     void rebuildRows(ModelNodeId parent);
     QString typeName(TypeId type) const;
     quint64 nextPageAmount(const SequenceState& state) const;
+    void rebuildSpanIndex();
+
+    struct SpanRecord {
+        ModelNodeId id = 0;
+        InputId input = kInvalidId;
+        quint64 offset = 0;
+        quint64 length = 0;
+        bool hasBitSlice = false;
+        quint8 highBit = 0;
+        quint8 lowBit = 0;
+        int depth = 0;
+    };
 
     std::shared_ptr<const BrecoProgram> m_program;
     DecodeDocumentHandle m_document;
@@ -125,6 +171,8 @@ private:
     QHash<MaterializationLocator, QVector<ModelNodeId>> m_locatorNodes;
     QHash<ModelNodeId, SequenceState> m_sequences;
     QHash<ModelNodeId, ReferenceState> m_references;
+    QVector<SpanRecord> m_spanIndex;
+    QHash<quintptr, QColor> m_spanHighlights;
 };
 
 }  // namespace breco::lang

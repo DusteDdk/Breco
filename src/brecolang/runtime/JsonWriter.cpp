@@ -174,6 +174,22 @@ bool JsonWriter::string(QStringView value) {
     return beforeValue() && writeStringLiteral(value);
 }
 
+bool JsonWriter::rawValue(QByteArrayView encoded) {
+    QByteArray wrapped;
+    wrapped.reserve(encoded.size() + 2);
+    wrapped.push_back('[');
+    wrapped.append(encoded.data(), encoded.size());
+    wrapped.push_back(']');
+    QJsonParseError error;
+    const QJsonDocument parsed = QJsonDocument::fromJson(wrapped, &error);
+    if (error.error != QJsonParseError::NoError || !parsed.isArray() ||
+        parsed.array().size() != 1) {
+        fail(QStringLiteral("Raw JSON fragment is not one valid value"));
+        return false;
+    }
+    return beforeValue() && write(encoded);
+}
+
 bool JsonWriter::sourceBytesHex(ByteSource* source, quint64 offset,
                                 quint64 length) {
     if (!beforeValue() || !write(QByteArrayView("\"", 1))) {

@@ -41,6 +41,19 @@ and rendering succeed.
 
 ## Declarations
 
+For compact single-source schemas, `language breco 0.1` and the `inputs`
+declaration may be omitted; BrecoLang then assumes one default input named
+`data`. If the file contains exactly one parameterless `record` and no
+`entry`, that record is also used as the default entry at the selected offset.
+Explicit declarations keep their normal behavior.
+
+The BrecoLang tab groups declared entries and parameterless records in its
+decode selector. Selecting a record adapts it to the normal entry execution
+path and starts it on the sole input, or on the declared default input when
+multiple inputs exist. Records with parameters are omitted because the UI does
+not collect record arguments. A declared default entry is selected when the
+schema is loaded; editor recompiles preserve the current selection instead.
+
 - `inputs` declares named sources. Exactly one may be marked `default`.
 - `limits` sets `max_parse_depth`, `max_loop_iterations`, `max_nodes`,
   `max_probe_bytes`, and `max_transform_output`.
@@ -63,6 +76,22 @@ Fields use `name: Type`. A field may read another source or location:
 item: IndexItem from index at iteration * INDEX_BYTES
 payload: Payload from data at item.offset within bytes(item.length)
 ```
+
+An anonymous record defines a one-off nested object inline:
+
+```breco
+header: {
+    kind: u8
+    size: u16le
+}
+```
+
+It is equivalent to declaring a named record and using it as the field type,
+but its generated type is not reusable by BrecoLang source. Its internal
+`$anon_record_...` name may appear after named records in the UI selector for
+direct inspection. It consumes the bytes actually decoded by its body and
+supports the ordinary `when`, `from ... at ...`, and `within ...` field
+modifiers.
 
 Important statements are:
 
@@ -88,6 +117,52 @@ Important statements are:
 
 Record calls may be recursive. Runtime depth and loop limits are always
 enforced.
+
+### Boxed and inline selects
+
+A named (boxed) select remains one variant-valued field. It accepts either
+direct type arms or braced arms and creates the named `Select` node and JSON
+member:
+
+```breco
+payload: select kind {
+    1 => HeaderV1
+    default => { raw remaining as unknown }
+}
+```
+
+A bare (inline) select yields the chosen arm's named statements directly into
+the enclosing object. It creates no select node, key, or wrapper:
+
+```breco
+select kind {
+    1 => { samples: repeat count { sample: Sample16 } }
+    2 => { samples: repeat count { sample: Sample32 } }
+    default => raw remaining as unknown_payload
+}
+computed has_samples: bool = present(samples)
+```
+
+Conditional `select { when ... => ... else => ... }` supports the same two
+forms. A bare arm must use named statements; a direct type arm such as
+`1 => HeaderV1` is rejected because it has no yielded field name. Fields not
+produced by every arm are optional and are omitted when absent. Same-named
+fields in different arms are one variant field.
+
+Separate bare selects in the same object may contribute the same field. Such a
+field is an ordered aggregate: one contribution retains its scalar, object, or
+sequence JSON shape; a second contribution promotes it to an array. Sequence
+contributions append their elements without a nested array. `present`,
+`count`, and outform `for` work on the resulting flattened stream. Because
+promotion is statically possible, the decoded tree always shows one sequence
+container for an emitted aggregate, including a single scalar contribution.
+Ordinary fields and named-select fields cannot be reopened this way and
+therefore conflict with a bare-select yield of the same name.
+
+Streaming JSON remains one-pass for ordinary fields. Aggregate members are
+held until their enclosing object finishes so non-contiguous contributors can
+be combined in source order; memory for each such field is proportional to its
+encoded value, and its key is emitted at object finalization.
 
 ## Transactions and probes
 

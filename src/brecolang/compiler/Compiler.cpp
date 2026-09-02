@@ -6,6 +6,7 @@
 #include <QSet>
 
 #include <algorithm>
+#include <functional>
 #include <limits>
 #include <optional>
 #include <utility>
@@ -50,6 +51,19 @@ struct ResolvedBlock {
     ExtentSummary extent;
 };
 
+struct InlineYieldFieldState {
+    quint32 field = kInvalidId;
+    StatementId proxyStatement = kInvalidId;
+    quint32 targetSlot = kInvalidId;
+    TypeId valueType = kInvalidId;
+    TypeId aggregateType = kInvalidId;
+    QVector<TypeId> elementTypes;
+    QVector<quint32> yieldIndices;
+    quint32 selectSites = 0;
+    quint32 aggregate = kInvalidId;
+    bool optional = true;
+};
+
 bool isError(const Diagnostic& diagnostic) {
     return diagnostic.severity == DiagnosticSeverity::Error;
 }
@@ -87,6 +101,7 @@ public:
         resolveEnums();
         resolveRecords();
         resolveEntries();
+        synthesizeImplicitEntry();
         resolveOutforms();
         resolveDefaultEntry();
 
@@ -338,6 +353,27 @@ private:
         return addType(type);
     }
 
+    TypeId mergedType(const QVector<TypeId>& candidates) {
+        QVector<TypeId> alternatives;
+        for (TypeId type : candidates) {
+            if (type != kInvalidId && !alternatives.contains(type)) {
+                alternatives.push_back(type);
+            }
+        }
+        if (alternatives.isEmpty()) {
+            return kInvalidId;
+        }
+        return alternatives.size() == 1 ? alternatives.first()
+                                        : variantType(alternatives);
+    }
+
+    TypeId aggregateType(TypeId element) {
+        TypeDesc type;
+        type.kind = TypeKind::Aggregate;
+        type.elementType = element;
+        return addType(type);
+    }
+
     TypeId newShape(const QString& displayName = {}) {
         TypeDesc type;
         type.kind = TypeKind::Shape;
@@ -347,10 +383,10 @@ private:
         return addType(type);
     }
 
-    void addPendingField(TypeId owner, const QString& name, TypeId type,
-                         StatementId statement, bool optional = false) {
+    quint32 addPendingField(TypeId owner, const QString& name, TypeId type,
+                            StatementId statement, bool optional = false) {
         if (owner == kInvalidId || owner >= static_cast<TypeId>(m_pendingFields.size())) {
-            return;
+            return kInvalidId;
         }
         for (quint32 fieldId : m_pendingFields.at(owner)) {
             if (m_program->symbol(m_program->fields.at(fieldId).name) == name) {
@@ -358,7 +394,7 @@ private:
                        QStringLiteral("Duplicate field '%1'").arg(name),
                        m_program->sourceSpans.at(
                            m_program->statements.at(statement).sourceSpan));
-                return;
+                return kInvalidId;
             }
         }
         FieldDesc field;
@@ -369,6 +405,21 @@ private:
         const quint32 fieldId = static_cast<quint32>(m_program->fields.size());
         m_program->fields.push_back(field);
         m_pendingFields[owner].push_back(fieldId);
+        return fieldId;
+    }
+
+    quint32 pendingField(TypeId owner, QStringView name) const {
+        if (owner == kInvalidId ||
+            owner >= static_cast<TypeId>(m_pendingFields.size())) {
+            return kInvalidId;
+        }
+        for (quint32 fieldId : m_pendingFields.at(owner)) {
+            if (fieldId < static_cast<quint32>(m_program->fields.size()) &&
+                m_program->symbol(m_program->fields.at(fieldId).name) == name) {
+                return fieldId;
+            }
+        }
+        return kInvalidId;
     }
 
     void finalizeTypeFields(TypeId type) {
@@ -1094,7 +1145,8 @@ private:
                 (type != kInvalidId &&
                  (m_program->types.at(type).kind == TypeKind::Record ||
                   m_program->types.at(type).kind == TypeKind::Shape ||
-                  m_program->types.at(type).kind == TypeKind::Sequence))) {
+                  m_program->types.at(type).kind == TypeKind::Sequence ||
+                  m_program->types.at(type).kind == TypeKind::Aggregate))) {
                 report(QStringLiteral("BR0340"),
                        QStringLiteral("Value requires explicit formatting before interpolation"),
                        m_syntax.expressions.at(operand).span);
@@ -1412,6 +1464,64 @@ private:
         m_recordStatus[index] = 2;
     }
 
+    QString anonymousRecordOwnerPath(TypeId ownerType) const {
+        if (ownerType == kInvalidId ||
+            ownerType >= static_cast<TypeId>(m_program->types.size())) {
+            return {};
+        }
+        const SymbolId ownerName = m_program->types.at(ownerType).name;
+        if (ownerName == kInvalidId) {
+            return {};
+        }
+        QString path = m_program->symbol(ownerName);
+        const QString prefix = QStringLiteral("$anon_record_");
+        if (path.startsWith(prefix) && path.endsWith(QLatin1Char(']'))) {
+            path.remove(0, prefix.size());
+            const qsizetype typeIdStart = path.lastIndexOf(QLatin1Char('['));
+            if (typeIdStart >= 0) {
+                path.truncate(typeIdStart);
+            }
+        }
+        return path;
+    }
+
+    TypeId resolveAnonymousRecord(const SyntaxStatement& syntax,
+                                  TypeId ownerType) {
+        TypeDesc type;
+        type.kind = TypeKind::Record;
+        const TypeId recordType = addType(type);
+        QString path = anonymousRecordOwnerPath(ownerType);
+        if (!path.isEmpty()) {
+            path += QLatin1Char('.');
+        }
+        path += syntax.name;
+        const SymbolId internalName =
+            intern(QStringLiteral("$anon_record_%1[%2]")
+                       .arg(path)
+                       .arg(recordType));
+        m_program->types[recordType].name = internalName;
+
+        ResolveContext context;
+        context.scopes.push_back({});
+        const ResolvedBlock block =
+            resolveBlock(syntax.statements, &context, recordType);
+        finalizeTypeFields(recordType);
+        const quint32 extentId = addExtent(block.extent);
+        m_typeExtents.insert(recordType, extentId);
+
+        RecordDesc record;
+        record.name = internalName;
+        record.type = recordType;
+        record.parameters = {
+            static_cast<quint32>(m_program->parameters.size()), 0};
+        record.statements =
+            appendRefs(&m_program->statementRefs, block.statements);
+        record.slotCount = context.nextSlot;
+        record.extent = extentId;
+        m_program->records.push_back(record);
+        return recordType;
+    }
+
     void resolveEntries() {
         for (qsizetype index = 0; index < m_syntax.entries.size(); ++index) {
             const SyntaxEntry& syntaxEntry = m_syntax.entries.at(index);
@@ -1441,6 +1551,34 @@ private:
             entry.slotCount = context.nextSlot;
             entry.extent = extentId;
             m_program->entries.push_back(entry);
+        }
+    }
+
+    void synthesizeImplicitEntry() {
+        if (!m_syntax.entries.isEmpty() || m_syntax.records.size() != 1 ||
+            !m_syntax.records.first().parameters.isEmpty() ||
+            m_program->inputs.size() != 1) {
+            return;
+        }
+        const InputId input = m_inputIds.value(QStringLiteral("data"), kInvalidId);
+        if (input == kInvalidId) {
+            return;
+        }
+        const TypeId recordType = m_recordTypeIds.value(0, kInvalidId);
+        const auto record = std::find_if(
+            m_program->records.cbegin(), m_program->records.cend(),
+            [recordType](const RecordDesc& candidate) {
+                return candidate.type == recordType;
+            });
+        if (record == m_program->records.cend() ||
+            record->name == kInvalidId || record->type == kInvalidId) {
+            return;
+        }
+        m_program->entries.push_back(
+            {record->name, record->type, input, record->statements,
+             record->slotCount, record->extent});
+        if (m_syntax.defaultEntry.isEmpty()) {
+            m_program->defaultEntry = record->name;
         }
     }
 
@@ -1486,9 +1624,106 @@ private:
                m_syntax.defaultEntrySpan);
     }
 
+    bool isDecodedFieldStatement(SyntaxStatementKind kind) const {
+        switch (kind) {
+            case SyntaxStatementKind::Field:
+            case SyntaxStatementKind::Reference:
+            case SyntaxStatementKind::ComputedField:
+            case SyntaxStatementKind::BitfieldField:
+            case SyntaxStatementKind::Preserve:
+            case SyntaxStatementKind::Raw:
+            case SyntaxStatementKind::Region:
+            case SyntaxStatementKind::Repeat:
+            case SyntaxStatementKind::While:
+            case SyntaxStatementKind::Many:
+            case SyntaxStatementKind::Select:
+            case SyntaxStatementKind::OneOf:
+            case SyntaxStatementKind::Recover:
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    void planInlineAggregates(
+        const QVector<SyntaxStatementId>& syntaxStatements, TypeId ownerType) {
+        if (ownerType == kInvalidId) {
+            return;
+        }
+        QHash<QString, int> sites;
+        std::function<void(const QVector<SyntaxStatementId>&, QSet<QString>*)>
+            collectYieldNames;
+        collectYieldNames =
+            [&](const QVector<SyntaxStatementId>& statements,
+                QSet<QString>* names) {
+                for (SyntaxStatementId syntaxId : statements) {
+                    if (syntaxId >= static_cast<SyntaxStatementId>(
+                                        m_syntax.statements.size())) {
+                        continue;
+                    }
+                    const SyntaxStatement& statement =
+                        m_syntax.statements.at(syntaxId);
+                    if (!statement.name.isEmpty() &&
+                        isDecodedFieldStatement(statement.kind)) {
+                        names->insert(statement.name);
+                    }
+                    if (statement.kind == SyntaxStatementKind::Identify) {
+                        collectYieldNames(statement.statements, names);
+                    } else if (
+                        statement.kind == SyntaxStatementKind::Select &&
+                        statement.inlineSelect) {
+                        for (const SyntaxSelectCase& selectCase :
+                             statement.selectCases) {
+                            if (!selectCase.isType) {
+                                collectYieldNames(selectCase.statements,
+                                                  names);
+                            }
+                        }
+                    }
+                }
+            };
+
+        std::function<void(const QVector<SyntaxStatementId>&)> collectSites;
+        collectSites = [&](const QVector<SyntaxStatementId>& statements) {
+            for (SyntaxStatementId syntaxId : statements) {
+                if (syntaxId >= static_cast<SyntaxStatementId>(
+                                    m_syntax.statements.size())) {
+                    continue;
+                }
+                const SyntaxStatement& statement =
+                    m_syntax.statements.at(syntaxId);
+                if (statement.kind == SyntaxStatementKind::Identify) {
+                    collectSites(statement.statements);
+                    continue;
+                }
+                if (statement.kind != SyntaxStatementKind::Select ||
+                    !statement.inlineSelect) {
+                    continue;
+                }
+                QSet<QString> names;
+                for (const SyntaxSelectCase& selectCase :
+                     statement.selectCases) {
+                    if (!selectCase.isType) {
+                        collectYieldNames(selectCase.statements, &names);
+                    }
+                }
+                for (const QString& name : names) {
+                    sites[name] = sites.value(name, 0) + 1;
+                }
+            }
+        };
+        collectSites(syntaxStatements);
+        for (auto site = sites.cbegin(); site != sites.cend(); ++site) {
+            if (site.value() >= 2) {
+                m_plannedAggregateNames[ownerType].insert(site.key());
+            }
+        }
+    }
+
     ResolvedBlock resolveBlock(const QVector<SyntaxStatementId>& syntaxStatements,
                                ResolveContext* context, TypeId ownerType) {
         ResolvedBlock block;
+        planInlineAggregates(syntaxStatements, ownerType);
         block.extent.maxBytes = 0;
         block.extent.exactBytes = 0;
         for (SyntaxStatementId syntaxStatement : syntaxStatements) {
@@ -1764,6 +1999,7 @@ private:
         statement.kind = resolvedKind(syntax.kind);
         statement.sourceSpan = addSpan(syntax.span);
         statement.name = syntax.name.isEmpty() ? kInvalidId : intern(syntax.name);
+        statement.inlineSelect = syntax.inlineSelect;
         statement.message = syntax.message.isEmpty() ? kInvalidId : intern(syntax.message);
         statement.gapsName = syntax.gapsName.isEmpty() ? kInvalidId : intern(syntax.gapsName);
         statement.stepBytes = syntax.stepBytes;
@@ -1783,7 +2019,9 @@ private:
 
         switch (syntax.kind) {
             case SyntaxStatementKind::Field: {
-                fieldType = resolveType(syntax.type);
+                fieldType = syntax.anonymousRecord
+                                ? resolveAnonymousRecord(syntax, ownerType)
+                                : resolveType(syntax.type);
                 extent = extentForType(fieldType);
                 if (syntax.expression != kInvalidSyntaxExpression) {
                     statement.expression = resolveExpression(syntax.expression, context);
@@ -1977,7 +2215,12 @@ private:
                 extent.mayNoMatch = true;
                 break;
             case SyntaxStatementKind::Select:
-                fieldType = resolveSelect(syntax, context, &statement, &extent);
+                fieldType = syntax.inlineSelect
+                                ? resolveInlineSelect(syntax, context, ownerType,
+                                                      statementId, &statement,
+                                                      &extent)
+                                : resolveSelect(syntax, context, &statement,
+                                                &extent);
                 break;
             case SyntaxStatementKind::OneOf:
                 fieldType = resolveOneOf(syntax, context, &statement, &extent);
@@ -2053,7 +2296,8 @@ private:
             syntax.kind == SyntaxStatementKind::Repeat ||
             syntax.kind == SyntaxStatementKind::While ||
             syntax.kind == SyntaxStatementKind::Many ||
-            syntax.kind == SyntaxStatementKind::Select ||
+            (syntax.kind == SyntaxStatementKind::Select &&
+             !syntax.inlineSelect) ||
             syntax.kind == SyntaxStatementKind::OneOf ||
             syntax.kind == SyntaxStatementKind::Recover) {
             const bool optional = syntax.condition != kInvalidSyntaxExpression &&
@@ -2124,7 +2368,8 @@ private:
                 (type != kInvalidId &&
                  (m_program->types.at(type).kind == TypeKind::Record ||
                   m_program->types.at(type).kind == TypeKind::Shape ||
-                  m_program->types.at(type).kind == TypeKind::Sequence))) {
+                  m_program->types.at(type).kind == TypeKind::Sequence ||
+                  m_program->types.at(type).kind == TypeKind::Aggregate))) {
                 report(QStringLiteral("BR0514"),
                        QStringLiteral("Text outform emit requires text or a scalar value"),
                        span);
@@ -2185,6 +2430,313 @@ private:
         finalizeTypeFields(bitfieldType);
         Q_UNUSED(context);
         return bitfieldType;
+    }
+
+    TypeId inlineContributionElement(TypeId type) const {
+        while (type != kInvalidId &&
+               type < static_cast<TypeId>(m_program->types.size()) &&
+               m_program->types.at(type).kind == TypeKind::Optional) {
+            type = m_program->types.at(type).elementType;
+        }
+        if (type != kInvalidId &&
+            type < static_cast<TypeId>(m_program->types.size())) {
+            const TypeDesc& descriptor = m_program->types.at(type);
+            if (descriptor.kind == TypeKind::Sequence ||
+                descriptor.kind == TypeKind::Aggregate) {
+                return descriptor.elementType;
+            }
+        }
+        return type;
+    }
+
+    TypeId resolveInlineSelect(const SyntaxStatement& syntax,
+                               ResolveContext* context, TypeId ownerType,
+                               StatementId selectStatement,
+                               Statement* statement, ExtentSummary* extent) {
+        struct YieldDraft {
+            QString name;
+            TypeId type = kInvalidId;
+            StatementId statement = kInvalidId;
+            quint32 sourceSlot = kInvalidId;
+            bool optional = false;
+        };
+
+        if (ownerType == kInvalidId ||
+            ownerType >= static_cast<TypeId>(m_program->types.size())) {
+            report(QStringLiteral("BR0520"),
+                   QStringLiteral("A bare select requires an enclosing decoded object"),
+                   syntax.span);
+        }
+        if (syntax.expression != kInvalidSyntaxExpression) {
+            statement->expression = resolveExpression(syntax.expression, context);
+        }
+
+        QVector<SelectCase> cases;
+        QVector<QVector<YieldDraft>> caseYields;
+        QVector<ExtentSummary> alternativeExtents;
+        QHash<QString, QVector<TypeId>> siteTypes;
+        QHash<QString, int> sitePresence;
+        QHash<QString, bool> siteOptional;
+        QVector<QString> siteOrder;
+        bool hasDefault = false;
+
+        for (const SyntaxSelectCase& syntaxCase : syntax.selectCases) {
+            SelectCase selectCase;
+            selectCase.sourceSpan = addSpan(syntaxCase.span);
+            selectCase.isDefault = syntaxCase.isDefault;
+            selectCase.isConditional = syntaxCase.isConditional;
+            hasDefault = hasDefault || selectCase.isDefault;
+            if (syntaxCase.expression != kInvalidSyntaxExpression) {
+                selectCase.expression =
+                    syntaxCase.isConditional
+                        ? resolveBoolean(syntaxCase.expression, context,
+                                         QStringLiteral("select condition"))
+                        : resolveExpression(syntaxCase.expression, context);
+            }
+
+            QVector<YieldDraft> yields;
+            ExtentSummary branchExtent;
+            if (syntaxCase.isType) {
+                report(QStringLiteral("BR0521"),
+                       QStringLiteral("A bare select type arm must use a named field block"),
+                       syntaxCase.span);
+                selectCase.resultType = resolveType(syntaxCase.type);
+                branchExtent = extentForType(selectCase.resultType);
+            } else {
+                ResolveContext branch = *context;
+                branch.scopes.push_back({});
+                const TypeId shape = newShape(QStringLiteral("$inline_select_case"));
+                const ResolvedBlock body =
+                    resolveBlock(syntaxCase.statements, &branch, shape);
+                context->nextSlot = qMax(context->nextSlot, branch.nextSlot);
+                finalizeTypeFields(shape);
+                selectCase.resultType = shape;
+                selectCase.statements =
+                    appendRefs(&m_program->statementRefs, body.statements);
+                branchExtent = body.extent;
+
+                const TypeDesc& shapeType = m_program->types.at(shape);
+                QSet<QString> branchNames;
+                for (quint32 i = 0; i < shapeType.fields.count; ++i) {
+                    const quint32 fieldId =
+                        m_program->fieldRefs.at(shapeType.fields.first + i);
+                    if (fieldId >=
+                        static_cast<quint32>(m_program->fields.size())) {
+                        continue;
+                    }
+                    const FieldDesc& field = m_program->fields.at(fieldId);
+                    if (field.statement >=
+                        static_cast<StatementId>(m_program->statements.size())) {
+                        continue;
+                    }
+                    const Statement& contribution =
+                        m_program->statements.at(field.statement);
+                    const QString name = m_program->symbol(field.name);
+                    if (branchNames.contains(name)) {
+                        report(QStringLiteral("BR0522"),
+                               QStringLiteral("Bare select arm yields field '%1' more than once")
+                                   .arg(name),
+                               syntaxCase.span);
+                        continue;
+                    }
+                    branchNames.insert(name);
+                    TypeId contributionType = contribution.type;
+                    if (field.optional &&
+                        field.type <
+                            static_cast<TypeId>(m_program->types.size()) &&
+                        m_program->types.at(field.type).kind ==
+                            TypeKind::Optional) {
+                        contributionType =
+                            m_program->types.at(field.type).elementType;
+                    }
+                    yields.push_back({name, contributionType, field.statement,
+                                      contribution.resultSlot, field.optional});
+                    if (!siteTypes.contains(name)) {
+                        siteOrder.push_back(name);
+                    }
+                    siteTypes[name].push_back(contributionType);
+                    siteOptional[name] =
+                        siteOptional.value(name, false) || field.optional;
+                }
+                for (const QString& name : branchNames) {
+                    sitePresence[name] = sitePresence.value(name, 0) + 1;
+                }
+            }
+            cases.push_back(selectCase);
+            caseYields.push_back(yields);
+            alternativeExtents.push_back(branchExtent);
+        }
+
+        if (!hasDefault) {
+            warn(QStringLiteral("BR1520"),
+                 QStringLiteral("select has no default or else branch"),
+                 syntax.span);
+        }
+
+        QHash<QString, quint32> targetSlots;
+        QHash<QString, quint32> aggregateIds;
+        auto& ownerFields = m_inlineYieldFields[ownerType];
+        for (const QString& name : siteOrder) {
+            const TypeId siteType = mergedType(siteTypes.value(name));
+            const bool optional =
+                siteOptional.value(name, false) ||
+                sitePresence.value(name, 0) < cases.size();
+            auto stateIt = ownerFields.find(name);
+            if (stateIt == ownerFields.end()) {
+                if (pendingField(ownerType, name) != kInvalidId ||
+                    (!context->scopes.isEmpty() &&
+                     context->scopes.last().contains(name))) {
+                    report(QStringLiteral("BR0101"),
+                           QStringLiteral("Duplicate field '%1'").arg(name),
+                           syntax.span);
+                    continue;
+                }
+
+                InlineYieldFieldState state;
+                state.targetSlot = context->nextSlot++;
+                state.valueType = siteType;
+                state.selectSites = 1;
+                state.optional = optional;
+                for (TypeId type : siteTypes.value(name)) {
+                    const TypeId element = inlineContributionElement(type);
+                    if (element != kInvalidId &&
+                        !state.elementTypes.contains(element)) {
+                        state.elementTypes.push_back(element);
+                    }
+                }
+                TypeId declaredType = siteType;
+                if (m_plannedAggregateNames.value(ownerType).contains(name)) {
+                    const TypeId elementType = mergedType(state.elementTypes);
+                    AggregateFieldDesc aggregate;
+                    aggregate.name = intern(name);
+                    aggregate.elementType = elementType;
+                    state.aggregateType = aggregateType(elementType);
+                    aggregate.type = state.aggregateType;
+                    aggregate.resultSlot = state.targetSlot;
+                    state.aggregate = static_cast<quint32>(
+                        m_program->aggregateFields.size());
+                    m_program->aggregateFields.push_back(aggregate);
+                    declaredType = state.aggregateType;
+                }
+
+                Statement proxy;
+                proxy.kind = StatementKind::Invalid;
+                proxy.sourceSpan = addSpan(syntax.span);
+                proxy.name = intern(name);
+                proxy.type = declaredType;
+                proxy.resultSlot = state.targetSlot;
+                state.proxyStatement =
+                    static_cast<StatementId>(m_program->statements.size());
+                m_program->statements.push_back(proxy);
+                if (state.aggregate != kInvalidId) {
+                    m_program->aggregateFields[state.aggregate]
+                        .locatorStatement = state.proxyStatement;
+                }
+                state.field = addPendingField(ownerType, name, declaredType,
+                                              state.proxyStatement, optional);
+                if (state.field != kInvalidId &&
+                    state.aggregate != kInvalidId) {
+                    m_program->fields[state.field].aggregate =
+                        state.aggregate;
+                }
+                if (state.field != kInvalidId && !context->scopes.isEmpty()) {
+                    const TypeId bindingType =
+                        m_program->fields.at(state.field).type;
+                    context->scopes.last().insert(
+                        name, {bindingType, state.targetSlot});
+                }
+                ownerFields.insert(name, state);
+                stateIt = ownerFields.find(name);
+            } else {
+                InlineYieldFieldState& state = stateIt.value();
+                ++state.selectSites;
+                state.optional = state.optional && optional;
+                for (TypeId type : siteTypes.value(name)) {
+                    const TypeId element = inlineContributionElement(type);
+                    if (element != kInvalidId &&
+                        !state.elementTypes.contains(element)) {
+                        state.elementTypes.push_back(element);
+                    }
+                }
+                const TypeId elementType = mergedType(state.elementTypes);
+                if (state.aggregate == kInvalidId) {
+                    AggregateFieldDesc aggregate;
+                    aggregate.name = intern(name);
+                    aggregate.elementType = elementType;
+                    state.aggregateType = aggregateType(elementType);
+                    aggregate.type = state.aggregateType;
+                    aggregate.resultSlot = state.targetSlot;
+                    aggregate.locatorStatement = state.proxyStatement;
+                    state.aggregate = static_cast<quint32>(
+                        m_program->aggregateFields.size());
+                    m_program->aggregateFields.push_back(aggregate);
+                    for (quint32 yieldIndex : state.yieldIndices) {
+                        if (yieldIndex <
+                            static_cast<quint32>(
+                                m_program->selectYields.size())) {
+                            m_program->selectYields[yieldIndex].aggregate =
+                                state.aggregate;
+                        }
+                    }
+                } else {
+                    m_program->types[state.aggregateType].elementType =
+                        elementType;
+                    m_program->aggregateFields[state.aggregate].elementType =
+                        elementType;
+                }
+                if (state.field != kInvalidId) {
+                    FieldDesc& field = m_program->fields[state.field];
+                    field.aggregate = state.aggregate;
+                    field.optional = state.optional;
+                    field.type = state.optional
+                                     ? optionalType(state.aggregateType)
+                                     : state.aggregateType;
+                    m_program->statements[state.proxyStatement].type =
+                        state.aggregateType;
+                    if (!context->scopes.isEmpty()) {
+                        context->scopes.last()[name] =
+                            {field.type, state.targetSlot};
+                    }
+                }
+            }
+            if (stateIt != ownerFields.end()) {
+                targetSlots.insert(name, stateIt->targetSlot);
+                aggregateIds.insert(name, stateIt->aggregate);
+            }
+        }
+
+        for (qsizetype caseIndex = 0; caseIndex < cases.size(); ++caseIndex) {
+            const quint32 first =
+                static_cast<quint32>(m_program->selectYields.size());
+            for (const YieldDraft& draft : caseYields.at(caseIndex)) {
+                if (!targetSlots.contains(draft.name)) {
+                    continue;
+                }
+                SelectYield yield;
+                yield.name = intern(draft.name);
+                yield.contributionType = draft.type;
+                yield.contributionStatement = draft.statement;
+                yield.sourceSlot = draft.sourceSlot;
+                yield.targetSlot = targetSlots.value(draft.name);
+                yield.aggregate = aggregateIds.value(draft.name, kInvalidId);
+                const quint32 index =
+                    static_cast<quint32>(m_program->selectYields.size());
+                m_program->selectYields.push_back(yield);
+                ownerFields[draft.name].yieldIndices.push_back(index);
+            }
+            cases[caseIndex].yields = {
+                first,
+                static_cast<quint32>(m_program->selectYields.size()) - first};
+        }
+
+        const quint32 first =
+            static_cast<quint32>(m_program->selectCases.size());
+        m_program->selectCases += cases;
+        statement->selectCases = {
+            first, static_cast<quint32>(m_program->selectCases.size()) - first};
+        *extent = alternativeExtent(alternativeExtents);
+        Q_UNUSED(selectStatement);
+        return m_voidType;
     }
 
     TypeId resolveSelect(const SyntaxStatement& syntax, ResolveContext* context,
@@ -2336,24 +2888,43 @@ private:
         return sequenceType(itemType);
     }
 
+    TypeId iterableElementType(TypeId type) {
+        if (type == kInvalidId ||
+            type >= static_cast<TypeId>(m_program->types.size())) {
+            return kInvalidId;
+        }
+        const TypeDesc& descriptor = m_program->types.at(type);
+        if (descriptor.kind == TypeKind::Optional) {
+            return iterableElementType(descriptor.elementType);
+        }
+        if (descriptor.kind == TypeKind::Sequence ||
+            descriptor.kind == TypeKind::Aggregate) {
+            return descriptor.elementType;
+        }
+        if (descriptor.kind == TypeKind::Variant) {
+            QVector<TypeId> elements;
+            for (quint32 i = 0; i < descriptor.alternatives.count; ++i) {
+                const TypeId alternative = m_program->typeRefs.at(
+                    descriptor.alternatives.first + i);
+                const TypeId element = iterableElementType(alternative);
+                if (element == kInvalidId) {
+                    return kInvalidId;
+                }
+                elements.push_back(element);
+            }
+            return mergedType(elements);
+        }
+        return kInvalidId;
+    }
+
     void resolveOutformFor(const SyntaxStatement& syntax,
                            ResolveContext* context, Statement* statement) {
         statement->expression = resolveExpression(syntax.expression, context);
         TypeId iterable = expressionType(statement->expression);
-        TypeId element = kInvalidId;
-        if (iterable != kInvalidId) {
-            const TypeDesc& type = m_program->types.at(iterable);
-            if (type.kind == TypeKind::Optional) {
-                iterable = type.elementType;
-            }
-            if (iterable != kInvalidId &&
-                m_program->types.at(iterable).kind == TypeKind::Sequence) {
-                element = m_program->types.at(iterable).elementType;
-            }
-        }
+        TypeId element = iterableElementType(iterable);
         if (element == kInvalidId) {
             report(QStringLiteral("BR0540"),
-                   QStringLiteral("for loop expression must be a sequence"),
+                   QStringLiteral("for loop expression must be a sequence or aggregate"),
                    syntax.span);
             element = m_nodeType;
         }
@@ -2392,6 +2963,8 @@ private:
     QHash<TypeId, TypeId> m_sequenceTypes;
     QHash<TypeId, TypeId> m_optionalTypes;
     QHash<TypeId, quint32> m_typeExtents;
+    QHash<TypeId, QHash<QString, InlineYieldFieldState>> m_inlineYieldFields;
+    QHash<TypeId, QSet<QString>> m_plannedAggregateNames;
     QVector<QVector<quint32>> m_pendingFields;
     QVector<int> m_recordStatus;
     QVector<TypeId> m_recordTypeIds;

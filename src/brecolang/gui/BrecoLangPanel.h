@@ -1,19 +1,26 @@
 #pragma once
 
+#include "settings/PathSelect.h"
+
 #include <QWidget>
 #include <QHash>
+#include <QByteArray>
 
 #include <memory>
 #include <optional>
 #include <functional>
 
+#include "brecolang/runtime/DecodeTarget.h"
 #include "brecolang/runtime/Interpreter.h"
 #include "brecolang/runtime/ProbeScan.h"
 
 QT_BEGIN_NAMESPACE
+class QButtonGroup;
 class QComboBox;
+class QDockWidget;
 class QLabel;
 class QLineEdit;
+class QMainWindow;
 class QIODevice;
 class QPlainTextEdit;
 class QPushButton;
@@ -68,21 +75,45 @@ public:
     QPushButton* scanButton() const { return m_scanButton; }
     QTabWidget* viewTabs() const { return m_viewTabs; }
     QPlainTextEdit* schemaEditor() const { return m_schemaEditor; }
+    QDockWidget* schemaDockWidget() const { return m_schemaDock; }
+    QDockWidget* decodeDockWidget() const { return m_decodeDock; }
+    QMainWindow* workspaceWindow() const { return m_workspaceWindow; }
     DecodedTreeModel* treeModel() const;
     QString statusText() const;
     std::shared_ptr<const BrecoProgram> program() const { return m_program; }
     std::shared_ptr<const DecodedTree> tree() const;
 
+    enum class SourceHighlightMode { Hover, Selection };
+    void highlightSourceRange(const QString& inputPath, quint64 offset, quint64 length,
+                              SourceHighlightMode mode);
+    void clearSourceHighlight(SourceHighlightMode mode);
+    void setFieldEditingEnabled(bool enabled);
+    bool fieldEditingEnabled() const { return m_fieldEditingEnabled; }
+
 signals:
     void scanRequested();
     void scanStopRequested();
+    void inputFileActivated(const QString& filePath);
     void sourceLocationActivated(const QString& filePath,
                                  quint64 absoluteOffset,
                                  quint64 byteLength);
+    void fieldEditCommitted(const QString& filePath, quint64 offset,
+                            const QByteArray& originalBytes,
+                            const QByteArray& newBytes);
     void schemaFileLoaded(const QString& filePath);
     void libraryDirectoryChanged(const QString& directory);
 
+protected:
+    bool eventFilter(QObject* watched, QEvent* event) override;
+
 private:
+    struct DecodeSelection {
+        DecodeTargetKind kind = DecodeTargetKind::Entry;
+        QString name;
+
+        bool isValid() const { return !name.isEmpty(); }
+    };
+
     struct ViewState {
         QWidget* page = nullptr;
         quint64 id = 0;
@@ -99,27 +130,46 @@ private:
     };
 
     void compileEditor();
+    void compileSource(bool selectDefault);
     void populateProgramControls(const QHash<QString, QString>& preservedPaths = {},
-                                 const QString& preservedEntry = {});
+                                 const std::optional<DecodeSelection>&
+                                     preservedSelection = std::nullopt,
+                                 bool selectDefault = false);
     void chooseSchema();
-    void chooseInput();
+    void chooseInput(int row);
     void chooseLibraryDirectory();
     void saveJson();
     void saveBinary();
     void saveOutform();
     void setStatus(const QString& text, bool error);
+    QLineEdit* inputPathEdit(int row) const;
     QString inputPath(InputId input) const;
     QHash<QString, QString> currentInputPaths() const;
+    std::optional<DecodeSelection> currentDecodeSelection() const;
+    int findDecodeSelection(const DecodeSelection& selection) const;
+    ResolvedDecodeTarget selectedDecodeTarget(QString* error = nullptr) const;
+    void setViewedInput(InputId input);
     ViewState* liveView();
     const ViewState* activeView() const;
     ViewState* activeView();
     ViewState createView(const QString& title);
+    ViewState* pinView(
+        const ViewState& source,
+        const MaterializationLocator& selected = MaterializationLocator{},
+        const QVector<MaterializationLocator>& expansionPath = {});
+    void activateTreeIndex(QTreeView* treeView, const QModelIndex& index);
     void installViewNavigation(ViewState& view);
+    void expandDefaultContainers(ViewState& view);
+    void applySourceHighlights(ViewState& view);
+    bool editDecodedValue(ViewState& view, const QModelIndex& index);
+    void requestUnshownSequencePages(ViewState& view);
+    void ensureWorkspaceLayout();
     void handleResolveFinished(const ResolveResponse& response);
     void handleDisplayPageFinished(const DisplayPageResponse& response);
     ViewState* viewById(quint64 id);
     const ViewState* viewById(quint64 id) const;
-    bool saveWithCommit(const QString& caption, const QString& filter,
+    bool saveWithCommit(PathSelectActivity activity, const QString& caption,
+                        const QString& filter,
                         const std::function<bool(QIODevice*, QString*)>& writer);
 
     QLineEdit* m_schemaPath = nullptr;
@@ -128,8 +178,12 @@ private:
     QComboBox* m_libraryCombo = nullptr;
     QComboBox* m_entryCombo = nullptr;
     QComboBox* m_outformCombo = nullptr;
+    QButtonGroup* m_inputViewGroup = nullptr;
     QTableWidget* m_inputTable = nullptr;
     QPlainTextEdit* m_schemaEditor = nullptr;
+    QMainWindow* m_workspaceWindow = nullptr;
+    QDockWidget* m_schemaDock = nullptr;
+    QDockWidget* m_decodeDock = nullptr;
     QTabWidget* m_viewTabs = nullptr;
     QLabel* m_migrationNotice = nullptr;
     QLabel* m_status = nullptr;
@@ -137,14 +191,32 @@ private:
     QPushButton* m_pinViewButton = nullptr;
     QPushButton* m_scanButton = nullptr;
     QTimer* m_compileTimer = nullptr;
+    QTimer* m_hoverHighlightTimer = nullptr;
+    QString m_pendingHoverPath;
+    quint64 m_pendingHoverOffset = 0;
+    quint64 m_pendingHoverLength = 0;
+    bool m_hasPendingHover = false;
+    QString m_hoverHighlightPath;
+    quint64 m_hoverHighlightOffset = 0;
+    quint64 m_hoverHighlightLength = 0;
+    bool m_hasHoverHighlight = false;
+    QString m_selectionHighlightPath;
+    quint64 m_selectionHighlightOffset = 0;
+    quint64 m_selectionHighlightLength = 0;
+    bool m_hasSelectionHighlight = false;
     BrecoDecodeController* m_decodeController = nullptr;
     QString m_suggestedInputPath;
     QString m_sourcePath;
+    std::optional<DecodeSelection> m_preservedDecodeSelection;
+    QHash<QString, QString> m_preservedInputPaths;
     std::shared_ptr<const BrecoProgram> m_program;
     QVector<ViewState> m_views;
     bool m_updatingEditor = false;
     bool m_liveDecoded = false;
     bool m_scanRunning = false;
+    bool m_expandingDefaults = false;
+    bool m_workspaceLayoutApplied = false;
+    bool m_fieldEditingEnabled = false;
     quint64 m_nextViewId = 1;
 };
 

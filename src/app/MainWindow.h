@@ -12,6 +12,7 @@
 
 #include "io/OpenFilePool.h"
 #include "io/ShiftedWindowLoader.h"
+#include "edit/EditQueue.h"
 #include "model/ResultModel.h"
 #include "scan/ScanController.h"
 
@@ -47,11 +48,13 @@ struct EmbeddedImageScanSource;
 struct EmbeddedImageScanSummary;
 class HexViewControlsPanel;
 class MainTabsPanel;
+class EditsPanel;
 class ProtectedSourceOpener;
 class ResultsTablePanel;
 class ScanControlsPanel;
 class TextViewWidget;
 class TextViewPanel;
+class VisualizePanel;
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -134,8 +137,28 @@ private:
                          std::optional<QPair<quint64, quint64>> selectionRange);
     static bool parseHexNavigatorOffset(const QString& text, quint64* offset);
     void refreshDataViewFromNavigator();
+    void refreshVisualization();
+    void applyVisualizationWindow(quint64 start, quint64 length, bool truncated,
+                                  quint64 fileSize);
     void navigateToDecodedSource(const QString& filePath,
                                  quint64 absoluteOffset, quint64 byteLength);
+    quint64 strideAlignedOffset(quint64 offset) const;
+    void queueFileEdit(const QString& filePath, quint64 offset, const QByteArray& newBytes,
+                       QByteArray originalBytes = {});
+    void refreshQueuedEditOverlays();
+    void showEditsTabIfNeeded();
+    QByteArray readFileBytes(const QString& filePath, quint64 offset, int length);
+    bool applyQueuedEditsToPath(const QString& filePath, const QString& destinationPath,
+                                bool writeSidecar, QString* error, bool showProgress);
+    void appendSidecarRecord(const QString& filePath, const QueuedEdit& edit);
+    void reloadBuffersForPath(const QString& filePath);
+    void onQueuedByteEditCommitted(quint64 offset, const QByteArray& newBytes);
+    void onEditsDeleteRequested();
+    void onApplyQueuedEdits();
+    void onSaveQueuedEditsAs();
+    void setCurrentFileEditingEnabled(bool enabled);
+    QString currentPreviewFilePath() const;
+    void syncCurrentFileEditingUi();
     void setDecodedSourceHighlight(quint64 absoluteOffset,
                                    quint64 byteLength);
     void clearDecodedSourceHighlight();
@@ -254,6 +277,10 @@ private:
     DataViewByteAndBitmapPanel* m_dataViewByteAndBitmapPanel = nullptr;
     DataViewImagePanel* m_dataViewImagePanel = nullptr;
     lang::BrecoLangPanel* m_brecoLangPanel = nullptr;
+    VisualizePanel* m_visualizePanel = nullptr;
+    EditsPanel* m_editsPanel = nullptr;
+    EditQueue m_editQueue;
+    QSet<QString> m_unlockedEditPaths;
     CurrentByteInfoPanel* m_currentByteInfoPanel = nullptr;
     BitmapViewPanel* m_bitmapPanel = nullptr;
     TextViewWidget* m_textView = nullptr;

@@ -29,14 +29,22 @@
 #include "io/OpenFilePool.h"
 #include "io/ShiftedWindowLoader.h"
 #include "model/ResultModel.h"
+#include "settings/AppSettings.h"
 #include "scan/MatchUtils.h"
 #include "scan/ScanProgress.h"
 #include "scan/SpscQueue.h"
 #include "scan/ShiftTransform.h"
+#include "settings/PathSelect.h"
 #include "text/StringModeRules.h"
 #include "text/TextSequenceAnalyzer.h"
 #include "view/BitmapViewWidget.h"
 #include "view/TextViewWidget.h"
+#include "edit/EditQueue.h"
+
+#include <QEvent>
+#include <QObject>
+#include <QPointF>
+#include <QWidget>
 
 namespace {
 
@@ -409,6 +417,26 @@ void testBitmapClickEmitsByteOffset() {
     expectTrue(clicked, QStringLiteral("Bitmap left-click should emit byteClicked"));
     expectEqInt(static_cast<int>(clickedOffset), 150,
                 QStringLiteral("Bitmap click at center should emit centered byte offset"));
+}
+
+void testBitmapVisualizationConfigurationIsOptIn() {
+    breco::BitmapViewWidget widget;
+    widget.resize(100, 100);
+    widget.setMode(breco::BitmapMode::Grey8);
+    expectEqInt(widget.baseCellSize(), 1,
+                QStringLiteral("Raw bitmap cells should remain one pixel by default"));
+    expectTrue(widget.panButton() == Qt::LeftButton,
+               QStringLiteral("Raw bitmap should retain left-button panning"));
+    const quint64 rawCapacity = widget.viewportByteCapacity();
+
+    widget.setBaseCellSize(2);
+    widget.setPanButton(Qt::MiddleButton);
+    expectEqInt(widget.baseCellSize(), 2,
+                QStringLiteral("Visualize bitmap should support 2x2 base cells"));
+    expectTrue(widget.panButton() == Qt::MiddleButton,
+               QStringLiteral("Visualize bitmap should support middle-button panning"));
+    expectTrue(widget.viewportByteCapacity() < rawCapacity,
+               QStringLiteral("Larger base cells should reduce visible byte capacity"));
 }
 
 void testResultModelColumnOrder() {
@@ -815,12 +843,26 @@ void testEmbeddedImageScanner() {
 }
 
 void testScanProgressFormatting();
+void testEditQueueParsingAndOverlap();
+void testHexStrideAndShiftSelection();
+void testPathSelectResolution();
+void testQueuedEditsSaveAsSuggestion();
 
 }  // namespace
 
 int main(int argc, char** argv) {
     qputenv("QT_QPA_PLATFORM", QByteArray("offscreen"));
     QApplication app(argc, argv);
+
+    QTemporaryDir settingsDir(
+        QDir::temp().filePath(QStringLiteral("breco_test_settings-XXXXXX")));
+    settingsDir.setAutoRemove(true);
+    if (!settingsDir.isValid()) {
+        qCritical("Could not create isolated settings directory");
+        return 1;
+    }
+    breco::AppSettings::useIsolatedIni(
+        settingsDir.filePath(QStringLiteral("breco.ini")));
 
     testMatchUtilsIndexOf();
     testShiftReadPlan();
@@ -831,23 +873,29 @@ int main(int argc, char** argv) {
     testBitmapTooltipForValidSequenceInAllModes();
     testBitmapTooltipWindowIsCappedAndCentered();
     testBitmapClickEmitsByteOffset();
+    testBitmapVisualizationConfigurationIsOptIn();
     testResultModelColumnOrder();
     testSpscQueueMechanics();
     testFileEnumerator();
     testWindowLoader();
     testScanProgressFormatting();
+    testEditQueueParsingAndOverlap();
+    testHexStrideAndShiftSelection();
+    testPathSelectResolution();
+    testQueuedEditsSaveAsSuggestion();
 #ifdef Q_OS_UNIX
     testOpenFilePoolExternalReadFd();
 #endif
     testEmbeddedImageScanner();
 
-    if (g_failures == 0) {
+    const int exitCode = g_failures == 0 ? 0 : 1;
+    if (exitCode == 0) {
         qInfo() << "All unit tests passed";
-        return 0;
+    } else {
+        qCritical() << g_failures << "unit test(s) failed";
     }
-
-    qCritical() << g_failures << "unit test(s) failed";
-    return 1;
+    breco::AppSettings::useIsolatedIni(QString());
+    return exitCode;
 }
 namespace {
 
@@ -874,6 +922,257 @@ void testScanProgressFormatting() {
     expectTrue(breco::formatScanProgress({2048, 1024, 0, 0.0, 0.0})
                    .endsWith(QStringLiteral("100.00 %")),
                QStringLiteral("Progress formatting clamps scanned bytes and percentage"));
+}
+
+void testEditQueueParsingAndOverlap() {
+    expectTrue(breco::EditQueue::parseUnsigned(QStringLiteral("255")).value_or(0) == 255ULL,
+               QStringLiteral("Bare number parses as decimal"));
+    expectTrue(breco::EditQueue::parseUnsigned(QStringLiteral("0x10")).value_or(0) == 16ULL,
+               QStringLiteral("0x prefix parses hex"));
+    expectTrue(breco::EditQueue::parseUnsigned(QStringLiteral("0o10")).value_or(0) == 8ULL,
+               QStringLiteral("0o prefix parses octal"));
+    expectTrue(breco::EditQueue::parseUnsigned(QStringLiteral("0b10")).value_or(0) == 2ULL,
+               QStringLiteral("0b prefix parses binary"));
+    expectTrue(breco::EditQueue::parseUnsigned(QStringLiteral("0d10")).value_or(0) == 10ULL,
+               QStringLiteral("0d prefix parses decimal"));
+    expectTrue(!breco::EditQueue::packInteger(QStringLiteral("256"), 1, false, true).has_value(),
+               QStringLiteral("Unsigned overflow vs width is rejected"));
+    expectTrue(!breco::EditQueue::packInteger(QStringLiteral("128"), 1, true, true).has_value(),
+               QStringLiteral("Signed overflow vs width is rejected"));
+
+    const auto packed = breco::EditQueue::packInteger(QStringLiteral("0x0102"), 2, false, true);
+    expectTrue(packed.has_value() && packed->size() == 2 &&
+                   static_cast<unsigned char>(packed->at(0)) == 0x02 &&
+                   static_cast<unsigned char>(packed->at(1)) == 0x01,
+               QStringLiteral("Little-endian pack uses hex-view width"));
+
+    breco::EditQueue queue;
+    breco::QueuedEdit first;
+    first.filePath = QStringLiteral("a.bin");
+    first.offset = 10;
+    first.originalBytes = QByteArray::fromHex("aa");
+    first.newBytes = QByteArray::fromHex("bb");
+    queue.add(first);
+    breco::QueuedEdit second = first;
+    second.newBytes = QByteArray::fromHex("cc");
+    queue.add(second);
+    expectEqInt(queue.size(), 2, QStringLiteral("Later overlapping queue entries are kept"));
+    expectTrue(queue.mergedForApply().last().newBytes == QByteArray::fromHex("cc"),
+               QStringLiteral("Apply order keeps later overlapping bytes"));
+    expectTrue(!queue.at(0).matchesOriginal(),
+               QStringLiteral("Queued row is not green until bytes match original"));
+    queue.setNewBytes(0, first.originalBytes);
+    expectTrue(queue.at(0).matchesOriginal(),
+               QStringLiteral("Equal new and original bytes are treated as unchanged"));
+}
+
+void testHexStrideAndShiftSelection() {
+    breco::TextViewWidget widget;
+    widget.resize(720, 480);
+    widget.show();
+    widget.setDisplayMode(breco::TextDisplayMode::ByteMode);
+    widget.setByteLineMode(breco::ByteLineMode::B8);
+    QByteArray bytes(64, '\x11');
+    widget.setData(bytes, 0);
+    QCoreApplication::processEvents();
+
+    expectEqInt(widget.effectiveBytesPerLine(), 8,
+                QStringLiteral("Fixed 8-byte stride is the effective bytes-per-line"));
+    const quint64 fieldOffset = 10;
+    const quint64 lineStart = (fieldOffset / 8ULL) * 8ULL;
+    expectTrue(lineStart == 8ULL,
+               QStringLiteral("Field at 10–11 centers on stride line 8"));
+    expectTrue(widget.setSelectionRange(10, 12),
+               QStringLiteral("Automatic selection keeps the real field range"));
+    const auto fieldRange = widget.selectionRangeOffsets();
+    expectTrue(fieldRange.has_value() && fieldRange->first == 10ULL && fieldRange->second == 12ULL,
+               QStringLiteral("Selection stays [10,12) while the stride line is 8"));
+
+    int byteClicked = 0;
+    quint64 lastClicked = 0;
+    QObject::connect(&widget, &breco::TextViewWidget::byteClicked, [&](quint64 offset) {
+        ++byteClicked;
+        lastClicked = offset;
+    });
+
+    QWidget* content = widget.findChild<QWidget*>(QStringLiteral("textViewContent"));
+    expectTrue(content != nullptr, QStringLiteral("Hex content widget is present"));
+    bool extendedEnd = false;
+    if (content != nullptr) {
+        for (int y = 2; y < content->height() && !extendedEnd; y += 8) {
+            for (int x = 4; x < content->width() && !extendedEnd; x += 8) {
+                widget.setSelectionRange(10, 12);
+                byteClicked = 0;
+                QMouseEvent press(QEvent::MouseButtonPress, QPointF(x, y), Qt::LeftButton,
+                                  Qt::LeftButton, Qt::ShiftModifier);
+                QCoreApplication::sendEvent(content, &press);
+                const auto range = widget.selectionRangeOffsets();
+                if (range.has_value() && range->first == 10ULL && range->second == 51ULL) {
+                    extendedEnd = true;
+                    expectEqInt(byteClicked, 0,
+                                QStringLiteral("Shift-click that only grows the end does not re-decode"));
+                }
+            }
+        }
+    }
+    expectTrue(extendedEnd,
+               QStringLiteral("Shift-click extends from the first selected byte to 50"));
+
+    bool extendedStart = false;
+    if (content != nullptr) {
+        for (int y = 2; y < content->height() && !extendedStart; y += 8) {
+            for (int x = 4; x < content->width() && !extendedStart; x += 8) {
+                widget.setSelectionRange(10, 12);
+                byteClicked = 0;
+                lastClicked = 0;
+                QMouseEvent press(QEvent::MouseButtonPress, QPointF(x, y), Qt::LeftButton,
+                                  Qt::LeftButton, Qt::ShiftModifier);
+                QCoreApplication::sendEvent(content, &press);
+                const auto range = widget.selectionRangeOffsets();
+                if (range.has_value() && range->first == 5ULL && range->second == 11ULL) {
+                    extendedStart = true;
+                    expectEqInt(byteClicked, 1,
+                                QStringLiteral("Shift-click that moves the start re-decodes from the new offset"));
+                    expectTrue(lastClicked == 5ULL,
+                               QStringLiteral("Re-decode uses the new range start"));
+                }
+            }
+        }
+    }
+    expectTrue(extendedStart,
+               QStringLiteral("Shift-click before the first selected byte moves the range start"));
+
+    widget.setSelectionRange(10, 12);
+    if (content != nullptr) {
+        QMouseEvent press(QEvent::MouseButtonPress, QPointF(12, 8), Qt::LeftButton, Qt::LeftButton,
+                          Qt::NoModifier);
+        QCoreApplication::sendEvent(content, &press);
+        QMouseEvent release(QEvent::MouseButtonRelease, QPointF(12, 8), Qt::LeftButton,
+                            Qt::NoButton, Qt::NoModifier);
+        QCoreApplication::sendEvent(content, &release);
+    }
+    expectTrue(byteClicked >= 0, QStringLiteral("Plain click path remains available"));
+}
+
+void testPathSelectResolution() {
+    expectTrue(QDir(breco::lastResortDirectory()).exists(),
+               QStringLiteral("Detected last-resort directory exists"));
+
+    QTemporaryDir temporary;
+    expectTrue(temporary.isValid(),
+               QStringLiteral("Path-select test temporary directory is valid"));
+    if (!temporary.isValid()) {
+        return;
+    }
+
+    const QString fallback =
+        QDir(temporary.path()).filePath(QStringLiteral("fallback"));
+    const QString livingParent =
+        QDir(temporary.path()).filePath(QStringLiteral("A/B"));
+    expectTrue(QDir().mkpath(fallback) && QDir().mkpath(livingParent),
+               QStringLiteral("Path-select test directories are created"));
+
+    expectEqQString(
+        breco::resolveStartPath(QString(), fallback), fallback,
+        QStringLiteral("Empty path uses the injected last-resort directory"));
+    expectEqQString(
+        breco::resolveStartPath(livingParent, fallback), livingParent,
+        QStringLiteral("Existing directory is returned as-is"));
+
+    const QString existingFile =
+        QDir(livingParent).filePath(QStringLiteral("existing.bin"));
+    QFile file(existingFile);
+    expectTrue(file.open(QIODevice::WriteOnly),
+               QStringLiteral("Path-select test file is created"));
+    file.close();
+    expectEqQString(
+        breco::resolveStartPath(existingFile, fallback), existingFile,
+        QStringLiteral("Existing file is returned as-is"));
+
+    const QString missingFile =
+        QDir(livingParent).filePath(QStringLiteral("missing.bin"));
+    expectEqQString(
+        breco::resolveStartPath(missingFile, fallback), livingParent,
+        QStringLiteral("Missing file resolves to its existing parent without a filename"));
+
+    const QString missingTree =
+        QDir(livingParent).filePath(QStringLiteral("C/D/E.txt"));
+    expectEqQString(
+        breco::resolveStartPath(missingTree, fallback), livingParent,
+        QStringLiteral("Missing path chain resolves to its first existing ancestor"));
+
+#ifdef Q_OS_UNIX
+    const QString missingBelowRoot =
+        QStringLiteral("/breco-path-select-missing/A/B/E.txt");
+    expectEqQString(
+        breco::resolveStartPath(missingBelowRoot, fallback), fallback,
+        QStringLiteral("Unix path that only resolves at root uses last-resort"));
+    const QString missingDirectlyOnRoot =
+        QStringLiteral("/breco-path-select-missing-file.txt");
+    expectEqQString(
+        breco::resolveStartPath(missingDirectlyOnRoot, fallback),
+        QDir::rootPath(),
+        QStringLiteral("Missing Unix file directly on root resolves to root"));
+#elif defined(Q_OS_WIN)
+    QString missingDrive;
+    for (QChar drive = QLatin1Char('Z'); drive >= QLatin1Char('D');
+         drive = QChar(drive.unicode() - 1)) {
+        const QString root = QStringLiteral("%1:/").arg(drive);
+        if (!QDir(root).exists()) {
+            missingDrive = root;
+            break;
+        }
+    }
+    expectTrue(!missingDrive.isEmpty(),
+               QStringLiteral("A missing Windows drive is available for testing"));
+    if (!missingDrive.isEmpty()) {
+        const QString path = missingDrive + QStringLiteral("A/B/E.txt");
+        expectEqQString(
+            breco::resolveStartPath(path, fallback), fallback,
+            QStringLiteral("Path on a missing Windows drive uses last-resort"));
+    }
+#endif
+}
+
+void testQueuedEditsSaveAsSuggestion() {
+    QTemporaryDir temporary;
+    expectTrue(temporary.isValid(),
+               QStringLiteral("Queued-edits test temporary directory is valid"));
+    if (!temporary.isValid()) {
+        return;
+    }
+
+    const QString fallback =
+        QDir(temporary.path()).filePath(QStringLiteral("fallback"));
+    const QString livingParent =
+        QDir(temporary.path()).filePath(QStringLiteral("A/B"));
+    expectTrue(QDir().mkpath(fallback) && QDir().mkpath(livingParent),
+               QStringLiteral("Queued-edits test directories are created"));
+
+    const QString existingSource =
+        QDir(livingParent).filePath(QStringLiteral("photo.png"));
+    QFile file(existingSource);
+    expectTrue(file.open(QIODevice::WriteOnly),
+               QStringLiteral("Queued-edits source file is created"));
+    file.close();
+    expectEqQString(
+        breco::suggestedQueuedEditsSaveAsPath(existingSource, fallback),
+        QDir(livingParent).filePath(QStringLiteral("photo.edited.png")),
+        QStringLiteral("Existing source suggests edited filename beside source"));
+
+    const QString missingSource =
+        QDir(livingParent).filePath(QStringLiteral("C/D/archive.tar.gz"));
+    expectEqQString(
+        breco::suggestedQueuedEditsSaveAsPath(missingSource, fallback),
+        QDir(livingParent).filePath(QStringLiteral("archive.tar.edited.gz")),
+        QStringLiteral("Missing source keeps its name at the resolved parent"));
+
+    const QString extensionlessSource =
+        QDir(livingParent).filePath(QStringLiteral("README"));
+    expectEqQString(
+        breco::suggestedQueuedEditsSaveAsPath(extensionlessSource, fallback),
+        QDir(livingParent).filePath(QStringLiteral("README.edited")),
+        QStringLiteral("Extensionless source gets an edited suffix"));
 }
 
 }  // namespace

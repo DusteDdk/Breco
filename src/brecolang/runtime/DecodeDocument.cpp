@@ -190,6 +190,7 @@ DisplayPageResult DecodeDocument::requestDisplayPage(
     materialize.root = requestedRoot;
     materialize.documentGeneration = m_generation;
     materialize.sequenceWindows = windows;
+    materialize.defaultSequenceItems = request.defaultSequenceItems;
     materialize.resolvedShape = pageShape;
     materialize.maxMaterializedNodes = request.maxNewNodes;
     materialize.workBudget = request.budget;
