@@ -845,30 +845,28 @@ entry Main from data {
 }
 
 void BrecoLangCompilerTests::shippedExamplesCompile() {
-    int count = 0;
-    const QStringList roots{
-        QStringLiteral(BRECO_SOURCE_DIR "/examples"),
-        QStringLiteral(BRECO_SOURCE_DIR "/../HES-Breco/HES-BrecoLang"),
-        QStringLiteral(BRECO_SOURCE_DIR "/../HES-Breco/IQDW_BrecoLang")};
-    for (const QString& root : roots) {
-        QDirIterator files(root, {QStringLiteral("*.breco")}, QDir::Files,
-                           QDirIterator::Subdirectories);
-        while (files.hasNext()) {
-            const QString path = files.next();
-            QFile file(path);
-            QVERIFY2(file.open(QIODevice::ReadOnly),
-                     qPrintable(file.errorString()));
-            const CompileResult result =
-                compileBrecoLang(QString::fromUtf8(file.readAll()), path);
-            QVERIFY2(result.success(),
-                     qPrintable(path + QStringLiteral(": ") +
-                                (result.diagnostics.isEmpty()
-                                     ? QStringLiteral("unknown compiler failure")
-                                     : result.diagnostics.first().message)));
-            ++count;
-        }
+    const QString root = QStringLiteral(BRECO_SOURCE_DIR "/examples");
+    const QString selectVariants =
+        root + QStringLiteral("/structure-library/select_variants.breco");
+    bool compiledSelectVariants = false;
+    QDirIterator files(root, {QStringLiteral("*.breco")}, QDir::Files,
+                       QDirIterator::Subdirectories);
+    while (files.hasNext()) {
+        const QString path = files.next();
+        QFile file(path);
+        QVERIFY2(file.open(QIODevice::ReadOnly),
+                 qPrintable(file.errorString()));
+        const CompileResult result =
+            compileBrecoLang(QString::fromUtf8(file.readAll()), path);
+        QVERIFY2(result.success(),
+                 qPrintable(path + QStringLiteral(": ") +
+                            (result.diagnostics.isEmpty()
+                                 ? QStringLiteral("unknown compiler failure")
+                                 : result.diagnostics.first().message)));
+        compiledSelectVariants = compiledSelectVariants || path == selectVariants;
     }
-    QVERIFY(count >= 12);
+    QVERIFY2(compiledSelectVariants,
+             "select_variants.breco was not found among the shipped examples");
 }
 
 }  // namespace

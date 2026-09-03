@@ -1003,8 +1003,10 @@ void testHexStrideAndShiftSelection() {
             for (int x = 4; x < content->width() && !extendedEnd; x += 8) {
                 widget.setSelectionRange(10, 12);
                 byteClicked = 0;
-                QMouseEvent press(QEvent::MouseButtonPress, QPointF(x, y), Qt::LeftButton,
-                                  Qt::LeftButton, Qt::ShiftModifier);
+                const QPointF localPos(x, y);
+                const QPointF globalPos = content->mapToGlobal(QPoint(x, y));
+                QMouseEvent press(QEvent::MouseButtonPress, localPos, globalPos,
+                                  Qt::LeftButton, Qt::LeftButton, Qt::ShiftModifier);
                 QCoreApplication::sendEvent(content, &press);
                 const auto range = widget.selectionRangeOffsets();
                 if (range.has_value() && range->first == 10ULL && range->second == 51ULL) {
@@ -1025,8 +1027,10 @@ void testHexStrideAndShiftSelection() {
                 widget.setSelectionRange(10, 12);
                 byteClicked = 0;
                 lastClicked = 0;
-                QMouseEvent press(QEvent::MouseButtonPress, QPointF(x, y), Qt::LeftButton,
-                                  Qt::LeftButton, Qt::ShiftModifier);
+                const QPointF localPos(x, y);
+                const QPointF globalPos = content->mapToGlobal(QPoint(x, y));
+                QMouseEvent press(QEvent::MouseButtonPress, localPos, globalPos,
+                                  Qt::LeftButton, Qt::LeftButton, Qt::ShiftModifier);
                 QCoreApplication::sendEvent(content, &press);
                 const auto range = widget.selectionRangeOffsets();
                 if (range.has_value() && range->first == 5ULL && range->second == 11ULL) {
@@ -1044,11 +1048,13 @@ void testHexStrideAndShiftSelection() {
 
     widget.setSelectionRange(10, 12);
     if (content != nullptr) {
-        QMouseEvent press(QEvent::MouseButtonPress, QPointF(12, 8), Qt::LeftButton, Qt::LeftButton,
-                          Qt::NoModifier);
+        const QPointF localPos(12, 8);
+        const QPointF globalPos = content->mapToGlobal(QPoint(12, 8));
+        QMouseEvent press(QEvent::MouseButtonPress, localPos, globalPos,
+                          Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
         QCoreApplication::sendEvent(content, &press);
-        QMouseEvent release(QEvent::MouseButtonRelease, QPointF(12, 8), Qt::LeftButton,
-                            Qt::NoButton, Qt::NoModifier);
+        QMouseEvent release(QEvent::MouseButtonRelease, localPos, globalPos,
+                            Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
         QCoreApplication::sendEvent(content, &release);
     }
     expectTrue(byteClicked >= 0, QStringLiteral("Plain click path remains available"));

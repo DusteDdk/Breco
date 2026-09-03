@@ -211,6 +211,7 @@ reject values outside their declared ranges rather than truncating them.
 - `examples/elf64.breco` follows section-table offsets with random access.
 - `examples/portable_executable.breco` follows a relocated header.
 - `examples/structure-library/` demonstrates scanning, recovery, multiple
-  inputs, bitfields, and text/binary outforms.
+  inputs, bitfields, boxed and inline selects, aggregate fields, and text/binary
+  outforms.
 
 All shipped examples are compiled by the test suite.

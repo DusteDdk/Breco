@@ -1,0 +1,52 @@
+// Default values and fallbacks, overwritten when a mode record contains the
+// same computed field.
+record VisCfg {
+    // Zero reads the entire file from offset zero when there is no selection.
+    computed NumBytesOnNoSelection: u32 = 0
+    // Valid styles: dot, line, area, skin, and Cart2D-only bar.
+    // Skin draws one vertex as a dot, two as a line, then connects every new
+    // vertex to the previous two to form a triangle strip.
+    computed Style: string = "line"
+}
+
+record Cart2D {
+    // Optional. Without Chart no ticks are drawn. A positive tickDistance
+    // draws 1x4 px ticks on both axes at this data-unit interval.
+    Chart: {
+        computed tickDistance: u32 = 8
+    }
+    // x is optional in user programs; when absent it increases once per y.
+    Points: {
+        x: u8
+        y: u8
+    }
+    // An optional Color record may contain r, g, b, and a fields.
+}
+
+record Cart3D {
+    computed Style: string = "dot"
+    Points: {
+        x: u8	
+        y: u8
+        z: u8
+    }
+    // An optional Chart record supplies tickDistance. An optional Color
+    // record may contain r, g, b, and a fields.
+}
+
+record Bitmap {
+    // Optional. Without Color the bitmap is 1 bpp. Declaring r, g, b, and a
+    // progressively selects 8, 16, 24, and 32 bpp.
+    Color: {
+        r: u8
+        g: u8
+        b: u8
+//        a: u8
+    }
+    // Optional. Without Plot, pixels are packed sequentially using the image
+    // rectangle's row/column packing. With Plot, each record is placed at x,y.
+/*    Plot: {
+        x: u8
+        y: u8
+    }*/
+}
